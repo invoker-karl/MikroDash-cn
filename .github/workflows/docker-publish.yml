@@ -11,7 +11,7 @@ on:
 env:
   REGISTRY: ghcr.io
   # Must be lowercase — Docker registry names are case-sensitive
-  IMAGE_NAME: secops-7/mikrodash
+  IMAGE_NAME: invoker-karl/mikrodash-cn
 
 jobs:
   build-and-push:
