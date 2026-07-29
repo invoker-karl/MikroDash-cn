@@ -1,0 +1,60 @@
+name: Check upstream updates
+
+on:
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream into a review branch
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/SecOps-7/MikroDash.git
+          git fetch upstream main
+
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          branch="automation/upstream-sync"
+          git switch --force-create "$branch" origin/main
+          git merge --no-edit upstream/main
+          git push --force-with-lease origin "$branch"
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update synchronization PR
+        if: steps.merge.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ steps.merge.outputs.branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing="$(gh pr list --base main --head "$HEAD_BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "Sync updates from SecOps-7/MikroDash" --body "Automated weekly merge of upstream/main into the Chinese fork. Review tests and translation conflicts before merging."
+          else
+            gh pr create --base main --head "$HEAD_BRANCH" --title "Sync updates from SecOps-7/MikroDash" --body "Automated weekly merge of upstream/main into the Chinese fork. Review tests and translation conflicts before merging."
+          fi
