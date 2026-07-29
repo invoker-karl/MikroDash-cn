@@ -830,15 +830,17 @@ socket.on('conn:update',function(data){
   if(!_connRafId) _connRafId=requestAnimationFrame(_flushConnUpdate);
 });
 
-// ── Top Talkers ────────────────────────────────────────────────────────────
-socket.on('talkers:update',function(data){
-  var devices=data.devices||[];
+// ── Highest-bandwidth devices (derived from connection byte deltas) ───────
+socket.on('bandwidth:top',function(data){
+  var devices=(data.devices||[]).slice(0,5);
   if(!devices.length){if(lastTalkers)return;talkersTable.innerHTML='<tr><td colspan="4" class="empty-state">No devices</td></tr>';return;}
   lastTalkers=devices;
   talkersTable.innerHTML=devices.map(function(d){
-    return'<tr><td>'+esc(d.name||'\u2014')+'</td><td style="color:var(--text-muted)">'+esc(d.mac||'\u2014')+'</td>'+
-      '<td class="text-end" style="color:var(--accent-rx)">'+fmtMbps(d.rx_mbps)+'</td>'+
-      '<td class="text-end" style="color:var(--accent-tx)">'+fmtMbps(d.tx_mbps)+'</td></tr>';
+    var label=d.name||d.srcIp||'\u2014';
+    var ip=d.srcIp&&d.srcIp!==label?'<div style="font-size:.65rem;color:var(--text-muted);font-family:var(--font-mono)">'+esc(d.srcIp)+'</div>':'';
+    return'<tr><td>'+esc(label)+ip+'</td><td style="color:var(--text-muted);font-family:var(--font-mono);font-size:.7rem">'+esc(d.mac||'\u2014')+'</td>'+
+      '<td class="text-end" style="color:var(--accent-rx)">'+fmtMbps(d.rxMbps)+'</td>'+
+      '<td class="text-end" style="color:var(--accent-tx)">'+fmtMbps(d.txMbps)+'</td></tr>';
   }).join('');
 });
 
@@ -1972,7 +1974,7 @@ var staleConfig=[
   // when the update is for the currently selected interface (currentIf).
   {cardId:'systemCard',   event:'system:update',   threshold:15000},
   {cardId:'connCard',     event:'conn:update',      threshold:20000},
-  {cardId:'talkersCard',  event:'talkers:update',  threshold:20000},
+  {cardId:'talkersCard',  event:'bandwidth:top',   threshold:20000},
   {cardId:'wirelessCard', event:'wireless:update', threshold:25000},
   {cardId:'vpnCard',      event:'vpn:update',       threshold:90000},  // streamed — heartbeat every 60s
   {cardId:'netwatchCard', event:'netwatch:update',  threshold:90000},  // streamed — /listen
@@ -3696,7 +3698,6 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     // Polled — user-configurable interval
     { key:'pollSystem',    label:'System / Gauges',  min:1000,  max:30000,  step:1000,  unit:'ms' },
     { key:'pollConns',     label:'Connections',      min:1000,  max:30000,  step:1000,  unit:'ms' },
-    { key:'pollTalkers',   label:'Top Talkers',      min:1000,  max:30000,  step:1000,  unit:'ms' },
     { key:'pollIfstatus',  label:'Interface Rates',  min:1000,  max:30000,  step:1000,  unit:'ms' },
     { key:'pollBandwidth', label:'Bandwidth',        min:1000,  max:30000,  step:1000,  unit:'ms' },
     { key:'pollVpn',       label:'VPN / WireGuard', min:1000,  max:30000,  step:1000,  unit:'ms' },
@@ -3708,11 +3709,11 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   ];
 
   var POLL_PROFILES = {
-    fast:     { pollSystem:1000,  pollConns:1000,  pollTalkers:1000,  pollIfstatus:1000,  pollBandwidth:1000,  pollVpn:1000,  pollFirewall:1000,  pollPing:1000,  pollWireless:10000,  pollIfaces:10000,  pollDhcp:10000  },
-    faster:   { pollSystem:5000,  pollConns:5000,  pollTalkers:5000,  pollIfstatus:5000,  pollBandwidth:5000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:60000,  pollIfaces:60000,  pollDhcp:60000  },
-    standard: { pollSystem:2000,  pollConns:3000,  pollTalkers:3000,  pollIfstatus:1000,  pollBandwidth:3000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:30000,  pollIfaces:60000,  pollDhcp:290000 },
-    slow:     { pollSystem:10000, pollConns:10000, pollTalkers:10000, pollIfstatus:10000, pollBandwidth:10000, pollVpn:10000, pollFirewall:10000, pollPing:10000, pollWireless:300000, pollIfaces:300000, pollDhcp:300000 },
-    slower:   { pollSystem:30000, pollConns:30000, pollTalkers:30000, pollIfstatus:30000, pollBandwidth:30000, pollVpn:30000, pollFirewall:30000, pollPing:30000, pollWireless:600000, pollIfaces:600000, pollDhcp:600000 },
+    fast:     { pollSystem:1000,  pollConns:1000,  pollIfstatus:1000,  pollBandwidth:1000,  pollVpn:1000,  pollFirewall:1000,  pollPing:1000,  pollWireless:10000,  pollIfaces:10000,  pollDhcp:10000  },
+    faster:   { pollSystem:5000,  pollConns:5000,  pollIfstatus:5000,  pollBandwidth:5000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:60000,  pollIfaces:60000,  pollDhcp:60000  },
+    standard: { pollSystem:2000,  pollConns:3000,  pollIfstatus:1000,  pollBandwidth:3000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:30000,  pollIfaces:60000,  pollDhcp:290000 },
+    slow:     { pollSystem:10000, pollConns:10000, pollIfstatus:10000, pollBandwidth:10000, pollVpn:10000, pollFirewall:10000, pollPing:10000, pollWireless:300000, pollIfaces:300000, pollDhcp:300000 },
+    slower:   { pollSystem:30000, pollConns:30000, pollIfstatus:30000, pollBandwidth:30000, pollVpn:30000, pollFirewall:30000, pollPing:30000, pollWireless:600000, pollIfaces:600000, pollDhcp:600000 },
   };
   var POLL_PROFILE_KEY = 'mkd_poll_profile';
 
@@ -3999,7 +4000,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   function populate(data) {
     _loaded = data;
     var fields = ['routerHost','routerPort','routerUser','defaultIf','pingTarget',
-                  'topN','topTalkersN','firewallTopN','vpnDashTopN','maxConns','historyMinutes',
+                  'topN','firewallTopN','vpnDashTopN','maxConns','historyMinutes',
                   'dbRetentionDays','dbAlertRetentionDays'];
     fields.forEach(function(f) {
       var el = $('s_'+f); if (el) el.value = data[f] !== undefined ? data[f] : '';
@@ -4026,7 +4027,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     var rosDebugEl = $('s_rosDebug'); if (rosDebugEl) rosDebugEl.checked = !!data.rosDebug;
     var tzEl = $('s_displayTimezone'); if (tzEl) tzEl.value = data.displayTimezone || '';
     // Collection method toggles (true = stream, false = poll)
-    ['streamSystem','streamPing','streamConns','streamTalkers','streamIfrates'].forEach(function(f) {
+    ['streamSystem','streamPing','streamConns','streamIfrates'].forEach(function(f) {
       var el = $('s_'+f); if (el) el.checked = data[f] !== false;
     });
     // Alert thresholds
@@ -4117,7 +4118,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       var el = $('s_'+f); if (el) out[f] = el.value.trim();
     });
     var portEl = $('s_routerPort'); if (portEl) out.routerPort = parseInt(portEl.value, 10);
-    ['topN','topTalkersN','firewallTopN','vpnDashTopN','maxConns','historyMinutes',
+    ['topN','firewallTopN','vpnDashTopN','maxConns','historyMinutes',
      'dbRetentionDays','dbAlertRetentionDays'].forEach(function(f) {
       var el = $('s_'+f); if (el) out[f] = parseInt(el.value, 10);
     });
@@ -4138,7 +4139,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     var rosDebugEl = $('s_rosDebug'); if (rosDebugEl) out.rosDebug = rosDebugEl.checked;
     var tzEl2 = $('s_displayTimezone'); if (tzEl2) out.displayTimezone = tzEl2.value;
     // Collection method toggles
-    ['streamSystem','streamPing','streamConns','streamTalkers','streamIfrates'].forEach(function(f) {
+    ['streamSystem','streamPing','streamConns','streamIfrates'].forEach(function(f) {
       var el = $('s_'+f); if (el) out[f] = el.checked;
     });
     // Alert thresholds

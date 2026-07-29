@@ -51,7 +51,6 @@ const DhcpLeasesCollector  = require('./collectors/dhcpLeases');
 const DhcpNetworksCollector= require('./collectors/dhcpNetworks');
 const ArpCollector         = require('./collectors/arp');
 const ConnectionsCollector = require('./collectors/connections');
-const TopTalkersCollector  = require('./collectors/talkers');
 const LogsCollector        = require('./collectors/logs');
 const SystemCollector      = require('./collectors/system');
 const WirelessCollector    = require('./collectors/wireless');
@@ -304,7 +303,6 @@ function _freshState() {
     lastNetworksTs:0,
     lastLeasesTs:0,
     lastArpTs:0,
-    lastTalkersTs:0,  lastTalkersErr:null,
     lastLogsTs:0,     lastLogsErr:null,
     lastSystemTs:0,   lastSystemErr:null,
     lastWirelessTs:0, lastWirelessErr:null,
@@ -377,7 +375,6 @@ function buildSession(routerCfg, routerIo) {
   const _histRows   = db.queryTrafficSamples(routerCfg.id, DEFAULT_IF, _histFromTs, Date.now(), traffic.maxPoints);
   if (_histRows.length) traffic.preloadHistory(DEFAULT_IF, _histRows);
   const conns        = new ConnectionsCollector ({ros, io:routerIo, pollMs:_cfg.pollConns,    topN:_cfg.topN, maxConns:_cfg.maxConns, dhcpNetworks, dhcpLeases, arp, state, connTableCache, geoOrgCache, streamMode:_cfg.streamConns});
-  const talkers      = new TopTalkersCollector  ({ros, io:routerIo, pollMs:_cfg.pollTalkers,  state, topN:_cfg.topTalkersN, streamMode:_cfg.streamTalkers});
   const logs         = new LogsCollector        ({ros, io:routerIo, state});
   const system       = new SystemCollector      ({ros, io:routerIo, pollMs:_cfg.pollSystem,   state, streamMode:_cfg.streamSystem});
   const wireless     = new WirelessCollector    ({ros, io:routerIo, pollMs:_cfg.pollWireless, state, dhcpLeases, arp});
@@ -389,10 +386,10 @@ function buildSession(routerCfg, routerIo) {
   const routing      = new RoutingCollector     ({ros, io:routerIo, pollMs:_cfg.pollRouting,  state});
   const netwatch     = new NetwatchCollector    ({ros, io:routerIo,                           state});
 
-  const allCollectors = [traffic, dhcpLeases, dhcpNetworks, arp, conns, talkers, logs, system, wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch];
+  const allCollectors = [traffic, dhcpLeases, dhcpNetworks, arp, conns, logs, system, wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch];
 
   return { ros, state, connTableCache, DEFAULT_IF, HISTORY_MINUTES,
-           dhcpLeases, dhcpNetworks, arp, traffic, conns, talkers, logs, system,
+           dhcpLeases, dhcpNetworks, arp, traffic, conns, logs, system,
            wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, allCollectors,
            routerId: routerCfg.id, cachedInterfaces: null };
 }
@@ -587,7 +584,6 @@ async function startCollectors(session, entry) {
     session.traffic.start();
     await _delay(300);
     session.conns.start();   // starts fallback poll only — no stream at start()
-    session.talkers.start();
     await _delay(300);
     session.logs.start();
     await _delay(300);
@@ -1109,10 +1105,10 @@ app.post('/api/settings', _requireAdmin, (req, res) => {
     }
     const updates = {};
     const intFields = {
-      routerPort:[1,65535], pollConns:[1000,60000], pollTalkers:[1000,60000], pollSystem:[1000,60000],
+      routerPort:[1,65535], pollConns:[1000,60000], pollSystem:[1000,60000],
       pollWireless:[10000,600000], pollVpn:[1000,30000],  pollFirewall:[1000,30000],
       pollIfstatus:[1000,60000], pollIfaces:[10000,600000], pollPing:[1000,30000], pollArp:[5000,300000],
-      pollBandwidth:[1000,60000], pollDhcp:[10000,600000], pollRouting:[500,300000], topN:[1,50], topTalkersN:[1,20],
+      pollBandwidth:[1000,60000], pollDhcp:[10000,600000], pollRouting:[500,300000], topN:[1,50],
       firewallTopN:[1,50], vpnDashTopN:[1,50], maxConns:[1000,100000], historyMinutes:[5,120],
       alertCpuThreshold:[1,100], alertPingLoss:[1,100], notifCooldownSec:[10,3600],
       smtpPort:[1,65535],
@@ -1129,7 +1125,7 @@ app.post('/api/settings', _requireAdmin, (req, res) => {
     const boolFields = ['pageWireless','pageInterfaces','pageDhcp','pageVpn',
                         'pageConnections','pageFirewall','pageLogs','pageBandwidth','pageRouting',
                         'pingEnabled','rosDebug',
-                        'streamSystem','streamPing','streamConns','streamTalkers','streamIfrates',
+                        'streamSystem','streamPing','streamConns','streamIfrates',
                         'telegramEnabled','pushbulletEnabled','smtpEnabled','smtpSecure','ntfyEnabled',
                         'notifIfaceUpDown','notifVpn','notifCpu','notifPing','notifNetwatch','notifRouterStatus',
                         'notifIfaceEther','notifIfaceWlan','notifIfaceBridge','notifIfaceVlan','notifIfaceOther'];
@@ -1161,8 +1157,8 @@ app.post('/api/settings', _requireAdmin, (req, res) => {
     if (!s) {
       return res.json({ ok: true, requiresRestart: false });
     }
-    const collectorMap = { conns:s.conns, talkers:s.talkers, system:s.system, wireless:s.wireless, vpn:s.vpn, firewall:s.firewall, ifStatus:s.ifStatus, ping:s.ping, arp:s.arp, dhcpNetworks:s.dhcpNetworks, bandwidth:s.bandwidth, routing:s.routing };
-    const pollMap = { pollConns:'conns', pollTalkers:'talkers', pollSystem:'system', pollWireless:'wireless',
+    const collectorMap = { conns:s.conns, system:s.system, wireless:s.wireless, vpn:s.vpn, firewall:s.firewall, ifStatus:s.ifStatus, ping:s.ping, arp:s.arp, dhcpNetworks:s.dhcpNetworks, bandwidth:s.bandwidth, routing:s.routing };
+    const pollMap = { pollConns:'conns', pollSystem:'system', pollWireless:'wireless',
       pollVpn:'vpn', pollFirewall:'firewall', pollIfstatus:'ifStatus', pollBandwidth:'bandwidth',
       pollPing:'ping', pollArp:'arp', pollDhcp:'dhcpNetworks', pollRouting:'routing' };
     for (const [key, name] of Object.entries(pollMap)) {
@@ -1196,12 +1192,6 @@ app.post('/api/settings', _requireAdmin, (req, res) => {
       s.ping._restartStream();
     }
 
-    // pollTalkers controls the kid-control stream interval
-    if ('pollTalkers' in updates && s.talkers) {
-      s.talkers.pollMs = saved.pollTalkers;
-      s.talkers._restartStream();
-    }
-
     // pollSystem controls the ros.stream() interval — restart with new =interval=N
     if ('pollSystem' in updates && s.system) {
       s.system.pollMs = saved.pollSystem;
@@ -1220,7 +1210,6 @@ app.post('/api/settings', _requireAdmin, (req, res) => {
       ['streamSystem',  s.system],
       ['streamPing',    s.ping],
       ['streamConns',   s.conns],
-      ['streamTalkers', s.talkers],
       ['streamIfrates', s.ifStatus],
     ]) {
       if (key in updates && collector) {
@@ -1285,10 +1274,6 @@ app.post('/api/settings', _requireAdmin, (req, res) => {
       if ('topN' in updates && s.conns) {
         s.conns.topN = saved.topN;
         s.conns._lastFp = '';
-      }
-      if ('topTalkersN' in updates && s.talkers) {
-        s.talkers.topN = saved.topTalkersN;
-        s.talkers._lastFp = '';
       }
       if ('maxConns' in updates && s.conns) {
         s.conns.maxConns = saved.maxConns;
@@ -1655,7 +1640,6 @@ app.get('/healthz', (req, res) => {
       conns:    { ts:st.lastConnsTs,    err:sanitizeErr(st.lastConnsErr)    },
       leases:   { ts:st.lastLeasesTs,   err:null                            },
       arp:      { ts:st.lastArpTs,      err:null                            },
-      talkers:  { ts:st.lastTalkersTs,  err:sanitizeErr(st.lastTalkersErr)  },
       logs:     { ts:st.lastLogsTs,     err:sanitizeErr(st.lastLogsErr)     },
       system:   { ts:st.lastSystemTs,   err:sanitizeErr(st.lastSystemErr)   },
       wireless: { ts:st.lastWirelessTs, err:sanitizeErr(st.lastWirelessErr) },
@@ -2317,9 +2301,15 @@ async function sendInitialState(socket, entry) {
     if (s.conns.lastPayload.sourceDests)
       socket.emit('conn:source-data', { ts: s.conns.lastPayload.ts, sourceDests: s.conns.lastPayload.sourceDests, sourcePorts: s.conns.lastPayload.sourcePorts });
   }
-  if (s.talkers.lastPayload)   socket.emit('talkers:update',   s.talkers.lastPayload);
   if (s.ping.lastPayload)      socket.emit('ping:update',      s.ping.lastPayload);
-  if (s.bandwidth.lastPayload) socket.emit('bandwidth:update', s.bandwidth.lastPayload);
+  if (s.bandwidth.lastPayload) {
+    socket.emit('bandwidth:update', s.bandwidth.lastPayload);
+    socket.emit('bandwidth:top', s.bandwidth.lastTopPayload || {
+      ts: s.bandwidth.lastPayload.ts,
+      pollMs: s.bandwidth.lastPayload.pollMs,
+      devices: (s.bandwidth.lastPayload.devices || []).slice(0, 5),
+    });
+  }
   if (s.routing.lastPayload)   socket.emit('routing:update',   s.routing.lastPayload);
   if (s.netwatch.lastPayload)  socket.emit('netwatch:update',  s.netwatch.lastPayload);
 
@@ -2363,7 +2353,6 @@ function _idleSuspend(session, entry) {
   session.firewall.suspend();
   session.routing.suspend();
   session.ping.suspend();
-  session.talkers.suspend();
   session.dhcpNetworks.suspend();
 }
 
@@ -2374,7 +2363,6 @@ function _idleResume(session, entry) {
   session.system.resume();
   _updateAllPageStreams(session, entry);
   session.ping.resume();
-  session.talkers.resume();
   session.dhcpNetworks.resume();
 }
 
@@ -2407,7 +2395,6 @@ function _emitDiagnostics(session, rid, socket) {
     { name: 'traffic',      streams: s.traffic._allStream    ? 1 : 0 },
     { name: 'system',       streams: s.system._stream        ? 1 : 0 },
     { name: 'connections',  streams: s.conns._stream         ? 1 : 0 },
-    { name: 'talkers',      streams: s.talkers._stream       ? 1 : 0 },
     { name: 'logs',         streams: s.logs._stream          ? 1 : 0 },
     { name: 'ping',         streams: s.ping._stream          ? 1 : 0 },
     { name: 'netwatch',     streams: s.netwatch._stream      ? 1 : 0 },
@@ -2650,7 +2637,7 @@ io.on('connection', (socket) => {
   // Kick idle-gated collectors that haven't run yet, then send initial state.
   const kickAndSend = async () => {
     if (entry) {
-      const idleGated = [entry.session.conns, entry.session.bandwidth, entry.session.talkers];
+      const idleGated = [entry.session.conns, entry.session.bandwidth];
       const kicks = idleGated
         .filter(c => c && !c.lastPayload && typeof c.tick === 'function')
         .map(c => c.tick(true).catch(() => {}));
