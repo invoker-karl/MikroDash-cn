@@ -43,3 +43,9 @@ test('application and login pages load locales before their page scripts', () =>
   assert.match(index, /data-language-select/);
   assert.match(login, /data-language-select/);
 });
+
+test('authentication middleware allows translation assets before sign-in', () => {
+  const server = fs.readFileSync(path.join(root, 'src', 'index.js'), 'utf8');
+  assert.match(server, /'\/i18n\.js'/);
+  assert.match(server, /req\.path\.startsWith\('\/locales\/'\)/);
+});
