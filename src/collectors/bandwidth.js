@@ -3,7 +3,7 @@
  * /ip/firewall/connection/print byte counter deltas between ticks,
  * then aggregates to per-source-IP rows with geo, org, hostname, MAC.
  *
- * Emits: bandwidth:update
+ * Emits: bandwidth:update, bandwidth:top
  */
 'use strict';
 
@@ -20,6 +20,7 @@ const bpsToMbps = (bytes, dtMs) =>
 // Hoisted out of the hot per-connection loop — avoids allocating a new array
 // on every iteration when lanCidrs is empty (potentially thousands of times/tick).
 const RFC1918 = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'];
+const DASHBOARD_TOP_DEVICES = 5;
 
 class BandwidthCollector {
   constructor({ ros, io, pollMs, dhcpNetworks, dhcpLeases, arp, ifStatus, state, geoLookup, connTableCache, geoOrgCache }) {
@@ -44,6 +45,7 @@ class BandwidthCollector {
     this._inflight    = false;
     this._stopping    = false;
     this.lastPayload  = null;
+    this.lastTopPayload = null;
     this._lastFp      = '';
     this._lastEmitTs  = 0;
     this._lastSnapshotTs = 0; // tracks the connTableCache snapshot timestamp to detect cache hits
@@ -258,11 +260,19 @@ class BandwidthCollector {
     devices.sort((a, b) => b.totalMbps - a.totalMbps);
 
     this.lastPayload = { ts: now, devices, pollMs: this.pollMs };
+    this.lastTopPayload = {
+      ts: now,
+      pollMs: this.pollMs,
+      devices: devices.slice(0, DASHBOARD_TOP_DEVICES),
+    };
     const fp = JSON.stringify(devices.map(d => ({ src: d.srcIp, rx: d.rxMbps, tx: d.txMbps })));
     if (fp !== this._lastFp || now - this._lastEmitTs >= 10000) {
       this._lastFp = fp;
       this._lastEmitTs = now;
       this.io.to('page-bandwidth').to('dash-card-bandwidth').emit('bandwidth:update', this.lastPayload);
+      // The dashboard summary is always visible to router-scoped clients and
+      // deliberately reuses the bandwidth collector instead of Kid Control.
+      this.io.emit('bandwidth:top', this.lastTopPayload);
     }
     this.state.lastBandwidthTs  = now;
     this.state.lastBandwidthErr = null;
