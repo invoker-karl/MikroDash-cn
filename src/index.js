@@ -144,7 +144,7 @@ const setupLimiter = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true
 
 // Public paths that always pass through in modern mode
 const _MODERN_PUBLIC = new Set([
-  '/login', '/login.html', '/login.js', '/preflight.js',
+  '/login', '/login.html', '/login.js', '/preflight.js', '/i18n.js',
   '/healthz', '/logo.png', '/favicon.ico',
   '/api/auth/status', '/api/auth/login', '/api/users/setup',
 ]);
@@ -187,7 +187,7 @@ function _authMiddleware(req, res, next) {
 }
 
 function _modernAuthMiddleware(req, res, next) {
-  if (_MODERN_PUBLIC.has(req.path) || req.path.startsWith('/vendor/')) return next();
+  if (_MODERN_PUBLIC.has(req.path) || req.path.startsWith('/vendor/') || req.path.startsWith('/locales/')) return next();
   const session = _sessionFromReq(req);
   if (session) { req.authSession = session; return next(); }
   if (req.path.startsWith('/api/')) return res.status(401).json({ ok: false, error: 'Not authenticated' });
