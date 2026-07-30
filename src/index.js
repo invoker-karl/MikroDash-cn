@@ -382,7 +382,15 @@ function buildSession(routerCfg, routerIo) {
   const firewall     = new FirewallCollector    ({ros, io:routerIo, pollMs:_cfg.pollFirewall,  state});
   const ifStatus     = new InterfaceStatusCollector({ros, io:routerIo, pollMs:_cfg.pollIfstatus, metaPollMs:_cfg.pollIfaces, state, streamMode:_cfg.streamIfrates});
   const ping         = new PingCollector        ({ros, io:routerIo, pollMs:_cfg.pollPing,     state, target:PING_TARGET, streamMode:_cfg.streamPing});
-  const bandwidth    = new BandwidthCollector   ({ros, io:routerIo, pollMs:_cfg.pollBandwidth, dhcpNetworks, dhcpLeases, arp, ifStatus, state, connTableCache, geoOrgCache});
+  const bandwidth    = new BandwidthCollector   ({
+    ros, io:routerIo, pollMs:_cfg.pollBandwidth, dhcpNetworks, dhcpLeases, arp, ifStatus,
+    state, connTableCache, geoOrgCache, displayTimezone:_cfg.displayTimezone,
+    deviceUsage: {
+      loadTotals: (dayKey) => db.queryDeviceBandwidthTotals(routerCfg.id, dayKey),
+      record: (dayKey, srcIp, rxBytes, txBytes, ts) =>
+        dbWriter.recordDeviceBandwidth(routerCfg.id, dayKey, srcIp, rxBytes, txBytes, ts),
+    },
+  });
   const routing      = new RoutingCollector     ({ros, io:routerIo, pollMs:_cfg.pollRouting,  state});
   const netwatch     = new NetwatchCollector    ({ros, io:routerIo,                           state});
 
@@ -1169,10 +1177,10 @@ app.post('/api/settings', _requireAdmin, (req, res) => {
         }
       }
     }
-    // pollConns controls the /ip/firewall/connection/print stream interval
+    // pollConns controls either the stream interval or the poll delay.
     if ('pollConns' in updates && s.conns) {
       s.conns.pollMs = saved.pollConns;
-      s.conns._restartStream();
+      s.conns.restart();
     }
 
     // pollPing controls the /tool/ping stream interval

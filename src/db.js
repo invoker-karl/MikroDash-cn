@@ -12,6 +12,7 @@ let _db = null;
 let _stmtInsertPing        = null;
 let _stmtInsertTraffic     = null;
 let _stmtInsertBandwidth   = null;
+let _stmtInsertDeviceUsage = null;
 let _stmtInsertAlert       = null;
 let _stmtInsertConn        = null;
 let _stmtResolveAlert      = null;
@@ -85,6 +86,26 @@ const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 3,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS device_bandwidth_usage (
+          id        INTEGER PRIMARY KEY,
+          router_id TEXT    NOT NULL,
+          day_key   TEXT    NOT NULL,
+          src_ip    TEXT    NOT NULL,
+          rx_mb     REAL    NOT NULL,
+          tx_mb     REAL    NOT NULL,
+          ts        INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_device_bw_router_day_ip
+          ON device_bandwidth_usage(router_id, day_key, src_ip);
+        CREATE INDEX IF NOT EXISTS idx_device_bw_ts
+          ON device_bandwidth_usage(ts);
+      `);
+    },
+  },
 ];
 
 function _runMigrations(db) {
@@ -120,6 +141,7 @@ function _prepareStatements() {
   _stmtInsertPing      = _db.prepare('INSERT INTO ping_samples    (router_id, target, rtt_ms, loss_pct, ts) VALUES (?, ?, ?, ?, ?)');
   _stmtInsertTraffic   = _db.prepare('INSERT INTO traffic_samples (router_id, interface, rx_mbps, tx_mbps, ts) VALUES (?, ?, ?, ?, ?)');
   _stmtInsertBandwidth = _db.prepare('INSERT INTO bandwidth_usage  (router_id, interface, rx_mb,   tx_mb,   ts) VALUES (?, ?, ?, ?, ?)');
+  _stmtInsertDeviceUsage = _db.prepare('INSERT INTO device_bandwidth_usage (router_id, day_key, src_ip, rx_mb, tx_mb, ts) VALUES (?, ?, ?, ?, ?, ?)');
   _stmtInsertAlert     = _db.prepare('INSERT INTO alert_events    (router_id, alert_type, subject, detail, fired_at) VALUES (?, ?, ?, ?, ?)');
   _stmtInsertConn    = _db.prepare('INSERT INTO connectivity_events (router_id, connected, ts) VALUES (?, ?, ?)');
   _stmtResolveAlert  = _db.prepare(`
@@ -160,6 +182,11 @@ function insertTrafficSample(routerId, iface, rxMbps, txMbps, ts) {
 function insertBandwidthSample(routerId, iface, rxMb, txMb, ts) {
   if (!_db) return;
   _stmtInsertBandwidth.run(routerId, iface, rxMb, txMb, ts || Date.now());
+}
+
+function insertDeviceBandwidthSample(routerId, dayKey, srcIp, rxMb, txMb, ts) {
+  if (!_db) return;
+  _stmtInsertDeviceUsage.run(routerId, dayKey, srcIp, rxMb, txMb, ts || Date.now());
 }
 
 function insertAlertEvent(routerId, alertType, subject, detail) {
@@ -227,6 +254,17 @@ function queryBandwidthSamples(routerId, iface, fromTs, toTs, limit) {
 function queryBandwidthInterfaces(routerId) {
   if (!_db) return [];
   return _prep('SELECT DISTINCT interface FROM bandwidth_usage WHERE router_id = ? ORDER BY interface').all(routerId).map(r => r.interface);
+}
+
+function queryDeviceBandwidthTotals(routerId, dayKey) {
+  if (!_db) return [];
+  return _prep(`
+    SELECT src_ip, SUM(rx_mb) AS rx_mb, SUM(tx_mb) AS tx_mb
+    FROM device_bandwidth_usage
+    WHERE router_id = ? AND day_key = ?
+    GROUP BY src_ip
+    ORDER BY src_ip
+  `).all(routerId, dayKey);
 }
 
 function queryPingSamplesAgg(routerId, fromTs, toTs, agg) {
@@ -325,9 +363,10 @@ function prune(retentionDays, alertRetentionDays) {
   const r1 = _prep('DELETE FROM ping_samples        WHERE ts < ?').run(metricCutoff);
   const r2 = _prep('DELETE FROM traffic_samples     WHERE ts < ?').run(metricCutoff);
   const r3 = _prep('DELETE FROM bandwidth_usage     WHERE ts < ?').run(metricCutoff);
-  const r4 = _prep('DELETE FROM alert_events        WHERE fired_at < ?').run(alertCutoff);
-  const r5 = _prep('DELETE FROM connectivity_events WHERE ts < ?').run(alertCutoff);
-  const total = r1.changes + r2.changes + r3.changes + r4.changes + r5.changes;
+  const r4 = _prep('DELETE FROM device_bandwidth_usage WHERE ts < ?').run(metricCutoff);
+  const r5 = _prep('DELETE FROM alert_events        WHERE fired_at < ?').run(alertCutoff);
+  const r6 = _prep('DELETE FROM connectivity_events WHERE ts < ?').run(alertCutoff);
+  const total = r1.changes + r2.changes + r3.changes + r4.changes + r5.changes + r6.changes;
   if (total > 0) console.log(`[db] pruned ${total} rows (metrics: ${retentionDays}d, events: ${alertRetentionDays}d)`);
 }
 
@@ -348,6 +387,7 @@ function deleteRouterData(routerId) {
     _prep('DELETE FROM ping_samples        WHERE router_id = ?').run(routerId);
     _prep('DELETE FROM traffic_samples     WHERE router_id = ?').run(routerId);
     _prep('DELETE FROM bandwidth_usage     WHERE router_id = ?').run(routerId);
+    _prep('DELETE FROM device_bandwidth_usage WHERE router_id = ?').run(routerId);
     _prep('DELETE FROM alert_events        WHERE router_id = ?').run(routerId);
     _prep('DELETE FROM connectivity_events WHERE router_id = ?').run(routerId);
   })();
@@ -356,11 +396,12 @@ function deleteRouterData(routerId) {
 
 module.exports = {
   open, close,
-  insertPingSample, insertTrafficSample, insertBandwidthSample,
+  insertPingSample, insertTrafficSample, insertBandwidthSample, insertDeviceBandwidthSample,
   insertAlertEvent, resolveAlertEvent, insertConnectivityEvent,
   queryPingSamples, queryPingSamplesAgg,
   queryTrafficSamples, queryTrafficSamplesAgg, queryTrafficInterfaces,
   queryBandwidthSamples, queryBandwidthSamplesAgg, queryBandwidthInterfaces,
+  queryDeviceBandwidthTotals,
   queryAlertEvents, queryConnectivityEvents, queryConnectivityEventsAgg,
   prune, startPruneInterval, deleteRouterData,
 };

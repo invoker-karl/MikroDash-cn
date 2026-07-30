@@ -839,8 +839,8 @@ socket.on('bandwidth:top',function(data){
     var label=d.name||d.srcIp||'\u2014';
     var ip=d.srcIp&&d.srcIp!==label?'<div style="font-size:.65rem;color:var(--text-muted);font-family:var(--font-mono)">'+esc(d.srcIp)+'</div>':'';
     return'<tr><td>'+esc(label)+ip+'</td><td style="color:var(--text-muted);font-family:var(--font-mono);font-size:.7rem">'+esc(d.mac||'\u2014')+'</td>'+
-      '<td class="text-end" style="color:var(--accent-rx)">'+fmtMbps(d.rxMbps)+'</td>'+
-      '<td class="text-end" style="color:var(--accent-tx)">'+fmtMbps(d.txMbps)+'</td></tr>';
+      '<td class="text-end"><div class="talker-rate" style="color:var(--accent-rx)">'+fmtMbps(d.rxMbps)+'</div><div class="talker-total"><span>Today total</span> '+fmtBytes((+d.todayRxMb||0)*1000000)+'</div></td>'+
+      '<td class="text-end"><div class="talker-rate" style="color:var(--accent-tx)">'+fmtMbps(d.txMbps)+'</div><div class="talker-total"><span>Today total</span> '+fmtBytes((+d.todayTxMb||0)*1000000)+'</div></td></tr>';
   }).join('');
 });
 
@@ -3711,7 +3711,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   var POLL_PROFILES = {
     fast:     { pollSystem:1000,  pollConns:1000,  pollIfstatus:1000,  pollBandwidth:1000,  pollVpn:1000,  pollFirewall:1000,  pollPing:1000,  pollWireless:10000,  pollIfaces:10000,  pollDhcp:10000  },
     faster:   { pollSystem:5000,  pollConns:5000,  pollIfstatus:5000,  pollBandwidth:5000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:60000,  pollIfaces:60000,  pollDhcp:60000  },
-    standard: { pollSystem:2000,  pollConns:3000,  pollIfstatus:1000,  pollBandwidth:3000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:30000,  pollIfaces:60000,  pollDhcp:290000 },
+    standard: { pollSystem:2000,  pollConns:2000,  pollIfstatus:1000,  pollBandwidth:2000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:30000,  pollIfaces:60000,  pollDhcp:290000 },
     slow:     { pollSystem:10000, pollConns:10000, pollIfstatus:10000, pollBandwidth:10000, pollVpn:10000, pollFirewall:10000, pollPing:10000, pollWireless:300000, pollIfaces:300000, pollDhcp:300000 },
     slower:   { pollSystem:30000, pollConns:30000, pollIfstatus:30000, pollBandwidth:30000, pollVpn:30000, pollFirewall:30000, pollPing:30000, pollWireless:600000, pollIfaces:600000, pollDhcp:600000 },
   };

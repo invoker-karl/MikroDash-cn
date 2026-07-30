@@ -1458,6 +1458,7 @@ test('bandwidth collector emits only the top five devices for the dashboard', as
       return { rows: makeRows(snapshot / 1000), ts: snapshot };
     },
   };
+  const recordedUsage = [];
   const collector = new BandwidthCollector({
     ros,
     io: {
@@ -1472,6 +1473,11 @@ test('bandwidth collector emits only the top five devices for the dashboard', as
     ifStatus: null,
     state: {},
     connTableCache,
+    displayTimezone: 'Asia/Shanghai',
+    deviceUsage: {
+      loadTotals: () => [{ src_ip: '192.168.1.16', rx_mb: 10, tx_mb: 2 }],
+      record: (dayKey, srcIp, rxBytes, txBytes, ts) => recordedUsage.push({ dayKey, srcIp, rxBytes, txBytes, ts }),
+    },
   });
 
   await collector.tick(); // seed byte counters
@@ -1483,6 +1489,10 @@ test('bandwidth collector emits only the top five devices for the dashboard', as
     '192.168.1.16', '192.168.1.15', '192.168.1.14', '192.168.1.13', '192.168.1.12',
   ]);
   assert.ok(payload.devices[0].totalMbps > payload.devices[1].totalMbps);
+  assert.equal(payload.devices[0].todayRxMb, 10.014);
+  assert.equal(payload.devices[0].todayTxMb, 2.007);
+  assert.equal(recordedUsage.length, 7);
+  assert.equal(recordedUsage[6].dayKey, '1970-01-01');
 });
 
 // --- ARP Collector ---

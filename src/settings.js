@@ -85,9 +85,9 @@ const DEFAULTS = {
   pingTarget:        process.env.PING_TARGET         || '1.1.1.1',
 
   // Poll intervals (ms)
-  pollConns:         parseInt(process.env.CONNS_POLL_MS     || '5000',  10),
+  pollConns:         parseInt(process.env.CONNS_POLL_MS     || '2000',  10),
   pollTalkers:       parseInt(process.env.TALKERS_POLL_MS   || '3000',  10),
-  pollBandwidth:     parseInt(process.env.BANDWIDTH_POLL_MS  || '5000',  10),
+  pollBandwidth:     parseInt(process.env.BANDWIDTH_POLL_MS  || '2000',  10),
   pollRouting:       parseInt(process.env.ROUTING_POLL_MS    || '10000', 10),
   pageRouting:       true,
   pollSystem:        parseInt(process.env.SYSTEM_POLL_MS    || '2000',  10),
