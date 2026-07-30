@@ -181,6 +181,33 @@ test('connections resume() opens the stream when viewers exist', () => {
   c.stop();
 });
 
+test('connections poll mode fetches snapshots without opening a stream', async () => {
+  await withPatchedTimers(async (timers) => {
+    const ros = mockStreamRos();
+    let writes = 0;
+    ros.write = async () => { writes++; return []; };
+    const c = new ConnectionsCollector({
+      ros, io: stubIo(1), pollMs: 2000, topN: 5, maxConns: 1000,
+      dhcpNetworks: { getLanCidrs: () => [] },
+      dhcpLeases: { getNameByIP: () => null, getNameByMAC: () => null },
+      arp: { getByIP: () => null }, state: {},
+      connTableCache: { deposit() {} },
+      geoOrgCache: { geo: new Map(), org: new Map() },
+      streamMode: false,
+    });
+
+    c.start();
+    c.resume();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(ros.streams.length, 0, 'poll mode never opens RouterOS stream');
+    assert.equal(writes, 1, 'poll mode fetches an immediate snapshot');
+    assert.ok(timers.some(t => !t.isInterval && t.ms === 2000 && !t.cleared), 'next 2 s poll is scheduled');
+    c.stop();
+  });
+});
+
 test('connections watchdog recovers a dead stream', async () => {
   await withPatchedTimers(async (timers) => {
     const ros = mockStreamRos();

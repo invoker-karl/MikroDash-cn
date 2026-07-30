@@ -70,6 +70,8 @@ class ConnectionsCollector {
     this._started = false;
     this._restarting = false;
     this._errRestartTimer = null;
+    this._pollTimer = null;
+    this._pollInflight = false;
     // Starts suspended: only resume() (called when a viewer is present) opens
     // the stream, so the watchdog can't open it for an idle router.
     this._suspended = true;
@@ -84,8 +86,8 @@ class ConnectionsCollector {
         this._lastFp = '';
         this._lastDetailFp = '';
         this.stop();
-        this._started = true;
-        this._startWatchdog();
+        if (this.streamMode) this._startWatchdog();
+        if (!this._suspended) this._startActiveMode();
       }
     });
   }
@@ -501,6 +503,70 @@ class ConnectionsCollector {
     });
   }
 
+  async _pollOnce() {
+    if (!this.ros.connected || this._pollInflight || this._suspended) return;
+    if (this.io.engine.clientsCount === 0) return;
+    this._pollInflight = true;
+    try {
+      const rows = (await this.ros.write('/ip/firewall/connection/print', [
+        '=.proplist=.id,src-address,dst-address,protocol,dst-port,orig-bytes,repl-bytes',
+      ])) || [];
+      this._rowsNext = rows;
+      this._onBatchComplete();
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e);
+      if (!msg.includes('no such item')) {
+        this.state.lastConnsErr = msg;
+        console.error(this._lbl, msg); // codeql[js/tainted-format-string]
+      }
+    } finally {
+      this._pollInflight = false;
+    }
+  }
+
+  _schedulePoll(delayMs = this.pollMs) {
+    clearTimeout(this._pollTimer);
+    if (!this._started || this._suspended || this.streamMode) return;
+    this._pollTimer = setTimeout(async () => {
+      this._pollTimer = null;
+      await this._pollOnce();
+      this._schedulePoll();
+    }, Math.max(500, delayMs));
+  }
+
+  _startPoll() {
+    if (this._pollTimer || this._pollInflight || this._suspended) return;
+    console.log(this._lbl + ' poll mode — polling /ip/firewall/connection/print every ' + this.pollMs + 'ms');
+    this._pollOnce().finally(() => this._schedulePoll());
+  }
+
+  _stopPoll() {
+    if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
+  }
+
+  _startActiveMode() {
+    if (!this._started || this._suspended || !this.ros.connected) return;
+    if (this.streamMode) {
+      this._startWatchdog();
+      this._startStream();
+    } else {
+      this._stopWatchdog();
+      this._startPoll();
+    }
+  }
+
+  restart() {
+    this._stopWatchdog();
+    this._stopStream();
+    this._stopPoll();
+    this._lastFp = '';
+    this._lastDetailFp = '';
+    this._lastEmitTs = 0;
+    this._rowsPrev = null;
+    this._partialStreak = 0;
+    this._startActiveMode();
+  }
+
   _stopStream() {
     clearTimeout(this._commitTimer);
     this._commitTimer  = null;
@@ -563,6 +629,7 @@ class ConnectionsCollector {
   suspend() {
     this._suspended = true;
     this._stopStream();
+    this._stopPoll();
   }
 
   resume() {
@@ -570,13 +637,14 @@ class ConnectionsCollector {
     // connection-table stream for a router nobody is watching.
     if (this.io.engine.clientsCount === 0) return;
     this._suspended = false;
-    if (this._started && this.ros.connected) this._startStream();
+    this._startActiveMode();
   }
 
   stop() {
     this._restarting = false;
     this._stopWatchdog();
     this._stopStream();
+    this._stopPoll();
   }
 
   // start() does NOT open the stream immediately — resume() opens it when called
@@ -584,7 +652,8 @@ class ConnectionsCollector {
   start() {
     this._started = true;
     try { this._debug = !!(settings.load().rosDebug); } catch (_) { this._debug = false; }
-    this._startWatchdog();
+    if (this.streamMode) this._startWatchdog();
+    this._startActiveMode();
   }
 }
 

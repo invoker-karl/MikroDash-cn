@@ -360,6 +360,8 @@
     .table th{color:var(--text-muted);font-size:.66rem;letter-spacing:.06em;text-transform:uppercase;border-color:var(--border) !important;font-weight:400;padding:.45rem .75rem}
     #talkersCard .table thead th,#vpnCard .table thead th,#netwatchCard .table thead th{background:transparent!important}
     .table td{border-color:var(--border) !important;vertical-align:middle;padding:.45rem .75rem;color:var(--text-main)}
+    #talkersTable .talker-rate{white-space:nowrap;font-family:var(--font-mono);font-size:.72rem}
+    #talkersTable .talker-total{margin-top:2px;white-space:nowrap;color:var(--text-muted);font-size:.6rem;font-family:var(--font-mono);letter-spacing:-.01em}
     .table tbody tr:hover td{background:rgba(99,130,190,.05)}
     /* signal bars */
     .signal-bars{display:inline-flex;align-items:flex-end;gap:2px;height:13px}
@@ -1258,7 +1260,7 @@
         </div>
       </div>
 
-      <!-- ── card-toptalkers: Top Talkers ────────────────────────────── -->
+      <!-- ── card-toptalkers: highest-bandwidth devices ─────────────── -->
       <div id="card-toptalkers" class="dash-card">
         <div class="dash-drag-handle">
           <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="15" x2="16" y2="15"/></svg>
@@ -1275,7 +1277,7 @@
         <div class="card" id="talkersCard">
           <div class="stale-overlay">&#9679; stale</div>
           <div class="card-header d-flex align-items-center gap-2">
-            <h3 class="card-title">Top Talkers</h3>
+            <h3 class="card-title">Top Talkers <span style="font-size:.65rem;color:var(--text-muted);font-weight:400">Top 5</span></h3>
           </div>
           <div class="card-body p-0">
             <div class="table-responsive">
@@ -2436,7 +2438,6 @@
               <label class="stoggle"><span class="stoggle-label">System / Gauges</span><span class="stoggle-switch"><input type="checkbox" id="s_streamSystem"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Ping</span><span class="stoggle-switch"><input type="checkbox" id="s_streamPing"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Connections</span><span class="stoggle-switch"><input type="checkbox" id="s_streamConns"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-              <label class="stoggle"><span class="stoggle-label">Top Talkers</span><span class="stoggle-switch"><input type="checkbox" id="s_streamTalkers"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Interface Rates</span><span class="stoggle-switch"><input type="checkbox" id="s_streamIfrates"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
             </div>
           </div>
@@ -2451,10 +2452,6 @@
               <div class="sform-group">
                 <label class="sform-label">Top Connections N</label>
                 <input class="sform-input" id="s_topN" type="number" min="1" max="50">
-              </div>
-              <div class="sform-group">
-                <label class="sform-label">Top Talkers N</label>
-                <input class="sform-input" id="s_topTalkersN" type="number" min="1" max="20">
               </div>
               <div class="sform-group">
                 <label class="sform-label">Firewall Top N</label>
@@ -2770,6 +2767,12 @@
             <span class="scard-title">Appearance</span>
           </div>
           <div class="scard-body">
+            <label class="sform-label">Interface Language</label>
+            <select class="sform-input" data-language-select style="margin-bottom:.85rem">
+              <option value="en-US">English</option>
+              <option value="zh-CN">简体中文</option>
+            </select>
+            <p style="font-size:.7rem;color:var(--text-muted);margin:-.45rem 0 .85rem">Saved in this browser and applied immediately.</p>
             <label class="sform-label" style="margin-bottom:.5rem">Theme</label>
             <div class="theme-swatch-grid" id="themeSwatches">
               <div class="theme-swatch" data-palette="default" data-mode="dark" title="Default Dark">
@@ -3494,6 +3497,9 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script src="/vendor/chart.umd.min.js"></script>
+<script src="/locales/en-US.js"></script>
+<script src="/locales/zh-CN.js"></script>
+<script src="/i18n.js"></script>
 <script src="/app.js"></script>
 <script src="/js/dashboard-grid.js"></script>
 

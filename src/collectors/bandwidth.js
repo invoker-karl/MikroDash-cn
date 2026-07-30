@@ -3,7 +3,7 @@
  * /ip/firewall/connection/print byte counter deltas between ticks,
  * then aggregates to per-source-IP rows with geo, org, hostname, MAC.
  *
- * Emits: bandwidth:update
+ * Emits: bandwidth:update, bandwidth:top
  */
 'use strict';
 
@@ -20,9 +20,20 @@ const bpsToMbps = (bytes, dtMs) =>
 // Hoisted out of the hot per-connection loop — avoids allocating a new array
 // on every iteration when lanCidrs is empty (potentially thousands of times/tick).
 const RFC1918 = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'];
+const DASHBOARD_TOP_DEVICES = 5;
+
+function dayKeyFor(ts, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timeZone || undefined,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(ts));
+  const values = {};
+  for (const p of parts) values[p.type] = p.value;
+  return `${values.year}-${values.month}-${values.day}`;
+}
 
 class BandwidthCollector {
-  constructor({ ros, io, pollMs, dhcpNetworks, dhcpLeases, arp, ifStatus, state, geoLookup, connTableCache, geoOrgCache }) {
+  constructor({ ros, io, pollMs, dhcpNetworks, dhcpLeases, arp, ifStatus, state, geoLookup, connTableCache, geoOrgCache, deviceUsage, displayTimezone }) {
     this.ros          = ros;
     this.io           = io;
     this._lbl         = ros.routerLabel ? `[${ros.routerLabel}][bandwidth]` : '[bandwidth]';
@@ -38,12 +49,17 @@ class BandwidthCollector {
     this._prev        = new Map();
     this._ifaceCache  = new Map(); // srcIp -> iface name
     this.connTableCache = connTableCache || null;
+    this.deviceUsage   = deviceUsage || null;
+    this.displayTimezone = displayTimezone || '';
+    this._todayKey     = '';
+    this._todayTotals  = new Map(); // srcIp -> { rxMb, txMb }
     this._geoCache    = geoOrgCache ? geoOrgCache.geo : new Map(); // ip -> { country, city }
     this._orgCache    = geoOrgCache ? geoOrgCache.org : new Map(); // ip -> org string | null
     this.timer        = null;
     this._inflight    = false;
     this._stopping    = false;
     this.lastPayload  = null;
+    this.lastTopPayload = null;
     this._lastFp      = '';
     this._lastEmitTs  = 0;
     this._lastSnapshotTs = 0; // tracks the connTableCache snapshot timestamp to detect cache hits
@@ -83,6 +99,23 @@ class BandwidthCollector {
       return { name: (lm && lm.name) ? lm.name : '', mac: a.mac };
     }
     return { name: '', mac: '' };
+  }
+
+  _ensureToday(now) {
+    const key = dayKeyFor(now, this.displayTimezone);
+    if (key === this._todayKey) return key;
+    this._todayKey = key;
+    this._todayTotals.clear();
+    const saved = this.deviceUsage && typeof this.deviceUsage.loadTotals === 'function'
+      ? this.deviceUsage.loadTotals(key) : [];
+    for (const row of (saved || [])) {
+      if (!row || !row.src_ip) continue;
+      this._todayTotals.set(row.src_ip, {
+        rxMb: Math.max(0, Number(row.rx_mb) || 0),
+        txMb: Math.max(0, Number(row.tx_mb) || 0),
+      });
+    }
+    return key;
   }
 
   _geo(ip) {
@@ -151,9 +184,10 @@ class BandwidthCollector {
     this._lastSnapshotTs = snapshotTs;
 
     const now = snapshotTs;
+    const todayKey = this._ensureToday(now);
 
     // Per-source-IP aggregation map
-    // srcIp -> { rxMbps, txMbps, dsts: Map<dstKey, {rxMbps,txMbps,proto,iface,dstIp}> }
+    // srcIp -> live rates, transferred-byte deltas and destination breakdown.
     const srcMap = new Map();
 
     const seenIds = new Set();
@@ -196,11 +230,19 @@ class BandwidthCollector {
       if (!src || !isInCidrs(src, activeCidrs)) continue;
 
       if (!srcMap.has(src)) {
-        srcMap.set(src, { rxMbps: 0, txMbps: 0, dsts: new Map() });
+        srcMap.set(src, { rxMbps: 0, txMbps: 0, rxBytes: 0, txBytes: 0, dsts: new Map() });
       }
       const srcEntry = srcMap.get(src);
       srcEntry.rxMbps += rxMbps;
       srcEntry.txMbps += txMbps;
+      if (prev && now > prev.ts) {
+        const origDelta = origBytes - prev.origBytes;
+        const replDelta = replBytes - prev.replBytes;
+        if (origDelta >= 0 && replDelta >= 0) {
+          srcEntry.txBytes += origDelta;
+          srcEntry.rxBytes += replDelta;
+        }
+      }
 
       // Track per-destination breakdown
       const dstKey = dst + '|' + proto;
@@ -221,6 +263,18 @@ class BandwidthCollector {
     const devices = [];
     for (const [srcIp, entry] of srcMap.entries()) {
       const resolved = this._resolveName(srcIp);
+      let total = this._todayTotals.get(srcIp);
+      if (!total) {
+        total = { rxMb: 0, txMb: 0 };
+        this._todayTotals.set(srcIp, total);
+      }
+      if (entry.rxBytes + entry.txBytes > 0) {
+        total.rxMb += entry.rxBytes / 1_000_000;
+        total.txMb += entry.txBytes / 1_000_000;
+        if (this.deviceUsage && typeof this.deviceUsage.record === 'function') {
+          this.deviceUsage.record(todayKey, srcIp, entry.rxBytes, entry.txBytes, now);
+        }
+      }
 
       // Best destination = highest combined throughput
       let topDst = { rxMbps: 0, txMbps: 0, proto: '', iface: '', dstIp: '' };
@@ -241,6 +295,8 @@ class BandwidthCollector {
         rxMbps:    +entry.rxMbps.toFixed(4),
         txMbps:    +entry.txMbps.toFixed(4),
         totalMbps: +(entry.rxMbps + entry.txMbps).toFixed(4),
+        todayRxMb: +total.rxMb.toFixed(3),
+        todayTxMb: +total.txMb.toFixed(3),
         proto:     topDst.proto,
         iface:     topDst.iface,
         name:      resolved.name,
@@ -258,11 +314,22 @@ class BandwidthCollector {
     devices.sort((a, b) => b.totalMbps - a.totalMbps);
 
     this.lastPayload = { ts: now, devices, pollMs: this.pollMs };
-    const fp = JSON.stringify(devices.map(d => ({ src: d.srcIp, rx: d.rxMbps, tx: d.txMbps })));
+    this.lastTopPayload = {
+      ts: now,
+      pollMs: this.pollMs,
+      devices: devices.slice(0, DASHBOARD_TOP_DEVICES),
+    };
+    const fp = JSON.stringify(devices.map(d => ({
+      src: d.srcIp, rx: d.rxMbps, tx: d.txMbps,
+      todayRx: d.todayRxMb, todayTx: d.todayTxMb,
+    })));
     if (fp !== this._lastFp || now - this._lastEmitTs >= 10000) {
       this._lastFp = fp;
       this._lastEmitTs = now;
       this.io.to('page-bandwidth').to('dash-card-bandwidth').emit('bandwidth:update', this.lastPayload);
+      // The dashboard summary is always visible to router-scoped clients and
+      // deliberately reuses the bandwidth collector instead of Kid Control.
+      this.io.emit('bandwidth:top', this.lastTopPayload);
     }
     this.state.lastBandwidthTs  = now;
     this.state.lastBandwidthErr = null;
@@ -305,6 +372,13 @@ class BandwidthCollector {
 
     _run(); // immediate first run (async, does not block timer setup)
     _scheduleNext(); // synchronously sets this.timer for next poll
+  }
+
+  _restartTimer() {
+    this._pollDelayMs = clampPoll(this.pollMs, 3000);
+    if (!this._started) return;
+    this.stop();
+    this.start();
   }
 }
 

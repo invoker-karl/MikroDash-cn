@@ -13,11 +13,12 @@ const dbPath = require.resolve('../src/db');
 
 // Records every db.insert* call so we can assert on flush behavior.
 const dbStub = {
-  pings: [], traffic: [], bandwidth: [], conn: [], alerts: [], resolves: [],
-  reset() { this.pings = []; this.traffic = []; this.bandwidth = []; this.conn = []; this.alerts = []; this.resolves = []; },
+  pings: [], traffic: [], bandwidth: [], deviceBandwidth: [], conn: [], alerts: [], resolves: [],
+  reset() { this.pings = []; this.traffic = []; this.bandwidth = []; this.deviceBandwidth = []; this.conn = []; this.alerts = []; this.resolves = []; },
   insertPingSample(rid, target, rtt, loss, ts) { this.pings.push({ rid, target, rtt, loss, ts }); },
   insertTrafficSample(rid, iface, rx, tx, ts) { this.traffic.push({ rid, iface, rx, tx, ts }); },
   insertBandwidthSample(rid, iface, rx, tx, ts) { this.bandwidth.push({ rid, iface, rx, tx, ts }); },
+  insertDeviceBandwidthSample(rid, dayKey, srcIp, rx, tx, ts) { this.deviceBandwidth.push({ rid, dayKey, srcIp, rx, tx, ts }); },
   insertConnectivityEvent(rid, c) { this.conn.push({ rid, c }); },
   insertAlertEvent(rid, type, subj, detail) { this.alerts.push({ rid, type, subj, detail }); },
   resolveAlertEvent(rid, type, subj) { this.resolves.push({ rid, type, subj }); },
@@ -69,6 +70,22 @@ test('flushTraffic flushes only the requested router and clears its buckets', ()
   // Flushing rA again is a no-op (bucket already cleared).
   dbWriter.flushTraffic('rA');
   assert.equal(dbStub.pings.length, 1, 'rA bucket was cleared after first flush');
+});
+
+test('recordDeviceBandwidth buckets byte deltas and flushes per device', () => {
+  dbStub.reset();
+  const base = 1_700_000_240_000;
+  dbWriter.recordDeviceBandwidth('r1', '2026-07-30', '192.168.1.10', 2_000_000, 1_000_000, base + 1000);
+  dbWriter.recordDeviceBandwidth('r1', '2026-07-30', '192.168.1.10', 3_000_000, 4_000_000, base + 2000);
+  assert.equal(dbStub.deviceBandwidth.length, 0, 'open minute stays in memory');
+
+  dbWriter.flushTraffic('r1');
+
+  assert.equal(dbStub.deviceBandwidth.length, 1);
+  assert.deepEqual(dbStub.deviceBandwidth[0], {
+    rid: 'r1', dayKey: '2026-07-30', srcIp: '192.168.1.10',
+    rx: 5, tx: 5, ts: Math.floor(base / 60000) * 60000 + 30000,
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

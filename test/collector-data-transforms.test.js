@@ -1408,6 +1408,93 @@ test('interface status collector clamps malformed throughput fields to zero', ()
   assert.equal(iface.txMbps, 0);
 });
 
+test('interface status poll mode includes RouterOS string false interfaces', async () => {
+  let monitorArgs = null;
+  const ros = {
+    connected: true,
+    on() {},
+    stream: () => ({ stop() {} }),
+    async write(command, args) {
+      assert.equal(command, '/interface/monitor-traffic');
+      monitorArgs = args;
+      return [{ name: 'ether1', 'rx-bits-per-second': '1000000', 'tx-bits-per-second': '500000' }];
+    },
+  };
+  const _chain = { emit() {} }; _chain.to = () => _chain;
+  const collector = new InterfaceStatusCollector({
+    ros,
+    io: { engine: { clientsCount: 1 }, emit() {}, to: () => _chain },
+    pollMs: 1000,
+    state: {},
+    streamMode: false,
+  });
+  collector._ifaces.set('ether1', { name: 'ether1', disabled: 'false' });
+  collector._ifaces.set('ether2', { name: 'ether2', disabled: 'true' });
+
+  await collector._pollRatesOnce();
+
+  assert.ok(monitorArgs.includes('=interface=ether1'));
+  assert.equal(collector._streamRates.get('ether1').rxMbps, 1);
+  assert.equal(collector._streamRates.has('ether2'), false);
+});
+
+test('bandwidth collector emits only the top five devices for the dashboard', async () => {
+  const BandwidthCollector = require('../src/collectors/bandwidth');
+  const emitted = [];
+  const roomChain = { emit() {} }; roomChain.to = () => roomChain;
+  const ros = { connected: true, on() {} };
+  let snapshot = 0;
+  const makeRows = (multiplier) => Array.from({ length: 7 }, (_, i) => ({
+    '.id': `*${i + 1}`,
+    'src-address': `192.168.1.${i + 10}:5000`,
+    'dst-address': '223.5.5.5:443',
+    protocol: 'tcp',
+    'orig-bytes': String((i + 1) * 1000 * multiplier),
+    'repl-bytes': String((i + 1) * 2000 * multiplier),
+  }));
+  const connTableCache = {
+    latestWithTs() {
+      snapshot += 1000;
+      return { rows: makeRows(snapshot / 1000), ts: snapshot };
+    },
+  };
+  const recordedUsage = [];
+  const collector = new BandwidthCollector({
+    ros,
+    io: {
+      engine: { clientsCount: 1 },
+      emit(event, data) { emitted.push({ event, data }); },
+      to: () => roomChain,
+    },
+    pollMs: 3000,
+    dhcpNetworks: { getLanCidrs: () => ['192.168.1.0/24'] },
+    dhcpLeases: null,
+    arp: null,
+    ifStatus: null,
+    state: {},
+    connTableCache,
+    displayTimezone: 'Asia/Shanghai',
+    deviceUsage: {
+      loadTotals: () => [{ src_ip: '192.168.1.16', rx_mb: 10, tx_mb: 2 }],
+      record: (dayKey, srcIp, rxBytes, txBytes, ts) => recordedUsage.push({ dayKey, srcIp, rxBytes, txBytes, ts }),
+    },
+  });
+
+  await collector.tick(); // seed byte counters
+  await collector.tick(); // calculate rates
+
+  const payload = emitted.filter(e => e.event === 'bandwidth:top').at(-1).data;
+  assert.equal(payload.devices.length, 5);
+  assert.deepEqual(payload.devices.map(d => d.srcIp), [
+    '192.168.1.16', '192.168.1.15', '192.168.1.14', '192.168.1.13', '192.168.1.12',
+  ]);
+  assert.ok(payload.devices[0].totalMbps > payload.devices[1].totalMbps);
+  assert.equal(payload.devices[0].todayRxMb, 10.014);
+  assert.equal(payload.devices[0].todayTxMb, 2.007);
+  assert.equal(recordedUsage.length, 7);
+  assert.equal(recordedUsage[6].dayKey, '1970-01-01');
+});
+
 // --- ARP Collector ---
 const ArpCollector = require('../src/collectors/arp');
 

@@ -82,7 +82,7 @@ class InterfaceStatusCollector {
     if (!this.ros.connected || this._ratesInflight) return;
     const names = [...this._ifaces.keys()].filter(n => {
       const iface = this._ifaces.get(n);
-      return iface && !iface.disabled;
+      return iface && iface.disabled !== true && iface.disabled !== 'true';
     });
     if (!names.length) return;
     this._ratesInflight = true;
