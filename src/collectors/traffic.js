@@ -16,11 +16,12 @@ const { parseBps, bpsToMbps, clampPoll, stopStreamSafe } = require('./util');
 const MAX_INTERFACE_NAME_LENGTH = 128;
 
 class TrafficCollector {
-  constructor({ ros, io, defaultIf, historyMinutes, pollMs, state, onSample }) {
+  constructor({ ros, io, defaultIf, recordIfaces, historyMinutes, pollMs, state, onSample }) {
     this.ros        = ros;
     this.io         = io;
     this._lbl       = ros.routerLabel ? `[${ros.routerLabel}][traffic]` : '[traffic]';
     this.defaultIf  = defaultIf;
+    this.recordIfaces = new Set((recordIfaces || []).filter(Boolean));
     this.state      = state;
     this._onSample  = onSample || null;
     // Contract metadata only — the stream interval is fixed at 1 s, and the
@@ -70,11 +71,18 @@ class TrafficCollector {
     // Stream is driven by active subscriptions, not the available-interface list.
   }
 
-  // Returns the sorted union of subscribed interfaces + defaultIf.
+  // Returns the sorted union of continuously recorded interfaces, active
+  // browser subscriptions, and defaultIf (which is always recorded).
   _getStreamNames() {
     const s = new Set([this.defaultIf]);
+    for (const ifName of this.recordIfaces) s.add(ifName);
     for (const { ifName } of this.subscriptions.values()) s.add(ifName);
     return [...s].sort();
+  }
+
+  setRecordInterfaces(interfaces) {
+    this.recordIfaces = new Set((interfaces || []).filter(Boolean));
+    this._updateStream();
   }
 
   // Restart the stream only when the subscription set has changed.

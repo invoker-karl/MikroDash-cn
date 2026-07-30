@@ -5155,6 +5155,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   var modalUser = $('rtrModalUser');
   var modalPass = $('rtrModalPass');
   var modalIf   = $('rtrModalIf');
+  var modalRecordIfaces = $('rtrModalRecordIfaces');
   var modalPing = $('rtrModalPing');
   var modalTls      = $('rtrModalTls');
   var modalTlsI     = $('rtrModalTlsInsecure');
@@ -5380,6 +5381,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     if (isEdit) modalPass.placeholder = 'leave blank to keep current';
     else        modalPass.placeholder = '';
     modalIf.value    = router ? router.defaultIf  : 'ether1';
+    if (modalRecordIfaces) modalRecordIfaces.value = router && Array.isArray(router.recordIfaces) ? router.recordIfaces.join(', ') : '';
     modalPing.value  = router ? router.pingTarget : '1.1.1.1';
     if (modalTls)    modalTls.checked    = router ? !!router.tls           : true;
     if (modalTlsI)   modalTlsI.checked   = router ? !!router.tlsInsecure   : false;
@@ -5455,6 +5457,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       username:    modalUser ? modalUser.value.trim() : 'admin',
       password:    modalPass ? modalPass.value        : '',
       defaultIf:   modalIf  ? modalIf.value.trim()   : 'ether1',
+      recordIfaces: modalRecordIfaces ? modalRecordIfaces.value.split(',').map(function(v){ return v.trim(); }).filter(Boolean) : [],
       pingTarget:  modalPing? modalPing.value.trim()  : '1.1.1.1',
       tls:         modalTls ? modalTls.checked        : true,
       tlsInsecure: modalTlsI? modalTlsI.checked       : false,
@@ -6713,9 +6716,9 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       type: 'line',
       data: { labels: labels, datasets: [
         { label:'RX', data:rxData, borderColor:'rgba(56,189,248,.85)', backgroundColor:'rgba(56,189,248,.07)',
-          borderWidth:1.5, pointRadius:0, tension:0.2, fill:true },
+          borderWidth:1.5, pointRadius:sub.length===1?3:0, tension:0.2, fill:true },
         { label:'TX', data:txData, borderColor:'rgba(52,211,153,.8)', backgroundColor:'rgba(52,211,153,.06)',
-          borderWidth:1.5, pointRadius:0, tension:0.2, fill:true },
+          borderWidth:1.5, pointRadius:sub.length===1?3:0, tension:0.2, fill:true },
       ]},
       options: {
         responsive:true, maintainAspectRatio:false, animation:false,

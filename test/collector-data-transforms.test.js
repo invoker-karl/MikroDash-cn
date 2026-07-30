@@ -3,6 +3,19 @@ const assert = require('node:assert/strict');
 
 const TrafficCollector = require('../src/collectors/traffic');
 
+test('traffic collector continuously streams configured report interfaces', () => {
+  const ros = { connected: false, on() {} };
+  const io = { engine: { clientsCount: 0 }, emit() {} };
+  const collector = new TrafficCollector({
+    ros, io, defaultIf: 'pppoe-out1', recordIfaces: ['bridge1', 'LAN-RTL8125'],
+    historyMinutes: 1, state: {},
+  });
+
+  assert.deepEqual(collector._getStreamNames(), ['LAN-RTL8125', 'bridge1', 'pppoe-out1']);
+  collector.setRecordInterfaces(['bridge1']);
+  assert.deepEqual(collector._getStreamNames(), ['bridge1', 'pppoe-out1']);
+});
+
 test('traffic collector emits normalized socket and WAN payloads from a poll cycle', () => {
   const socketEmits = [];
   const broadcastEmits = [];

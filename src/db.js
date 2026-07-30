@@ -208,13 +208,15 @@ function insertConnectivityEvent(routerId, connected) {
 
 // Returns {select, group} SQL fragments for a given aggregation period.
 // The select expr produces the bucket start timestamp in ms; group expr is the GROUP BY key.
-function _aggBucket(agg) {
-  if (agg === 'hour')  return { select: '(ts / 3600000) * 3600000',    group: '(ts / 3600000)' };
-  if (agg === 'day')   return { select: '(ts / 86400000) * 86400000',   group: '(ts / 86400000)' };
-  if (agg === 'week')  return { select: '(ts / 604800000) * 604800000', group: '(ts / 604800000)' };
+function _aggBucket(agg, offsetMs) {
+  const off = Math.max(-86400000, Math.min(86400000, Math.trunc(Number(offsetMs) || 0)));
+  const shifted = `(ts + ${off})`;
+  if (agg === 'hour')  return { select: `((${shifted} / 3600000) * 3600000) - ${off}`,    group: `(${shifted} / 3600000)` };
+  if (agg === 'day')   return { select: `((${shifted} / 86400000) * 86400000) - ${off}`,   group: `(${shifted} / 86400000)` };
+  if (agg === 'week')  return { select: `((${shifted} / 604800000) * 604800000) - ${off}`, group: `(${shifted} / 604800000)` };
   if (agg === 'month') return {
-    select: "CAST(strftime('%s', strftime('%Y-%m-01', ts/1000, 'unixepoch')) AS INTEGER) * 1000",
-    group:  "strftime('%Y-%m', ts/1000, 'unixepoch')",
+    select: `CAST(strftime('%s', strftime('%Y-%m-01', ${shifted}/1000, 'unixepoch')) AS INTEGER) * 1000 - ${off}`,
+    group:  `strftime('%Y-%m', ${shifted}/1000, 'unixepoch')`,
   };
   return null;
 }
@@ -267,9 +269,9 @@ function queryDeviceBandwidthTotals(routerId, dayKey) {
   `).all(routerId, dayKey);
 }
 
-function queryPingSamplesAgg(routerId, fromTs, toTs, agg) {
+function queryPingSamplesAgg(routerId, fromTs, toTs, agg, offsetMs) {
   if (!_db) return [];
-  const b = _aggBucket(agg);
+  const b = _aggBucket(agg, offsetMs);
   if (!b) return [];
   return _prep(`
     SELECT ${b.select} AS ts,
@@ -284,9 +286,9 @@ function queryPingSamplesAgg(routerId, fromTs, toTs, agg) {
   `).all(routerId, fromTs || 0, toTs || Date.now());
 }
 
-function queryTrafficSamplesAgg(routerId, iface, fromTs, toTs, agg) {
+function queryTrafficSamplesAgg(routerId, iface, fromTs, toTs, agg, offsetMs) {
   if (!_db) return [];
-  const b = _aggBucket(agg);
+  const b = _aggBucket(agg, offsetMs);
   if (!b) return [];
   return _prep(`
     SELECT ${b.select} AS ts,
@@ -301,9 +303,9 @@ function queryTrafficSamplesAgg(routerId, iface, fromTs, toTs, agg) {
   `).all(routerId, iface, fromTs || 0, toTs || Date.now());
 }
 
-function queryBandwidthSamplesAgg(routerId, iface, fromTs, toTs, agg) {
+function queryBandwidthSamplesAgg(routerId, iface, fromTs, toTs, agg, offsetMs) {
   if (!_db) return [];
-  const b = _aggBucket(agg);
+  const b = _aggBucket(agg, offsetMs);
   if (!b) return [];
   return _prep(`
     SELECT ${b.select} AS ts,

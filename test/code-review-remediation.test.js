@@ -375,6 +375,22 @@ test('routers add()/update() reject invalid pingTarget and defaultIf', () => {
   }
 });
 
+test('routers normalise continuously recorded interface names', () => {
+  const tmp = makeTmpDir();
+  try {
+    const R = freshRouters(tmp);
+    const r = R.add({
+      host: '192.168.1.1', defaultIf: 'pppoe-out1',
+      recordIfaces: ['bridge1', 'LAN-RTL8125', 'bridge1', 'pppoe-out1'],
+    });
+    assert.deepEqual(r.recordIfaces, ['bridge1', 'LAN-RTL8125']);
+    assert.throws(() => R.update(r.id, { recordIfaces: ['bad interface!'] }), /recorded interface/);
+    assert.deepEqual(R.getById(r.id).recordIfaces, ['bridge1', 'LAN-RTL8125']);
+  } finally {
+    delete process.env.DATA_DIR;
+  }
+});
+
 test('routers: undecryptable password ciphertext survives unrelated edits', () => {
   const tmp = makeTmpDir();
   try {

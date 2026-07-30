@@ -367,7 +367,7 @@ function buildSession(routerCfg, routerIo) {
   const dhcpLeases   = new DhcpLeasesCollector ({ros, io:routerIo, state});
   const arp          = new ArpCollector         ({ros,              pollMs:_cfg.pollArp,       state});
   const dhcpNetworks = new DhcpNetworksCollector({ros, io:routerIo, pollMs:_cfg.pollDhcp,      dhcpLeases, state, wanIface:DEFAULT_IF});
-  const traffic      = new TrafficCollector     ({ros, io:routerIo, defaultIf:DEFAULT_IF, historyMinutes:HISTORY_MINUTES, pollMs:1000, state,
+  const traffic      = new TrafficCollector     ({ros, io:routerIo, defaultIf:DEFAULT_IF, recordIfaces:routerCfg.recordIfaces || [], historyMinutes:HISTORY_MINUTES, pollMs:1000, state,
     onSample: (ifName, rxMbps, txMbps, ts) => dbWriter.recordTraffic(routerCfg.id, ifName, rxMbps, txMbps, ts)});
   // Backfill ring buffer from SQLite so the chart has history on first browser connect
   // (covers both server restarts and sessions where no browser was open during recording).
@@ -1406,6 +1406,11 @@ app.put('/api/routers/:id', _requireAdmin, async (req, res) => {
     if (!router) return res.status(404).json({ ok:false, error:'Router not found' });
     _broadcastRoutersList();
 
+    const liveEntry = _routerSessions.get(req.params.id);
+    if (liveEntry && liveEntry.session && liveEntry.session.traffic && body.recordIfaces !== undefined) {
+      liveEntry.session.traffic.setRecordInterfaces(router.recordIfaces || []);
+    }
+
     // If this is the active router and pingTarget changed, update the live
     // collector immediately — don't make the user wait for the next poll cycle.
     const activeId = Settings.load().activeRouterId;
@@ -1904,6 +1909,27 @@ function _tsFmt(ts) {
   }
   return new Date(ts).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
 }
+
+function _timeZoneOffsetMs(timeZone, ts) {
+  const base = Math.floor((ts || Date.now()) / 1000) * 1000;
+  if (!timeZone) return -new Date(base).getTimezoneOffset() * 60000;
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone, year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23',
+    }).formatToParts(new Date(base));
+    const values = {};
+    for (const part of parts) if (part.type !== 'literal') values[part.type] = Number(part.value);
+    return Date.UTC(values.year, values.month - 1, values.day, values.hour, values.minute, values.second) - base;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function _reportOffsetMs(from, to) {
+  const midpoint = from && to ? from + Math.floor((to - from) / 2) : (from || to || Date.now());
+  return _timeZoneOffsetMs(Settings.load().displayTimezone || '', midpoint);
+}
 function _fmtDuration(ms) {
   if (!ms || ms < 0) return '';
   const s = Math.floor(ms / 1000);
@@ -1920,7 +1946,7 @@ app.get('/api/reports/ping', _requireAdmin, _scopeRouterId, (req, res) => {
   const { routerId, from, to, aggregate } = _parseReportParams(req.query);
   if (!routerId) return res.status(400).json({ ok: false, error: 'routerId required' });
   const rows = aggregate
-    ? db.queryPingSamplesAgg(routerId, from, to, aggregate)
+    ? db.queryPingSamplesAgg(routerId, from, to, aggregate, _reportOffsetMs(from, to))
     : db.queryPingSamples(routerId, from, to);
   res.json({ ok: true, rows });
 });
@@ -1930,7 +1956,7 @@ app.get('/api/reports/ping/export', _requireAdmin, _scopeRouterId, (req, res) =>
   const { routerId, from, to, aggregate } = _parseReportParams(req.query);
   if (!routerId) return res.status(400).json({ ok: false, error: 'routerId required' });
   const rows = aggregate
-    ? db.queryPingSamplesAgg(routerId, from, to, aggregate)
+    ? db.queryPingSamplesAgg(routerId, from, to, aggregate, _reportOffsetMs(from, to))
     : db.queryPingSamples(routerId, from, to);
   const fmt  = (req.query.format || 'csv').toLowerCase();
   const cols  = ['ts', 'target', 'rtt_ms', 'loss_pct'];
@@ -1973,7 +1999,7 @@ app.get('/api/reports/traffic', _requireAdmin, _scopeRouterId, (req, res) => {
   const iface = req.query.interface || '';
   if (iface) {
     const rows = aggregate
-      ? db.queryTrafficSamplesAgg(routerId, iface, from, to, aggregate)
+      ? db.queryTrafficSamplesAgg(routerId, iface, from, to, aggregate, _reportOffsetMs(from, to))
       : db.queryTrafficSamples(routerId, iface, from, to);
     return res.json({ ok: true, rows });
   }
@@ -1987,7 +2013,7 @@ app.get('/api/reports/traffic/export', _requireAdmin, _scopeRouterId, (req, res)
   const iface = req.query.interface || '';
   if (!iface) return res.status(400).json({ ok: false, error: 'interface required for export' });
   const rows  = aggregate
-    ? db.queryTrafficSamplesAgg(routerId, iface, from, to, aggregate)
+    ? db.queryTrafficSamplesAgg(routerId, iface, from, to, aggregate, _reportOffsetMs(from, to))
     : db.queryTrafficSamples(routerId, iface, from, to);
   const fmt   = (req.query.format || 'csv').toLowerCase();
   const cols  = ['ts', 'interface', 'rx_mbps', 'tx_mbps'];
@@ -2030,7 +2056,7 @@ app.get('/api/reports/bandwidth', _requireAdmin, _scopeRouterId, (req, res) => {
   const iface = req.query.interface || '';
   if (iface) {
     const rows = aggregate
-      ? db.queryBandwidthSamplesAgg(routerId, iface, from, to, aggregate)
+      ? db.queryBandwidthSamplesAgg(routerId, iface, from, to, aggregate, _reportOffsetMs(from, to))
       : db.queryBandwidthSamples(routerId, iface, from, to);
     return res.json({ ok: true, rows });
   }
@@ -2044,7 +2070,7 @@ app.get('/api/reports/bandwidth/export', _requireAdmin, _scopeRouterId, (req, re
   const iface = req.query.interface || '';
   if (!iface) return res.status(400).json({ ok: false, error: 'interface required for export' });
   const rows  = aggregate
-    ? db.queryBandwidthSamplesAgg(routerId, iface, from, to, aggregate)
+    ? db.queryBandwidthSamplesAgg(routerId, iface, from, to, aggregate, _reportOffsetMs(from, to))
     : db.queryBandwidthSamples(routerId, iface, from, to);
   const fmt   = (req.query.format || 'csv').toLowerCase();
   const cols  = ['ts', 'interface', 'rx_mb', 'tx_mb'];

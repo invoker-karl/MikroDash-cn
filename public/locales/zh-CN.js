@@ -122,6 +122,8 @@
       'Save User': '保存用户',
       'Save Custom Profile': '保存自定义配置',
       'Settings saved': '设置已保存',
+      'Recorded Traffic Interfaces': '持续记录流量的接口',
+      'Comma-separated interfaces to record continuously for reports. The default WAN interface is always recorded.': '用英文逗号分隔需要持续写入报表的接口。默认 WAN 接口始终会被记录。',
       'Reset to defaults': '恢复默认设置',
       'Reset zoom': '重置缩放',
       'Cancel': '取消',

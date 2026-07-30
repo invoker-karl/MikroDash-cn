@@ -29,3 +29,28 @@ test('device bandwidth migration persists and aggregates daily totals', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('daily traffic aggregation uses the requested timezone offset', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrodash-traffic-tz-'));
+  process.env.DATA_DIR = tmpDir;
+  delete require.cache[require.resolve('../src/db')];
+  const db = require('../src/db');
+  try {
+    db.open();
+    const first = Date.UTC(2026, 6, 29, 17, 0, 0); // 2026-07-30 01:00 Asia/Shanghai
+    const second = Date.UTC(2026, 6, 30, 15, 0, 0); // 2026-07-30 23:00 Asia/Shanghai
+    db.insertTrafficSample('r1', 'bridge1', 10, 2, first);
+    db.insertTrafficSample('r1', 'bridge1', 20, 4, second);
+
+    const rows = db.queryTrafficSamplesAgg('r1', 'bridge1', first - 1, second + 1, 'day', 8 * 3600000);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].ts, Date.UTC(2026, 6, 29, 16, 0, 0));
+    assert.equal(rows[0].rx_mbps, 15);
+    assert.equal(rows[0].tx_mbps, 3);
+    assert.equal(rows[0].sample_count, 2);
+  } finally {
+    db.close();
+    delete process.env.DATA_DIR;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

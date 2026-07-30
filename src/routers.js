@@ -129,6 +129,20 @@ function _validateTargets(defaultIf, pingTarget) {
   if (pingTarget && !isValidIp(pingTarget)) throw new Error('Invalid pingTarget — must be a valid IP address');
 }
 
+function _normalizeRecordIfaces(value, defaultIf) {
+  const raw = Array.isArray(value) ? value : String(value || '').split(',');
+  const seen = new Set();
+  const out = [];
+  for (const item of raw) {
+    const name = String(item || '').trim();
+    if (!name || name === defaultIf || seen.has(name)) continue;
+    if (!/^[A-Za-z0-9_./-]{1,128}$/.test(name)) throw new Error('Invalid recorded interface');
+    seen.add(name);
+    out.push(name);
+  }
+  return out.slice(0, 16);
+}
+
 // ── File I/O ──────────────────────────────────────────────────────────────────
 function _ensureDataDir() {
   try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
@@ -237,6 +251,7 @@ function add(data) {
     username:      String(data.username      || 'admin').trim(),
     password:      (data.password && data.password !== '••••••••') ? String(data.password) : '',
     defaultIf:     String(data.defaultIf     || 'ether1').trim(),
+    recordIfaces:  [],
     pingTarget:    String(data.pingTarget    || '1.1.1.1').trim(),
     bwDownMbps:    Math.max(1, parseInt(data.bwDownMbps || '1000', 10) || 1000),
     bwUpMbps:      Math.max(1, parseInt(data.bwUpMbps   || '1000', 10) || 1000),
@@ -246,6 +261,7 @@ function add(data) {
     addedAt:             Date.now(),
   };
   _validateTargets(entry.defaultIf, entry.pingTarget);
+  entry.recordIfaces = _normalizeRecordIfaces(data.recordIfaces, entry.defaultIf);
   routers.push(entry);
   _cache = routers;
   _writeFile(routers);
@@ -279,6 +295,7 @@ function update(id, data) {
     tlsInsecure:   data.tlsInsecure   !== undefined ? !!(data.tlsInsecure || data.tlsInsecure === 'true') : existing.tlsInsecure,
     username:      data.username      !== undefined ? String(data.username).trim()     : existing.username,
     defaultIf:     data.defaultIf     !== undefined ? String(data.defaultIf).trim()   : existing.defaultIf,
+    recordIfaces:  existing.recordIfaces || [],
     pingTarget:    data.pingTarget     !== undefined ? String(data.pingTarget).trim()  : existing.pingTarget,
     bwDownMbps:    data.bwDownMbps    !== undefined ? Math.max(1, parseInt(data.bwDownMbps, 10) || 1000) : (existing.bwDownMbps || 1000),
     bwUpMbps:      data.bwUpMbps      !== undefined ? Math.max(1, parseInt(data.bwUpMbps,   10) || 1000) : (existing.bwUpMbps   || 1000),
@@ -288,6 +305,10 @@ function update(id, data) {
   };
 
   _validateTargets(updated.defaultIf, updated.pingTarget);
+  updated.recordIfaces = _normalizeRecordIfaces(
+    data.recordIfaces !== undefined ? data.recordIfaces : updated.recordIfaces,
+    updated.defaultIf,
+  );
 
   // Only update password if provided and not the mask sentinel
   if (data.password !== undefined && data.password !== '••••••••' && data.password !== '') {
