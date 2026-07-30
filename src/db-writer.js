@@ -9,6 +9,7 @@ const _trafficBuckets   = new Map(); // `${routerId}:${iface}` → { minuteTs, s
 // Parallel bandwidth accumulator — sums actual MB transferred per minute.
 // Each onSample call represents 1 second of data, so MB = Mbps / 8 per call.
 const _bandwidthBuckets = new Map(); // `${routerId}:${iface}` → { minuteTs, sumRxMb, sumTxMb }
+const _deviceBandwidthBuckets = new Map(); // `${routerId}\0${srcIp}` → minute/day byte totals
 // Ping accumulator — 1-minute averages keyed by routerId + target. Avoids a
 // synchronous INSERT per ping sample (~1/s) on the Socket.IO emit hot path and
 // cuts ping_samples row growth ~60×, matching the traffic/bandwidth bucketing.
@@ -64,6 +65,31 @@ function recordTraffic(routerId, ifName, rxMbps, txMbps, ts) {
   }
 }
 
+function _flushDeviceBucket(bucket) {
+  if (!bucket || bucket.rxMb + bucket.txMb <= 0) return;
+  db.insertDeviceBandwidthSample(
+    bucket.routerId, bucket.dayKey, bucket.srcIp,
+    bucket.rxMb, bucket.txMb, bucket.minuteTs + 30000
+  );
+}
+
+function recordDeviceBandwidth(routerId, dayKey, srcIp, rxBytes, txBytes, ts) {
+  if (!routerId || !dayKey || !srcIp) return;
+  const rxMb = Math.max(0, Number(rxBytes) || 0) / 1_000_000;
+  const txMb = Math.max(0, Number(txBytes) || 0) / 1_000_000;
+  if (rxMb + txMb <= 0) return;
+  const minuteTs = _minuteFloor(ts || Date.now());
+  const key = routerId + '\0' + srcIp;
+  const bucket = _deviceBandwidthBuckets.get(key);
+  if (bucket && bucket.minuteTs === minuteTs && bucket.dayKey === dayKey) {
+    bucket.rxMb += rxMb;
+    bucket.txMb += txMb;
+    return;
+  }
+  _flushDeviceBucket(bucket);
+  _deviceBandwidthBuckets.set(key, { routerId, dayKey, srcIp, minuteTs, rxMb, txMb });
+}
+
 // Flush all open buckets — call on session teardown to avoid data loss
 function flushTraffic(routerId) {
   for (const [key, bucket] of _trafficBuckets) {
@@ -94,6 +120,11 @@ function flushTraffic(routerId) {
       p.sumLoss / p.count,
       p.minuteTs + 30000);
     _pingBuckets.delete(key);
+  }
+  for (const [key, bucket] of _deviceBandwidthBuckets) {
+    if (routerId && bucket.routerId !== routerId) continue;
+    _flushDeviceBucket(bucket);
+    _deviceBandwidthBuckets.delete(key);
   }
 }
 
@@ -134,4 +165,4 @@ function recordConnectivity(routerId, connected) {
   db.insertConnectivityEvent(routerId, connected);
 }
 
-module.exports = { recordTraffic, flushTraffic, recordPing, recordConnectivity };
+module.exports = { recordTraffic, recordDeviceBandwidth, flushTraffic, recordPing, recordConnectivity };

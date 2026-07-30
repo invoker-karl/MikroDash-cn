@@ -362,6 +362,7 @@
       'Last 6 Months': '最近6个月',
       'Last 1 Year': '最近1年',
       'Today': '今天',
+      'Today total': '今日',
       'Yesterday': '昨天',
       'Day Before Yesterday': '前天',
       'Previous Week': '上周',
