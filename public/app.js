@@ -3124,8 +3124,11 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       applyTransform();
     }
 
-    // Mouse wheel zoom
+    // Mouse wheel zoom. Require Ctrl so ordinary scrolling over the map keeps
+    // moving the page instead of unexpectedly leaving the map zoomed/panned.
+    // Trackpad pinch gestures are exposed by Chromium as Ctrl+wheel as well.
     wrap.addEventListener('wheel',function(e){
+      if(!e.ctrlKey) return;
       e.preventDefault();
       var rect=wrap.getBoundingClientRect();
       var cx=e.clientX-rect.left, cy=e.clientY-rect.top;
