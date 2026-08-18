@@ -98,7 +98,16 @@ jobs:
             docker rm -f "$name"
           done
           docker buildx imagetools create --tag "$image:latest" "$image@$DIGEST"
-          latest_digest="$(docker buildx imagetools inspect "$image:latest" | awk '/^Digest:/ {print $2; exit}')"
+          # GHCR can accept the tag update before its read path exposes it.
+          # Retry only this read-after-write check; image verification above is
+          # never retried or weakened.
+          latest_digest=''
+          for attempt in $(seq 1 15); do
+            candidate="$(docker buildx imagetools inspect "$image:latest" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)"
+            latest_digest="$candidate"
+            if [[ "$latest_digest" == "$DIGEST" ]]; then break; fi
+            sleep 2
+          done
           [[ "$latest_digest" == "$DIGEST" ]]
 
   create-release:
