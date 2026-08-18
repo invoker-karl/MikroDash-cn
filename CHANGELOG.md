@@ -2,7 +2,7 @@
 
 All notable changes to MikroDash will be documented in this file.
 
-## [Unreleased]
+## [0.7.8-cn.3] — Traffic recovery for renamed interfaces
 
 - Fixed an invalid or renamed default RouterOS interface blocking traffic for
   every otherwise valid interface in the combined monitor stream.
