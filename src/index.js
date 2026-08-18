@@ -40,6 +40,7 @@ const { computeHealthStatus } = require('./health');
 const { verifyRouterOSPatchMarkers } = require('./routeros/patchVerification');
 const { classifyRosError } = require('./routeros/classifyError');
 const { scheduleForcedShutdownTimer } = require('./shutdown');
+const { isPublicI18nPath } = require('./i18nAssets');
 
 try {
   verifyRouterOSPatchMarkers({ readFileSync: fs.readFileSync });
@@ -222,7 +223,7 @@ function _authMiddleware(req, res, next) {
 }
 
 function _modernAuthMiddleware(req, res, next) {
-  if (_MODERN_PUBLIC.has(req.path) || req.path.startsWith('/vendor/')) return next();
+  if (_MODERN_PUBLIC.has(req.path) || isPublicI18nPath(req.path) || req.path.startsWith('/vendor/')) return next();
   const session = _sessionFromReq(req);
   if (session) { req.authSession = session; return next(); }
   if (req.path.startsWith('/api/')) return res.status(401).json({ ok: false, error: 'Not authenticated' });
