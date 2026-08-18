@@ -1,0 +1,5 @@
+# P0 safety guard for the wei/pull GitHub App. Its no-config Basic Setup uses a
+# hard reset that previously erased the Chinese history from main. The app
+# should be uninstalled or restricted; this file is only a second line of
+# defence. .github/workflows/upstream-review.yml is the sole sync mechanism.
+mergeMethod: none

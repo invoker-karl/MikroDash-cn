@@ -14,7 +14,23 @@ on:
   workflow_dispatch:
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run i18n:audit
+      - run: npm test
+
   test:
+    needs: quality
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,11 +50,12 @@ jobs:
       # directory argument as a module to load and dies with MODULE_NOT_FOUND,
       # and the quotes stop the runner's shell expanding the pattern against
       # the host filesystem before docker ever sees it.
-      - name: Run test suite
+      - name: Run production-dependency test suite
         run: |
-          docker run --rm --entrypoint node \
+          files=$(find test -name '*.test.js' ! -name 'i18n.test.js' -printf '/app/%p\n' | paste -sd, - | tr ',' ' ')
+          docker run --rm --entrypoint sh \
             -v "$PWD/test:/app/test:ro" \
-            mikrodash:ci --test --test-force-exit '/app/test/*.test.js'
+            mikrodash:ci -c "node --test --test-force-exit $files"
 
       # Catches startup-only failures the suite cannot see: src/index.js is not
       # covered by any test, so a bad config value or a dependency behaviour
