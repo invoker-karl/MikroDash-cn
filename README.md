@@ -150,7 +150,7 @@ Pull and run the pre-built image directly — no need to clone the repo or creat
 docker pull ghcr.io/invoker-karl/mikrodash-cn:latest
 ```
 
-Images are published by GitHub Actions on version tags only, so `latest` always tracks the most recent release rather than unreleased work on `main`. (Pushes to `main` still build both architectures as a check, they just are not published.) Each release is a multi-arch manifest covering `linux/amd64` and `linux/arm64`. Docker will automatically pull the correct layer for your platform — this includes Raspberry Pi 4/5, MikroTik's own R5S/RB5009 companion boards, and Apple M-series machines running Linux containers.
+Images are published by GitHub Actions on Chinese version tags only, so `latest` always tracks the most recent verified release rather than unreleased work on `main`. Pull requests build and smoke-test the production image on `linux/amd64`; each tagged release builds and starts both `linux/amd64` and `linux/arm64` before promotion. Each release is a multi-arch manifest covering those two platforms. Docker will automatically pull the correct layer for your platform — this includes Raspberry Pi 4/5, MikroTik's own R5S/RB5009 companion boards, and Apple M-series machines running Linux containers.
 
 > **ARMv7 (32-bit ARM) is no longer built, as of 0.6.0.** MikroDash moved to a Node 24 base image, and Node 24 dropped 32-bit ARM upstream, so `node:24-alpine` publishes no `linux/arm/v7` variant.
 >
