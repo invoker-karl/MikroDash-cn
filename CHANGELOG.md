@@ -2,6 +2,13 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [Unreleased]
+
+- Fixed an invalid or renamed default RouterOS interface blocking traffic for
+  every otherwise valid interface in the combined monitor stream.
+- Traffic now falls back to the first active interface and exposes persistent
+  stream/configuration failures in the dashboard, health state, and logs.
+
 ## [0.7.8-cn.2] — Verified multi-platform release
 
 - Fixed release verification to start the amd64 and arm64 child manifests by

@@ -7,8 +7,8 @@
  * with the updated list.  This keeps RouterOS API load proportional to what is
  * actually being watched rather than the total interface count.
  *
- * setAvailableInterfaces() populates availableIfs for input validation only —
- * it no longer drives the stream.
+ * setAvailableInterfaces() supplies the authoritative whitelist used by both
+ * input validation and the consolidated stream.
  */
 const RingBuffer = require('../util/ringbuffer');
 const { parseBps, bpsToMbps, clampPoll, stopStreamSafe, createStreamHealth } = require('./util');
@@ -33,11 +33,14 @@ class TrafficCollector {
     this._allStream    = null;
     this._ifNamesKey   = '';         // sorted key of current stream — detects changes
     this.availableIfs  = new Set();  // validated set from fetchInterfaces()
+    this._interfacesLoaded = false;
     this._loggedErr    = false;
     this._restartTimer = null;
     this._watchdogTimer = null;
     this._streamStartTs = 0;
     this._lastDataTs    = 0;
+    this._configError   = null;
+    this._configErrorSince = null;
     this.lastWanStatus = null;
     // Restarting a dead stream forever is correct recovery for a transient
     // stall, but it turns a persistent fault into a silent sawtooth: the chart
@@ -70,16 +73,47 @@ class TrafficCollector {
   }
 
   setAvailableInterfaces(interfaces) {
+    const streamWasStarted = !!this._allStream || this._ifNamesKey !== '';
     const names = (interfaces || []).map(i => typeof i === 'string' ? i : i && i.name).filter(Boolean);
     this.availableIfs = new Set(names);
-    // Stream is driven by active subscriptions, not the available-interface list.
+    this._interfacesLoaded = true;
+
+    // A renamed/removed defaultIf used to poison the consolidated RouterOS
+    // command even after the browser selected a valid interface:
+    //   =interface=missing-default,lan
+    // RouterOS rejects the whole command with "no such item", so lan never
+    // receives a sample. Once the authoritative interface list is available,
+    // keep invalid names out of the stream and expose the configuration fault.
+    if (!this.availableIfs.has(this.defaultIf)) {
+      const detail = `Configured default interface "${this.defaultIf}" is unavailable`;
+      if (this._configError !== detail) {
+        this._configError = detail;
+        this._configErrorSince = Date.now();
+        this.state.lastTrafficErr = detail;
+        console.warn('%s', this._lbl + ' ' + detail);
+        this._emitConfigHealth(true);
+      }
+    } else if (this._configError) {
+      this._configError = null;
+      this._configErrorSince = null;
+      this.state.lastTrafficErr = null;
+      this._emitConfigHealth(false);
+    }
+
+    // Loading the whitelist can remove an invalid name from a stream that was
+    // optimistically opened during startup, so always re-evaluate the union.
+    if (streamWasStarted) this._updateStream();
   }
 
   // Returns the sorted union of subscribed interfaces + defaultIf.
   _getStreamNames() {
     const s = new Set([this.defaultIf]);
     for (const { ifName } of this.subscriptions.values()) s.add(ifName);
-    return [...s].sort();
+    const names = [...s];
+    // Before fetchInterfaces completes we retain the historical optimistic
+    // startup. Afterwards the RouterOS list is authoritative and no stale name
+    // may enter the consolidated command.
+    return (this._interfacesLoaded ? names.filter(name => this.availableIfs.has(name)) : names).sort();
   }
 
   // Restart the stream only when the subscription set has changed.
@@ -96,7 +130,7 @@ class TrafficCollector {
     const trimmed = ifName.trim();
     if (!trimmed || trimmed.length > MAX_INTERFACE_NAME_LENGTH) return null;
     if (/[\r\n\0]/.test(trimmed)) return null;
-    if (!this.availableIfs.size) {
+    if (!this._interfacesLoaded) {
       console.warn('%s', this._lbl + ' traffic:select rejected — interface list not yet ready');
       return null;
     }
@@ -121,6 +155,13 @@ class TrafficCollector {
     if (!this.ros.connected) return;
 
     const names = this._getStreamNames();
+    // No valid interface is safer than sending =interface= and entering a
+    // permanent restart loop. A browser selection (or refreshed interface
+    // list) calls _updateStream() and starts the stream as soon as one is valid.
+    if (!names.length) return;
+    // start() opens the optimistic stream directly, outside _updateStream().
+    // Record its real key so a later authoritative empty list can stop it.
+    this._ifNamesKey = names.join(',');
     this._streamStartTs = Date.now();
     this._lastDataTs = 0;
     console.log('%s', this._lbl + ' streaming', names.length, 'interface(s) interval=1s');
@@ -151,13 +192,14 @@ class TrafficCollector {
       const msg = err && err.message ? err.message : String(err);
       this._allStream = null;
       const isMissing = msg.includes('no such item');
-      if (!isMissing) {
-        if (!this._loggedErr) {
-          console.error('%s', this._lbl + ' stream error:', msg);
-          this._loggedErr = true;
-        }
-        this.state.lastTrafficErr = msg;
+      if (!this._loggedErr) {
+        console.error('%s', this._lbl + ' stream error for [' + names.join(',') + ']:', msg);
+        this._loggedErr = true;
       }
+      // Do not hide "no such item": it is exactly the evidence needed to
+      // distinguish a stale interface configuration from API starvation.
+      this.state.lastTrafficErr = this._configError || msg;
+      this._reportHealth(this._health.recordRestart());
       // Always schedule a restart — 'no such item' is a transient interface blip,
       // other errors may be CHR/VM killing the stream under resource pressure.
       if (this._restartTimer) clearTimeout(this._restartTimer); // overlapping errors must not leak timers
@@ -175,16 +217,34 @@ class TrafficCollector {
   // degraded stream does not spam the socket every 5 s watchdog tick.
   _reportHealth(changed) {
     if (changed === null) return;
+    const configDegraded = !!this._configError;
     this.lastHealth = {
       collector: 'traffic',
-      degraded:  changed,
+      degraded:  configDegraded || changed,
       restarts:  this._health.restarts,
-      since:     this._health.since || null,
+      since:     configDegraded ? this._configErrorSince : (this._health.since || null),
+      reason:    configDegraded ? 'Configured default interface is unavailable' : null,
       ts:        Date.now(),
     };
     console.warn('%s', this._lbl + (changed
       ? ' stream degraded — ' + this._health.restarts + ' restarts without recovery'
       : ' stream recovered'));
+    this.io.emit('stream:health', this.lastHealth);
+  }
+
+  _emitConfigHealth(degraded) {
+    // Configuration faults are immediately actionable and do not need three
+    // watchdog cycles before becoming visible. Keep the user-facing reason
+    // stable for i18n; the exact interface name remains in healthz and logs.
+    const isDegraded = degraded || this._health.degraded;
+    this.lastHealth = {
+      collector: 'traffic',
+      degraded: isDegraded,
+      restarts: this._health.restarts,
+      since: degraded ? this._configErrorSince : (isDegraded ? (this._health.since || Date.now()) : null),
+      reason: degraded ? 'Configured default interface is unavailable' : null,
+      ts: Date.now(),
+    };
     this.io.emit('stream:health', this.lastHealth);
   }
 
@@ -280,7 +340,7 @@ class TrafficCollector {
     // Collector health must advance even with no browser connected. Previously
     // this happened after the idle gate, so a healthy stream looked stale.
     this.state.lastTrafficTs  = now;
-    this.state.lastTrafficErr = null;
+    this.state.lastTrafficErr = this._configError;
     this._loggedErr = false;
 
     if (this.io.engine.clientsCount === 0) return;

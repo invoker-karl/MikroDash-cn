@@ -330,6 +330,109 @@ test('traffic stream accepts numeric zero counters as a healthy idle sample', ()
   t.stop();
 });
 
+test('traffic excludes a missing default interface and recovers on a valid browser selection', () => {
+  const calls = [];
+  const health = [];
+  const ros = new EventEmitter();
+  ros.connected = true;
+  ros.stream = (cmd, params) => {
+    const s = new EventEmitter();
+    s.stop = () => {};
+    calls.push({ cmd, params, stream: s });
+    return s;
+  };
+  const io = stubIo(1);
+  io.emit = (ev, data) => { if (ev === 'stream:health') health.push(data); };
+  const state = {};
+  const t = new TrafficCollector({ ros, io, defaultIf: 'missing-wan', historyMinutes: 1, pollMs: 1000, state });
+  const sock = new EventEmitter();
+  sock.id = 'browser-1';
+
+  t.start();
+  t.bindSocket(sock);
+  assert.equal(calls[0].params[0], '=interface=missing-wan', 'startup remains optimistic before the interface list loads');
+
+  t.setAvailableInterfaces([{ name: 'lan', running: true, disabled: false }]);
+  assert.equal(t._allStream, null, 'poisoned stream is stopped when the authoritative list arrives');
+  assert.deepEqual(t._getStreamNames(), [], 'missing default and subscription are excluded');
+  assert.match(state.lastTrafficErr, /missing-wan.*unavailable/);
+  assert.equal(health.at(-1).reason, 'Configured default interface is unavailable');
+
+  sock.emit('traffic:select', { ifName: 'lan' });
+  assert.equal(calls.at(-1).params[0], '=interface=lan', 'valid selection starts a clean stream without the stale default');
+  calls.at(-1).stream.emit('data', {
+    name: 'lan',
+    'rx-bits-per-second': '0',
+    'tx-bits-per-second': '0',
+    running: 'true',
+    disabled: 'false',
+  });
+  assert.ok(state.lastTrafficTs > 0, 'valid selected interface advances traffic freshness');
+  assert.match(state.lastTrafficErr, /missing-wan.*unavailable/, 'healthz preserves the actionable configuration warning');
+  t.stop();
+});
+
+test('traffic records no-such-item stream failures instead of hiding them', () => {
+  const ros = mockStreamRos();
+  const state = {};
+  const t = new TrafficCollector({ ros, io: stubIo(0), defaultIf: 'wan', historyMinutes: 1, pollMs: 1000, state });
+  const oldError = console.error;
+  console.error = () => {};
+  try {
+    t.start();
+    t._allStream.emit('error', new Error('no such item'));
+    assert.equal(state.lastTrafficErr, 'no such item');
+    assert.ok(t._restartTimer, 'failed stream remains eligible for recovery');
+  } finally {
+    t.stop();
+    console.error = oldError;
+  }
+});
+
+test('traffic treats an empty fetched interface list as authoritative', () => {
+  const ros = mockStreamRos();
+  const state = {};
+  const t = new TrafficCollector({ ros, io: stubIo(0), defaultIf: 'wan', historyMinutes: 1, pollMs: 1000, state });
+  const oldWarn = console.warn;
+  console.warn = () => {};
+  try {
+    t.start();
+    t.setAvailableInterfaces([]);
+    assert.deepEqual(t._getStreamNames(), []);
+    assert.equal(t._allStream, null, 'an empty authoritative list stops the optimistic stream');
+    assert.match(state.lastTrafficErr, /wan.*unavailable/);
+  } finally {
+    t.stop();
+    console.warn = oldWarn;
+  }
+});
+
+test('traffic configuration warning survives stream health transitions', () => {
+  const emitted = [];
+  const io = stubIo(0);
+  io.emit = (ev, data) => { if (ev === 'stream:health') emitted.push(data); };
+  const t = new TrafficCollector({
+    ros: mockStreamRos(), io, defaultIf: 'missing-wan', historyMinutes: 1, pollMs: 1000, state: {},
+  });
+  const oldWarn = console.warn;
+  console.warn = () => {};
+  try {
+    t.setAvailableInterfaces(['lan']);
+    t._reportHealth(t._health.recordRestart());
+    t._reportHealth(t._health.recordRestart());
+    t._reportHealth(t._health.recordRestart());
+    t._reportHealth(t._health.recordHealthy(60000));
+    assert.equal(emitted.at(-1).degraded, true);
+    assert.equal(emitted.at(-1).reason, 'Configured default interface is unavailable');
+
+    t.setAvailableInterfaces(['missing-wan', 'lan']);
+    assert.equal(emitted.at(-1).degraded, false, 'warning clears only after the configured interface returns');
+  } finally {
+    t.stop();
+    console.warn = oldWarn;
+  }
+});
+
 test('interface rate poll records errors without advancing freshness', async () => {
   const state = { lastIfStatusTs: 123 };
   const ros = new EventEmitter();

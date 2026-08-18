@@ -28,6 +28,7 @@
       'Wireless': '无线客户端',
       'Interfaces': '接口',
       'Interface': '接口',
+      'Configured default interface is unavailable': '配置的默认接口不可用',
       'DHCP': 'DHCP',
       'DHCP Leases': 'DHCP 租约',
       'VPN': 'VPN',

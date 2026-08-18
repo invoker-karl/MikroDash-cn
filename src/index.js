@@ -3667,6 +3667,9 @@ async function sendInitialState(socket, entry) {
     socket.emit('interfaces:error', { reason });
   }
   socket.emit('interfaces:list', { defaultIf: s.DEFAULT_IF, interfaces: ifs });
+  // A configuration warning may predate this browser connection. Replay it
+  // explicitly; the original broadcast only reaches sockets already online.
+  if (s.traffic.lastHealth) socket.emit('stream:health', s.traffic.lastHealth);
 
   let _wanIp = s.state.lastWanIp || '';
   if (!_wanIp && s.ifStatus.lastPayload) {
