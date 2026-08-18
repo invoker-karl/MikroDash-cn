@@ -74,7 +74,11 @@ test('debounced offline records the disconnect time, not the declaration time', 
 
   const offlineTs = events()[0].ts;
   assert.equal(offlineTs, downAt, 'stored time is when the router actually dropped');
-  assert.ok(Date.now() - offlineTs >= THRESH,
+  // Timers are not precision clocks: on some Linux runners a nominal 120 ms
+  // timeout can be observed as 119 ms across two Date.now() reads. Keep enough
+  // separation to prove the debounce timestamp is earlier without making CI
+  // depend on millisecond scheduling granularity.
+  assert.ok(Date.now() - offlineTs >= THRESH - 10,
     'and is measurably earlier than the moment we declared it');
 });
 
