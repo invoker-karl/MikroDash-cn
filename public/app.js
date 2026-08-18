@@ -2355,7 +2355,15 @@ socket.on('interfaces:list',function(data){
     return (i.running===true||i.running==='true')&&i.disabled!==true&&i.disabled!=='true';
   }).map(function(i){return i.name;});
   _rebuildIfaceSelect(active);
-  if(data.defaultIf&&!currentIf)ifaceSelect.value=data.defaultIf;
+  if(!currentIf){
+    // A removed/renamed default interface must not clear the picker or remain
+    // subscribed invisibly. Fall back to the first active RouterOS interface;
+    // the server independently filters the invalid default from its combined
+    // monitor-traffic request and surfaces the configuration warning.
+    var initialIf=active.indexOf(data.defaultIf)!==-1?data.defaultIf:(active[0]||'');
+    ifaceSelect.value=initialIf;
+    if(initialIf&&initialIf!==data.defaultIf)socket.emit('traffic:select',{ifName:initialIf});
+  }
 });
 // If the server failed to fetch the interface list, show a visible placeholder
 // in the dropdown rather than leaving it silently empty.
@@ -2998,8 +3006,10 @@ socket.on('stream:health', function (h) {
   var warn = $(STREAM_WARN_CARDS[h.collector] + 'Warn');
   if (!card || !warn) return;
   if (h.degraded) {
-    warn.textContent = '⚠ Data incomplete — stream restarted '
-      + h.restarts + ' times without recovering';
+    warn.textContent = h.reason
+      ? '⚠ ' + h.reason
+      : '⚠ Data incomplete — stream restarted '
+        + h.restarts + ' times without recovering';
     card.classList.add('is-degraded');
   } else {
     warn.textContent = '';
