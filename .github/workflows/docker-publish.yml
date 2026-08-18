@@ -1,113 +1,113 @@
-name: Build & Publish Docker Image
+name: Publish Chinese Docker release
 
 on:
   push:
-    branches:
-      - main
     tags:
-      - 'v*.*.*'
-  workflow_dispatch:
+      - 'v[0-9]*.[0-9]*.[0-9]*-cn.[0-9]*'
 
 env:
   REGISTRY: ghcr.io
-  # Must be lowercase — Docker registry names are case-sensitive
-  IMAGE_NAME: secops-7/mikrodash
+  IMAGE_NAME: invoker-karl/mikrodash-cn
 
 jobs:
-  build-and-push:
+  publish-version:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      digest: ${{ steps.build.outputs.digest }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      # QEMU lets the runner execute arm64 instructions via emulation.
-      # Required for cross-compiling non-amd64 layers on an amd64 runner.
-      #
-      # linux/arm/v7 was dropped at the Node 24 move: node:24-alpine publishes
-      # no 32-bit ARM variant (amd64, arm64/v8 and s390x only), because Node 24
-      # dropped 32-bit ARM upstream. ARMv7 users stay on 0.5.54.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+      - uses: actions/checkout@v7
+      - name: Reject anything except an exact Chinese release tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == tag ]]
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-cn\.[0-9]+$ ]]
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$(node -p "require('./package.json').version")" == "$version" ]]
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: linux/amd64,linux/arm64
-
-      # Buildx is the Docker CLI plugin that drives multi-platform builds.
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Only version tags produce published images: v0.5.21 pushes :0.5.21,
-      # :0.5 and :latest. A push to main builds but publishes nothing, so
-      # :latest always points at the newest release rather than at whatever was
-      # merged most recently.
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-
-      # Main pushes still build both architectures, they just do not publish.
-      # better-sqlite3 compiles natively per architecture, so an arm64 break is
-      # a real possibility and finding it at tag time would be finding it too
-      # late.
-      - name: Build and push multi-arch image
+      - name: Publish immutable version image
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # Layer cache stored in the registry so repeat builds are fast.
-          # Reading is always safe; writing is restricted to tag builds so a
-          # validation run never writes to the registry. Two concurrent writers
-          # of the same layers is what tripped GHCR's secondary rate limit and
-          # blocked the v0.5.54 publish.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: ${{ startsWith(github.ref, 'refs/tags/v') && format('type=registry,ref={0}/{1}:buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-  # Create a GitHub Release on version tags, using the matching CHANGELOG section
-  # as the release body. Only runs after the Docker image is successfully published.
-  create-release:
+  verify-and-promote:
+    needs: publish-version
     runs-on: ubuntu-latest
-    needs: build-and-push
-    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: linux/amd64,linux/arm64
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify both release platforms
+        env:
+          VERSION: ${{ needs.publish-version.outputs.version }}
+          DIGEST: ${{ needs.publish-version.outputs.digest }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}"
+          docker buildx imagetools inspect "$image@$DIGEST" --raw > manifest.json
+          jq -e '[.manifests[].platform | select(.os == "linux" and .architecture == "amd64")] | length == 1' manifest.json
+          jq -e '[.manifests[].platform | select(.os == "linux" and .architecture == "arm64")] | length == 1' manifest.json
+          for arch in amd64 arm64; do
+            name="verify-$arch"
+            docker run --platform "linux/$arch" --detach --name "$name" \
+              -e DATA_SECRET=release-verification -p 127.0.0.1::3081 \
+              "$image@$DIGEST"
+            port="$(docker port "$name" 3081/tcp | sed 's/.*://')"
+            ok=false
+            for attempt in $(seq 1 30); do
+              code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/healthz" || true)"
+              if [[ "$code" == 200 || "$code" == 503 ]]; then ok=true; break; fi
+              sleep 2
+            done
+            if [[ "$ok" != true ]]; then docker logs "$name"; docker rm -f "$name"; exit 1; fi
+            docker rm -f "$name"
+          done
+          docker buildx imagetools create --tag "$image:latest" "$image@$DIGEST"
+          latest_digest="$(docker buildx imagetools inspect "$image:latest" | awk '/^Digest:/ {print $2; exit}')"
+          [[ "$latest_digest" == "$DIGEST" ]]
+
+  create-release:
+    needs: [publish-version, verify-and-promote]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Extract changelog for this version
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          # Extract description from the CHANGELOG header line, e.g. "CAPsMAN support, ..."
-          DESCRIPTION=$(grep "^## \[${VERSION}\]" CHANGELOG.md | head -1 | sed "s/^## \[${VERSION}\] — //")
-          # Build release notes: description as a heading, then the section body
-          {
-            [ -n "$DESCRIPTION" ] && printf '## %s\n\n' "$DESCRIPTION"
-            awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md
-          } > release_notes.md
-
-      - name: Create GitHub Release
+      - uses: actions/checkout@v7
+      - name: Create release after image verification and promotion
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.publish-version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file release_notes.md
+          set -euo pipefail
+          awk "/^## \[$VERSION\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md > release_notes.md
+          test -s release_notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file release_notes.md

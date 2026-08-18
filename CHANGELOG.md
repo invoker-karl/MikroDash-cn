@@ -2,6 +2,17 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.8-cn.1] — Simplified Chinese edition on upstream v0.7.8
+
+- Rebased the Chinese edition on the complete MikroDash v0.7.8 feature set.
+- Added Chinese coverage for routing tabs, router maps, SSID cards, alert
+  history, accounts, roles, groups, sites, and the current settings pages.
+- Hardened live DOM translation, locale selection, user-data boundaries, and
+  auditable untranslated-string detection.
+- Restricted signed-out translation assets to three exact paths.
+- Added reviewed upstream-sync and two-platform GHCR release workflows. The
+  immutable version image is verified before the same digest becomes `latest`.
+
 ## [0.7.8] — A map of your fleet, WiFi SSIDs, and alerts that clear
 
 The Routers page gains a **Map** view plotting each router where it actually is, and the

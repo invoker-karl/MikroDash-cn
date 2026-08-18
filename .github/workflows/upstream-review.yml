@@ -1,0 +1,50 @@
+name: Prepare upstream review PR
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-review
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Merge upstream into the one review branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/SecOps-7/MikroDash.git
+          git fetch upstream main --tags
+          git fetch origin automation/upstream-review || true
+          if git show-ref --verify --quiet refs/remotes/origin/automation/upstream-review; then
+            git switch --create automation/upstream-review --track origin/automation/upstream-review
+          else
+            git switch --create automation/upstream-review origin/main
+          fi
+          # Keep the candidate based on the latest reviewed Chinese main as
+          # well as upstream. Both are ordinary merges and the push is never
+          # forced, so branch history remains auditable.
+          git merge --no-edit origin/main
+          git merge --no-edit upstream/main
+          if git diff --quiet origin/automation/upstream-review 2>/dev/null; then
+            echo 'Review branch already current.'
+          else
+            git push origin automation/upstream-review
+          fi
+          gh pr view automation/upstream-review --json url --jq .url || \
+            gh pr create --base main --head automation/upstream-review \
+              --title 'chore: review upstream MikroDash updates' \
+              --body 'Automated upstream candidate only. Review translations, migrations, tests and images before merging. This workflow never auto-merges.'
