@@ -39,6 +39,13 @@ jobs:
           # forced, so branch history remains auditable.
           git merge --no-edit origin/main
           git merge --no-edit upstream/main
+          # No upstream change means the candidate has the same file tree as
+          # the reviewed Chinese main. Exit successfully instead of trying to
+          # open a zero-diff PR (which GitHub correctly rejects).
+          if git diff --quiet origin/main HEAD; then
+            echo 'No upstream changes to review.'
+            exit 0
+          fi
           if git diff --quiet origin/automation/upstream-review 2>/dev/null; then
             echo 'Review branch already current.'
           else
