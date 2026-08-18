@@ -1,4 +1,14 @@
-# MikroDash
+# MikroDash 中文版
+
+This fork is the reviewed Simplified Chinese edition of MikroDash. Release
+`0.7.8-cn.1` tracks upstream `v0.7.8`; English remains available from the
+language selector. Chinese images use
+`ghcr.io/invoker-karl/mikrodash-cn:<version>` on `linux/amd64` and
+`linux/arm64`. Node 24 no longer supports the former `linux/arm/v7` target.
+
+Upstream updates arrive only through a review PR. Never hard-reset this fork's
+`main` to upstream because that discards the Chinese commits. See
+[`docs/i18n.md`](docs/i18n.md) for translation, sync, and release policy.
 ### The Ultimate MikroTik RouterOS Dashboard.
 
 > Real-time MikroTik RouterOS v7 dashboard — streaming binary API, Socket.IO, Docker-ready.
@@ -137,7 +147,7 @@ If you need remote access, enable `modern` auth **and** place MikroDash behind a
 Pull and run the pre-built image directly — no need to clone the repo or create a `.env` file:
 
 ```bash
-docker pull ghcr.io/secops-7/mikrodash:latest
+docker pull ghcr.io/invoker-karl/mikrodash-cn:latest
 ```
 
 Images are published by GitHub Actions on version tags only, so `latest` always tracks the most recent release rather than unreleased work on `main`. (Pushes to `main` still build both architectures as a check, they just are not published.) Each release is a multi-arch manifest covering `linux/amd64` and `linux/arm64`. Docker will automatically pull the correct layer for your platform — this includes Raspberry Pi 4/5, MikroTik's own R5S/RB5009 companion boards, and Apple M-series machines running Linux containers.
@@ -151,7 +161,7 @@ Images are published by GitHub Actions on version tags only, so `latest` always 
 To pin to a specific release:
 
 ```bash
-docker pull ghcr.io/secops-7/mikrodash:0.5.43
+docker pull ghcr.io/invoker-karl/mikrodash-cn:0.7.8-cn.1
 ```
 
 Run with Docker Compose — create a `docker-compose.yml`:
@@ -159,7 +169,7 @@ Run with Docker Compose — create a `docker-compose.yml`:
 ```yaml
 services:
   mikrodash:
-    image: ghcr.io/secops-7/mikrodash:latest
+    image: ghcr.io/invoker-karl/mikrodash-cn:latest
     restart: unless-stopped
     ports:
       - "3081:3081"
