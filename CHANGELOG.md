@@ -2,6 +2,14 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.8-cn.2] — Verified multi-platform release
+
+- Fixed release verification to start the amd64 and arm64 child manifests by
+  their platform-specific digests. This avoids Docker's local manifest-cache
+  conflict while preserving promotion of the original multi-platform digest.
+- `v0.7.8-cn.1` built both images but was deliberately not promoted and did not
+  receive a GitHub Release after this verification gate caught the issue.
+
 ## [0.7.8-cn.1] — Simplified Chinese edition on upstream v0.7.8
 
 - Rebased the Chinese edition on the complete MikroDash v0.7.8 feature set.

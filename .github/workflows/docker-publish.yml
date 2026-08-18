@@ -78,9 +78,15 @@ jobs:
           jq -e '[.manifests[].platform | select(.os == "linux" and .architecture == "arm64")] | length == 1' manifest.json
           for arch in amd64 arm64; do
             name="verify-$arch"
+            platform_digest="$(jq -r --arg arch "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' manifest.json)"
+            [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            # Run the selected child manifest directly. Reusing the parent
+            # multi-platform digest for both runs makes Docker cache the first
+            # resolved platform locally, then reject the second as an attempt
+            # to overwrite that digest with different platform content.
             docker run --platform "linux/$arch" --detach --name "$name" \
               -e DATA_SECRET=release-verification -p 127.0.0.1::3081 \
-              "$image@$DIGEST"
+              "$image@$platform_digest"
             port="$(docker port "$name" 3081/tcp | sed 's/.*://')"
             ok=false
             for attempt in $(seq 1 30); do
