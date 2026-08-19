@@ -219,7 +219,7 @@ var dhcpSearch       = $('dhcpSearch');
 
 // ── State ──────────────────────────────────────────────────────────────────
 var autoScroll = true, logFilter = '', logLevel = '';
-var currentIf = '', windowSecs = 60, RIGHT_BUFFER_MS = 1000, _ifaceSelectKey = '', _serverDefaultIf = '';
+var currentIf = '', windowSecs = 60, RIGHT_BUFFER_MS = 1000, _ifaceSelectKey = '', _serverDefaultIf = '', _interfacesReady = false;
 var fwTab = 'filter', fwData = {};
 var connHistory = [], MAX_CONN_HIST = 60;
 var lastLanData = null;
@@ -1222,6 +1222,10 @@ function renderIfaceList(ifaces) {
 // the Interfaces page. Rates, IPs and MACs ride on ifstatus:update, which is
 // page-scoped (issue #108).
 socket.on('ifstatus:names',function(data){
+  // A router switch keeps the same socket. Packets already queued from the old
+  // router can arrive before the new authoritative interfaces:list; ignore
+  // them rather than briefly restoring and subscribing to the old interface.
+  if(!_interfacesReady)return;
   var ifaces=data.interfaces||[];
   // Keep the authoritative object shape. _rebuildIfaceSelect deliberately
   // retains non-disabled link-down interfaces and needs running/disabled to
@@ -2352,6 +2356,13 @@ Object.keys(logCountEls).forEach(function(sev){
 });;
 
 // ── Interface + window selectors ───────────────────────────────────────────
+function _setInterfacesPending() {
+  _interfacesReady=false;
+  _serverDefaultIf='';
+  _ifaceSelectKey='!pending';
+  ifaceSelect.innerHTML='';
+  ifaceSelect.disabled=true;
+}
 function _rebuildIfaceSelect(interfaces, defaultIf) {
   var usable=(interfaces||[]).filter(function(i){
     return i&&i.name&&i.disabled!==true&&i.disabled!=='true';
@@ -2381,13 +2392,17 @@ function _rebuildIfaceSelect(interfaces, defaultIf) {
 }
 socket.on('interfaces:list',function(data){
   if(data&&data.ok===false)return;
+  _interfacesReady=true;
+  ifaceSelect.disabled=false;
   _serverDefaultIf=(data&&data.defaultIf)||'';
   _rebuildIfaceSelect((data&&data.interfaces)||[],_serverDefaultIf);
 });
 // If the server failed to fetch the interface list, show a visible placeholder
 // in the dropdown rather than leaving it silently empty.
 socket.on('interfaces:error',function(data){
+  _interfacesReady=false;
   _ifaceSelectKey='!error';
+  ifaceSelect.disabled=true;
   ifaceSelect.innerHTML='';
   var opt=document.createElement('option');
   opt.value='';
@@ -2600,7 +2615,7 @@ socket.on('connect',function(){
   document.body.classList.remove('is-disconnected');
   _sysMetaWritten=false;
   currentIf=''; allPoints=[];
-  _serverDefaultIf='';
+  _setInterfacesPending();
   if(_rosCurrentlyDisconnected) {
     rosBanner.classList.add('show');
     document.body.classList.add('is-ros-disconnected');
@@ -2719,6 +2734,8 @@ function clearStreamHealthWarnings() {
 }
 
 socket.on('router:switching', function () {
+  currentIf='';
+  _setInterfacesPending();
   clearDashboardData();
   clearStreamHealthWarnings();
 });

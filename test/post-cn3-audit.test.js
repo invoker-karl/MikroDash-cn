@@ -149,7 +149,7 @@ test('Detect Internet rejection is distinct from a successful empty result and p
 
 test('interface picker preserves a non-disabled down interface and error is not success-empty', () => {
   const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
-  const start = app.indexOf('function _rebuildIfaceSelect');
+  const start = app.indexOf('function _setInterfacesPending');
   const end = app.indexOf("ifaceSelect.addEventListener('change'", start);
   const source = app.slice(start, end);
   const namesStart = app.indexOf("socket.on('ifstatus:names'");
@@ -160,7 +160,7 @@ test('interface picker preserves a non-disabled down interface and error is not 
   const context = {
     document: dom.window.document,
     ifaceSelect: dom.window.document.getElementById('iface'),
-    currentIf: 'wan', _ifaceSelectKey: '', _serverDefaultIf: '',
+    currentIf: 'wan', _ifaceSelectKey: '', _serverDefaultIf: '', _interfacesReady: false,
     socket: {
       on(name, handler) { handlers[name] = handler; },
       emit(name, payload) { emitted.push({ name, payload }); },
@@ -208,6 +208,62 @@ test('interface picker preserves a non-disabled down interface and error is not 
   });
   assert.equal(emitted.length, before + 1);
   assert.equal(emitted.at(-1).payload.ifName, 'lan');
+});
+
+test('router switching ignores queued old interface names until the new authoritative list', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const selectorStart = app.indexOf('function _setInterfacesPending');
+  const selectorSource = app.slice(selectorStart, app.indexOf("ifaceSelect.addEventListener('change'", selectorStart));
+  const namesStart = app.indexOf("socket.on('ifstatus:names'");
+  const namesSource = app.slice(namesStart, app.indexOf("socket.on('ifstatus:update'", namesStart));
+  const switchingStart = app.indexOf("socket.on('router:switching', function () {");
+  const switchingSource = app.slice(switchingStart, app.indexOf('\n});', switchingStart) + 4);
+  const dom = new JSDOM('<select id="iface"></select>');
+  const handlers = {};
+  const emitted = [];
+  const context = {
+    ifaceSelect: dom.window.document.getElementById('iface'),
+    document: dom.window.document,
+    currentIf: '', _ifaceSelectKey: '', _serverDefaultIf: '', _interfacesReady: false,
+    clearDashboardData() {}, clearStreamHealthWarnings() {},
+    socket: {
+      on(name, handler) { handlers[name] = handler; },
+      emit(name, payload) { emitted.push({ name, payload }); },
+    },
+    console: { warn() {} },
+  };
+  vm.runInNewContext(selectorSource, context);
+  vm.runInNewContext(namesSource, context);
+  vm.runInNewContext(switchingSource, context);
+
+  handlers['interfaces:list']({
+    ok: true, defaultIf: 'a-wan',
+    interfaces: [{ name: 'a-wan', running: true, disabled: false }],
+  });
+  assert.equal(context.ifaceSelect.value, 'a-wan');
+
+  handlers['router:switching']();
+  assert.equal(context._interfacesReady, false);
+  assert.equal(context._serverDefaultIf, '');
+  assert.equal(context.ifaceSelect.options.length, 0);
+  assert.equal(context.ifaceSelect.disabled, true);
+  const afterSwitch = emitted.length;
+
+  handlers['ifstatus:names']({
+    interfaces: [{ name: 'a-wan', running: true, disabled: false }],
+  });
+  assert.equal(context.ifaceSelect.options.length, 0, 'queued router A names remain hidden');
+  assert.equal(emitted.length, afterSwitch, 'queued router A names cannot subscribe');
+
+  handlers['interfaces:list']({
+    ok: true, defaultIf: 'b-wan',
+    interfaces: [{ name: 'b-wan', running: false, disabled: false }],
+  });
+  assert.equal(context._interfacesReady, true);
+  assert.equal(context.ifaceSelect.disabled, false);
+  assert.deepEqual(Array.from(context.ifaceSelect.options, option => option.value), ['b-wan']);
+  assert.equal(context.ifaceSelect.value, 'b-wan');
+  assert.equal(emitted.length, afterSwitch, 'authoritative default does not need fallback subscription');
 });
 
 test('invalid configured default keeps health at 503 with and without browser fallback traffic', () => {
