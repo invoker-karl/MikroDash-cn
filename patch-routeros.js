@@ -18,6 +18,7 @@
 'use strict';
 const fs   = require('fs');
 const path = require('path');
+const { hasExactPatchMarker } = require('./src/routeros/patchVerification');
 
 const BASE = path.join(__dirname, 'node_modules', 'node-routeros', 'dist');
 let patchFailed = false;
@@ -31,7 +32,7 @@ function patch(filePath, description, replacements) {
 
   let src = fs.readFileSync(filePath, 'utf8');
 
-  if (src.includes('MIKRODASH_PATCHED_' + description)) {
+  if (hasExactPatchMarker(src, 'MIKRODASH_PATCHED_' + description)) {
     console.log('[patch]', description, '— already applied, skipping');
     return true;
   }

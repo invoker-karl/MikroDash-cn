@@ -13,6 +13,11 @@ function resolveDistPath(marker) {
     ? 'Channel.js' : path.join('connector', 'Receiver.js');
 }
 
+function hasExactPatchMarker(src, marker) {
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^\\s*//\\s*${escaped}\\s*$`, 'm').test(src);
+}
+
 function verifyRouterOSPatchMarkers({
   patchMarkers = PATCH_MARKERS,
   distDir = path.join(__dirname, '..', '..', 'node_modules', 'node-routeros', 'dist'),
@@ -32,7 +37,7 @@ function verifyRouterOSPatchMarkers({
       throw new Error(msg);
     }
 
-    if (!src.includes(marker)) {
+    if (!hasExactPatchMarker(src, marker)) {
       const msg = `[MikroDash] CRITICAL: node-routeros patch "${marker}" not found in ${target}`;
       log.error(msg);
       throw new Error(msg);
@@ -43,5 +48,6 @@ function verifyRouterOSPatchMarkers({
 module.exports = {
   PATCH_MARKERS,
   resolveDistPath,
+  hasExactPatchMarker,
   verifyRouterOSPatchMarkers,
 };

@@ -139,7 +139,7 @@ test('verifyRouterOSPatchMarkers throws when a patch file cannot be read', () =>
 });
 
 test('all node-routeros compatibility patches are required at startup', () => {
-  const { PATCH_MARKERS, resolveDistPath } = require('../src/routeros/patchVerification');
+  const { PATCH_MARKERS, resolveDistPath, hasExactPatchMarker } = require('../src/routeros/patchVerification');
   assert.deepEqual(PATCH_MARKERS, [
     'MIKRODASH_PATCHED_EMPTY_REPLY',
     'MIKRODASH_PATCHED_UNREGISTEREDTAG',
@@ -148,6 +148,17 @@ test('all node-routeros compatibility patches are required at startup', () => {
     'MIKRODASH_PATCHED_MULTI_BLOCK_V2',
   ]);
   assert.equal(resolveDistPath('MIKRODASH_PATCHED_MULTI_BLOCK_V2'), 'Channel.js');
+  assert.equal(hasExactPatchMarker('// MIKRODASH_PATCHED_MULTI_BLOCK_V2\n',
+    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'V2 cannot satisfy the V1 marker');
+});
+
+test('patch verification fails when only MULTI_BLOCK_V2 is present', () => {
+  const { verifyRouterOSPatchMarkers } = require('../src/routeros/patchVerification');
+  assert.throws(() => verifyRouterOSPatchMarkers({
+    patchMarkers: ['MIKRODASH_PATCHED_MULTI_BLOCK'],
+    readFileSync: () => '// MIKRODASH_PATCHED_MULTI_BLOCK_V2\n',
+    log: { error() {} },
+  }), /MULTI_BLOCK.*not found/i);
 });
 
 test('ROS write timeout closes the active connection before rejecting', async () => {
