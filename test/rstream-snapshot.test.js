@@ -67,3 +67,19 @@ test('snapshot probe invalidation rejects stop/reconnect completions and preserv
   assert.equal(classifySnapshotError(new Error('unknown command')).kind, 'unsupported');
   assert.equal(classifySnapshotError(new Error('timeout')).kind, 'transient');
 });
+
+test('a real row cancels an idle probe queued behind cooldown', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let reads = 0;
+  const probe = new AuthoritativeSnapshotProbe({
+    cooldownMs: 1000,
+    read: async () => { reads++; return []; },
+    apply: () => assert.fail('a pre-row idle must not apply after the real row'),
+  });
+  probe._lastStart = Date.now();
+  probe.onIdle();
+  probe.noteRealRow();
+  t.mock.timers.tick(1000);
+  await Promise.resolve();
+  assert.equal(reads, 0);
+});

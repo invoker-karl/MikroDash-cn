@@ -39,7 +39,14 @@ class AuthoritativeSnapshotProbe {
     this._lastStart = 0;
   }
 
-  noteRealRow() { this.realRowVersion += 1; }
+  noteRealRow() {
+    this.realRowVersion += 1;
+    // An idle that was waiting for the cooldown predates this real packet. Do
+    // not start a fresh probe afterward and let it erase the newer stream row.
+    this._pending = false;
+    if (this._timer) clearTimeout(this._timer);
+    this._timer = null;
+  }
 
   onIdle() {
     this._pending = true;
