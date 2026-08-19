@@ -18,7 +18,11 @@
 'use strict';
 const fs   = require('fs');
 const path = require('path');
-const { hasExactPatchMarker } = require('./src/routeros/patchVerification');
+const {
+  PATCH_MARKERS,
+  resolveDistPath,
+  hasExactPatchMarker,
+} = require('./src/routeros/patchVerification');
 
 const BASE = path.join(__dirname, 'node_modules', 'node-routeros', 'dist');
 let patchFailed = false;
@@ -182,7 +186,7 @@ patch(
     return;
   }
   let src = fs.readFileSync(channelPath, 'utf8');
-  if (src.includes('MIKRODASH_PATCHED_MULTI_BLOCK_V2')) {
+  if (hasExactPatchMarker(src, 'MIKRODASH_PATCHED_MULTI_BLOCK_V2')) {
     console.log('[patch] MULTI_BLOCK_V2 — already applied, skipping');
     return;
   }
@@ -202,17 +206,11 @@ patch(
 // A successful npm install is not enough: this archived dependency is safe for
 // MikroDash only with every required compatibility patch. Docker builds and CI
 // must fail closed if a dependency update makes a marker or behavior disappear.
-const required = [
-  [path.join(BASE, 'Channel.js'), 'MIKRODASH_PATCHED_EMPTY_REPLY'],
-  [path.join(BASE, 'Channel.js'), 'MIKRODASH_PATCHED_MULTI_BLOCK'],
-  [path.join(BASE, 'Channel.js'), 'MIKRODASH_PATCHED_MULTI_BLOCK_V2'],
-  [path.join(BASE, 'connector', 'Receiver.js'), 'MIKRODASH_PATCHED_UNREGISTEREDTAG'],
-  [path.join(BASE, 'connector', 'Receiver.js'), 'MIKRODASH_PATCHED_UTF8_ENCODING'],
-];
+const required = PATCH_MARKERS.map(marker => [path.join(BASE, resolveDistPath(marker)), marker]);
 for (const [file, marker] of required) {
   let source = '';
   try { source = fs.readFileSync(file, 'utf8'); } catch (_) { /* handled below */ }
-  if (!source.includes(marker)) {
+  if (!hasExactPatchMarker(source, marker)) {
     console.error('[patch] REQUIRED marker missing:', marker, 'in', file);
     patchFailed = true;
   }

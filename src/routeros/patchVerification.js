@@ -15,7 +15,10 @@ function resolveDistPath(marker) {
 
 function hasExactPatchMarker(src, marker) {
   const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`^\\s*//\\s*${escaped}\\s*$`, 'm').test(src);
+  // Markers may be a standalone comment or an inline end-of-line comment.
+  // Token boundaries are deliberate: MULTI_BLOCK_V2 must never satisfy the
+  // required MULTI_BLOCK marker merely because it shares that prefix.
+  return new RegExp(`(?:^|[^A-Z0-9_])${escaped}(?![A-Z0-9_])`, 'm').test(src);
 }
 
 function verifyRouterOSPatchMarkers({
