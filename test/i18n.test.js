@@ -21,7 +21,7 @@ function loadLocale(name) {
 }
 
 function createDom(language = 'en-US') {
-  const dom = new JSDOM('<!doctype html><html><body><select data-language-select><option value="en-US">English</option><option value="zh-CN">简体中文</option></select><p id="label">Dashboard</p><input id="search" placeholder="Search"><img id="visual" alt="Dashboard" aria-description="Settings" aria-valuetext="Interfaces"></body></html>', {
+  const dom = new JSDOM('<!doctype html><html><body><h1 id="brand" data-i18n-skip>Mikro<span>Dash</span></h1><select data-language-select><option value="en-US">English</option><option value="zh-CN">简体中文</option></select><p id="label">Dashboard</p><input id="search" placeholder="Search"><img id="visual" alt="Dashboard" aria-description="Settings" aria-valuetext="Interfaces"></body></html>', {
     url: 'http://127.0.0.1/', runScripts: 'dangerously', pretendToBeVisual: true,
   });
   Object.defineProperty(dom.window.navigator, 'language', { configurable: true, value: language });
@@ -73,12 +73,14 @@ test('language round-trip restores original text and attributes', async () => {
   const dom = createDom();
   const { document, MikroDashI18n } = dom.window;
   MikroDashI18n.setLanguage('zh-CN');
+  assert.equal(document.querySelector('#brand').textContent, 'MikroDash');
   assert.equal(document.querySelector('#label').textContent, '仪表盘');
   assert.equal(document.querySelector('#search').placeholder, '搜索');
   assert.equal(document.querySelector('#visual').alt, '仪表盘');
   assert.equal(document.querySelector('#visual').getAttribute('aria-description'), '设置');
   assert.equal(document.querySelector('#visual').getAttribute('aria-valuetext'), '接口');
   MikroDashI18n.setLanguage('en-US');
+  assert.equal(document.querySelector('#brand').textContent, 'MikroDash');
   assert.equal(document.querySelector('#label').textContent, 'Dashboard');
   assert.equal(document.querySelector('#search').placeholder, 'Search');
   assert.equal(document.querySelector('#visual').alt, 'Dashboard');
@@ -156,6 +158,8 @@ test('application and login pages load locales before page scripts', () => {
   assert.ok(login.indexOf('/locales/zh-CN.js') < login.indexOf('/i18n.js'));
   assert.ok(login.indexOf('/i18n.js') < login.indexOf('/login.js'));
   assert.match(index, /data-language-select/);
+  assert.match(index, /id="topbarLogo"\s+data-i18n-skip>Mikro<span>Dash<\/span>/,
+    'the split brand is an explicit translation boundary');
   assert.match(login, /data-language-select/);
 });
 

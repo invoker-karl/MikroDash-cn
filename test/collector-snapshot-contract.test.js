@@ -38,6 +38,7 @@ function rosStub(write) {
     stream.stop = () => {};
     stream.callback = callback;
     stream.words = words;
+    stream.args = args;
     ros.streams.push(stream);
     return stream;
   };
@@ -247,6 +248,68 @@ test('Talkers temporary confirmation failure preserves data and permission is di
   await flush();
   assert.equal(c.lastPayload.unavailable, true);
   assert.equal(c.lastPayload.reason, 'Kid Control permission denied');
+  c.stop();
+});
+
+test('Talkers uses the stats view for stream, idle confirmation, and poll snapshots', async () => {
+  const calls = [];
+  const row = { '.id': '*1', name: 'phone', 'mac-address': 'AA', 'rate-up': '2Mbps', 'rate-down': '14.7Mbps' };
+  let statsRows = [row];
+  const ros = rosStub(async (cmd, args) => {
+    calls.push({ cmd, args });
+    return args.includes('=stats=') ? statsRows : [];
+  });
+  const c = new TopTalkersCollector({
+    ros, io: ioStub(), pollMs: 3000, state: {}, topN: 5, streamMode: true,
+  });
+  c.start();
+  const stream = ros.streams.at(-1);
+  assert.ok(stream.args[0].includes('=stats='));
+  assert.equal(stream.args[0].some(word => word.startsWith('=.proplist=')), false);
+
+  stream.emit('data', row);
+  clearTimeout(c._commitTimer);
+  c._commitTick();
+  assert.equal(c.lastPayload.devices[0].rx_mbps, 14.7);
+  stream.emit('data', []);
+  await flush();
+  assert.equal(c.lastPayload.devices.length, 1,
+    'a synthetic idle is confirmed with stats, not cleared by a plain-print false empty');
+  assert.deepEqual(calls.at(-1).args, ['=stats=']);
+
+  c._snapshotProbe.invalidate();
+  statsRows = [];
+  c._snapshotProbe.onIdle();
+  await flush();
+  assert.deepEqual(c.lastPayload.devices, [], 'a genuinely empty stats snapshot clears the card');
+  const emptyEmits = c.io.events.filter(event => event.event === 'talkers:update' && event.data.devices.length === 0).length;
+  c._snapshotProbe.invalidate();
+  c._snapshotProbe.onIdle();
+  await flush();
+  assert.equal(c.io.events.filter(event => event.event === 'talkers:update' && event.data.devices.length === 0).length,
+    emptyEmits, 'repeated authoritative empty does not emit duplicate clears');
+
+  c.streamMode = false;
+  statsRows = [row];
+  await c._pollTalkersOnce();
+  assert.deepEqual(calls.at(-1).args, ['=stats=']);
+  c.stop();
+});
+
+test('Talkers falls back to byte-counter deltas and accepts a stable .id without MAC', () => {
+  const c = new TopTalkersCollector({
+    ros: rosStub(), io: ioStub(), pollMs: 3000, state: {}, topN: 5, streamMode: false,
+  });
+  const first = c._normaliseDevice({ '.id': '*7', name: 'wired', 'bytes-up': '1MiB', 'bytes-down': '2MiB' }, 1000);
+  const second = c._normaliseDevice({ '.id': '*7', name: 'wired', 'bytes-up': '2MiB', 'bytes-down': '4MiB' }, 2000);
+  const direct = c._normaliseDevice({ '.id': '*8', name: 'wifi', 'rate-up': 2500000, 'rate-down': '14.7Mbps' }, 2000);
+  assert.equal(first.key, '*7');
+  assert.equal(second.rateUp, 8 * 1024 * 1024);
+  assert.equal(second.rateDown, 16 * 1024 * 1024);
+  assert.equal(direct.rateUp, 2500000);
+  assert.equal(direct.rateDown, 14700000);
+  assert.equal(c._normaliseDevice({ name: 'duplicate-name-only', 'rate-up': 1 }, 3000), null,
+    'a mutable or duplicate name is not a stable identity');
   c.stop();
 });
 
