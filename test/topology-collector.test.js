@@ -944,12 +944,14 @@ test('the stream path and the poll path produce an identical payload', async () 
   assert.equal(strip(streamed.c.lastPayload), strip(polled.c.lastPayload));
 });
 
-test('an empty stream batch clears departed neighbours', async () => {
-  const { c } = build([ROW_HAP], { streamMode: true });
+test('a synthetic idle clears departed neighbours only after authoritative confirmation', async () => {
+  const { c, ros } = build([ROW_HAP], { streamMode: true });
   await pump(c);
   c._startStream();
   c._rows = [ROW_HAP];
-  c._stream._handlers.data([]);          // RStream's empty-table signal
+  ros.write = async (cmd) => cmd === '/ip/neighbor/print' ? [] : [];
+  c._stream._handlers.data([]);          // RStream synthetic idle
+  await new Promise(resolve => setImmediate(resolve));
   clearTimeout(c._rebuildDebounce); c._rebuildDebounce = null;
   c._rebuild();
   assert.equal(c.lastPayload.neighborCount, 1, 'retained as gone, not silently dropped');

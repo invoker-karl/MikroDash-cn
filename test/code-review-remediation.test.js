@@ -450,19 +450,20 @@ test('interface rate poll records errors without advancing freshness', async () 
 
 // ── Empty-table stream packets ───────────────────────────────────────────────
 
-test('talkers clears the device list when the stream reports an empty table', () => {
+test('talkers confirms synthetic idle before clearing the device list', async () => {
   const ros = mockStreamRos();
   const tk  = new TopTalkersCollector({ ros, io: stubIo(1), pollMs: 3000, state: {}, topN: 5, streamMode: true });
   tk._startStream();
   const s = ros.streams[0];
   s.emit('data', { 'mac-address': 'AA:BB:CC:DD:EE:FF', name: 'kid', 'rate-up': '100', 'rate-down': '200' });
   assert.equal(tk._devicesNext.size, 1);
-  s.emit('data', []); // RStream debounce-empty packet: table is now empty
-  assert.equal(tk._devicesNext.size, 0, 'empty packet cleared pending devices');
+  s.emit('data', []); // synthetic idle; ros.write() is the authoritative []
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(tk.lastPayload.devices, [], 'confirmed empty snapshot cleared devices');
   tk._stopStream();
 });
 
-test('wireless latches legacy fallback when the wifi table is empty (not just on error)', () => {
+test('wireless latches legacy fallback only after an authoritative empty snapshot', async () => {
   const ros = mockStreamRos();
   const w   = new WirelessCollector({
     ros, io: stubIo(1), pollMs: 30000, state: {},
@@ -471,7 +472,8 @@ test('wireless latches legacy fallback when the wifi table is empty (not just on
   w._startStream('wifi');
   const wifiStream = ros.streamsByCmd['/interface/wifi/registration-table/print'];
   assert.ok(wifiStream);
-  wifiStream.emit('data', []); // empty first batch
+  wifiStream.emit('data', []); // synthetic idle triggers ordinary /print confirmation
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(w.mode, 'wireless', 'empty wifi table latched legacy mode');
   assert.ok(ros.streamsByCmd['/interface/wireless/registration-table/print'], 'legacy stream opened');
   w.stop();
