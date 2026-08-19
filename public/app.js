@@ -515,8 +515,8 @@ function applyFontSize(sizeId) {
 })();
 
 // ── Page router ────────────────────────────────────────────────────────────
-var PAGE_TITLES = {dashboard:'Dashboard',topology:'Network Topology',connections:'Connections',wireless:'Wireless',interfaces:'Interfaces',dhcp:'DHCP',firewall:'Firewall',vpn:'VPN',logs:'Logs',bandwidth:'Bandwidth',settings:'Settings',routing:'Routing',reports:'Reports',routers:'Routers'};
-var PAGE_KEYS   = ['dashboard','wireless','interfaces','dhcp','vpn','connections','routing','bandwidth','firewall','logs'];
+var PAGE_TITLES = {dashboard:'Dashboard',topology:'Network Topology',connections:'Connections',wireless:'Wireless',wan:'WAN',interfaces:'Interfaces',dhcp:'DHCP',firewall:'Firewall',vpn:'VPN',logs:'Logs',bandwidth:'Bandwidth',settings:'Settings',routing:'Routing',reports:'Reports',routers:'Routers',vlans:'VLANs',ppp:'PPP',capsman:'CAPsMAN',bridges:'Bridges',dns:'DNS',packages:'Packages',queues:'Queues',rosusers:'Router Users',audit:'Audit'};
+var PAGE_KEYS   = ['dashboard','wan','wireless','capsman','interfaces','dhcp','dns','vlans','bridges','vpn','ppp','connections','routing','bandwidth','firewall','logs','packages','queues','rosusers','audit'];
 var _currentPage = 'dashboard';
 function pageVisible(name){ return _currentPage === name && !document.hidden; }
 /**
@@ -548,6 +548,14 @@ function showPage(name){
   document.querySelectorAll('.nav-item').forEach(function(n){n.classList.remove('active');});
   var page = $('page-'+name); if(page) page.classList.add('active');
   var nav  = document.querySelector('.nav-item[data-page="'+name+'"]'); if(nav) nav.classList.add('active');
+  // Auto-expand the category holding this page, and DELIBERATELY DO NOT SAVE it.
+  // Persisting it would mean visiting one page in each category leaves every
+  // category open forever, which is grouping that undoes itself. The rendered
+  // open set is the saved set plus this one; collapsing the group you are
+  // standing in is allowed and holds until you navigate again.
+  document.querySelectorAll('.nav-group').forEach(function(g){ g.classList.remove('has-active'); });
+  var navGrp = nav && nav.closest ? nav.closest('.nav-group') : null;
+  if (navGrp) { navGrp.classList.add('has-active'); _navAutoCat = navGrp.dataset.cat; _navRender(); }
   if(pageTitle) pageTitle.textContent = PAGE_TITLES[name]||name;
   if(pageTitleIcon){
     pageTitleIcon.innerHTML = '';
@@ -567,6 +575,123 @@ document.querySelectorAll('.nav-item').forEach(function(item){
   if (item.closest('#authUserChip')) return;
   item.addEventListener('click', function(e){e.preventDefault();showPage(item.dataset.page);});
 });
+
+// ── Nav grouping ─────────────────────────────────────────────────────────────
+// The sidebar collapses 23 pages into 7 categories. Two things are remembered
+// per user, server-side: whether grouping is on at all, and which categories are
+// open. localStorage is only a cache, read by preflight.js before the nav paints
+// so the sidebar never renders in one shape and then rearranges.
+var NAV_KEY = 'mkd_nav_prefs';
+var _navGrouped  = true;
+var _navExpanded = [];        // the SAVED set; the rendered set may add _navAutoCat
+var _navSaveTimer = null;
+// The category opened by navigating into it, which is NOT saved — otherwise
+// visiting one page per category would leave every category open forever.
+//
+// It has to be state rather than something re-derived at render time, because a
+// deliberate collapse must be able to clear it. Deriving it from the active page
+// on every render is what made collapsing the group you are standing in a no-op:
+// the click removed it from _navExpanded and the very next render put it back.
+var _navAutoCat = null;
+
+try {
+  var _navCached = JSON.parse(localStorage.getItem(NAV_KEY) || 'null');
+  if (_navCached) {
+    _navGrouped  = _navCached.grouped !== false;
+    _navExpanded = Array.isArray(_navCached.expanded) ? _navCached.expanded.slice() : [];
+  }
+} catch (e) {}
+
+/**
+ * Paint the nav from _navGrouped + _navExpanded (+ the active category).
+ *
+ * Takes over from preflight.js's #navBoot stylesheet, which exists only because
+ * the elements it needed to class did not exist yet when it ran.
+ */
+function _navRender() {
+  var boot = document.getElementById('navBoot');
+  if (boot && boot.parentNode) boot.parentNode.removeChild(boot);
+
+  document.documentElement.setAttribute('data-nav', _navGrouped ? 'grouped' : 'flat');
+  document.querySelectorAll('.nav-group').forEach(function (g) {
+    var cat  = g.dataset.cat;
+    var open = _navExpanded.indexOf(cat) !== -1 || (_navAutoCat && cat === _navAutoCat);
+    g.classList.toggle('is-open', !!open);
+    var hdr = g.querySelector('.nav-group-hdr');
+    // Set next to the class toggle, the way the router dropdown does it — it is
+    // the whole disclosure contract for a screen reader, where the 52px/190px
+    // distinction does not exist.
+    if (hdr) hdr.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  document.querySelectorAll('.nav-grouped-input').forEach(function (cb) { cb.checked = _navGrouped; });
+}
+
+/** Cache locally now, tell the server shortly. */
+function _navSave() {
+  var payload = { grouped: _navGrouped, expanded: _navExpanded.slice().sort() };
+  try { localStorage.setItem(NAV_KEY, JSON.stringify(payload)); } catch (e) {}
+  if (_navSaveTimer) clearTimeout(_navSaveTimer);
+  _navSaveTimer = setTimeout(function () {
+    fetch('/api/nav-prefs', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(function () {
+      // Fire and forget, and the UI does NOT revert. A sidebar that snaps shut
+      // because a request failed is worse than a preference that did not sync;
+      // localStorage already has it, and the next save will carry it.
+    });
+  }, 400);
+}
+
+// A separate loop from the .nav-item one above, because a header is not a nav
+// item: it carries no data-page, and it must not join the mobile drawer-closing
+// loop either, or expanding a category would slam the drawer shut.
+document.querySelectorAll('.nav-group-hdr').forEach(function (hdr) {
+  hdr.addEventListener('click', function () {
+    var cat = hdr.parentNode && hdr.parentNode.dataset.cat;
+    if (!cat) return;
+    // Toggle what is ON SCREEN, not what is in the saved set. An auto-expanded
+    // category is open without being in _navExpanded, so keying on membership
+    // made the first click on it PUSH — expanding an already-open group, and
+    // taking two clicks to shut it.
+    var at = _navExpanded.indexOf(cat);
+    if (at !== -1 || _navAutoCat === cat) {
+      if (at !== -1) _navExpanded.splice(at, 1);
+      // Collapsing the category holding the current page is allowed, and holds
+      // until you navigate into it again. Clearing the auto-expand is what makes
+      // that stick — otherwise the next render puts it straight back.
+      if (_navAutoCat === cat) _navAutoCat = null;
+    } else {
+      _navExpanded.push(cat);
+    }
+    _navRender();
+    _navSave();
+  });
+});
+
+document.querySelectorAll('.nav-grouped-input').forEach(function (cb) {
+  cb.addEventListener('change', function () {
+    _navGrouped = cb.checked;
+    _navRender();
+    _navSave();
+  });
+});
+
+// The server is the source of truth; the cache above only bought us a flash-free
+// first paint. A failure here keeps whatever the cache said.
+fetch('/api/nav-prefs', { credentials: 'same-origin' })
+  .then(function (r) { return r.ok ? r.json() : null; })
+  .then(function (d) {
+    if (!d) return;
+    _navGrouped  = d.grouped !== false;
+    _navExpanded = Array.isArray(d.expanded) ? d.expanded.slice() : [];
+    try { localStorage.setItem(NAV_KEY, JSON.stringify({ grouped: _navGrouped, expanded: _navExpanded })); } catch (e) {}
+    _navRender();
+  })
+  .catch(function () {});
+
+_navRender();
 
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────
 var kbdHint = $('kbdHint');
@@ -2505,16 +2630,33 @@ var PAGE_NAV_MAP = {
   pageWireless:'wireless', pageInterfaces:'interfaces', pageDhcp:'dhcp',
   pageVpn:'vpn', pageConnections:'connections', pageFirewall:'firewall', pageLogs:'logs',
   pageBandwidth:'bandwidth', pageRouting:'routing', pageTopology:'topology',
+  pageVlans:'vlans', pagePpp:'ppp',
+  pageCapsman:'capsman', pageBridges:'bridges', pageDns:'dns', pagePackages:'packages',
+  pageRosusers:'rosusers', pageQueues:'queues', pageWan:'wan',
+  pageRouters:'routers', pageAudit:'audit',
 };
 // Every page the nav can show. Kept in step with src/pages.js — the drift check
 // lives in test/page-registry.test.js.
-var ALL_NAV_PAGES = ['dashboard','topology','wireless','interfaces','dhcp','vpn',
-                     'connections','routing','bandwidth','firewall','logs',
-                     'reports','routers','settings'];
+// Grouped order, matching src/pages.js and the sidebar markup. dashboard stays
+// first because this array's order decides `firstVisible` — the page a user is
+// moved to when the one they are on becomes hidden.
+var ALL_NAV_PAGES = ['dashboard',
+                     'wan','interfaces','vlans','bridges','topology',
+                     'wireless','capsman',
+                     'dhcp','dns','routing',
+                     'ppp','vpn',
+                     'bandwidth','queues','connections',
+                     'firewall','rosusers',
+                     'logs','packages',
+                     'routers','reports','audit','settings'];
 // The two inputs to page visibility, merged by applyPageVisibility(): what the
 // install allows, and what this session's role allows. Both must say yes.
 var _pageInstall = {};
 var _pageAccess  = null;   // null until caps arrive — unknown must not mean hidden
+// Routers is hidden on a single-router install. Starts true so the nav is not
+// blanked before the router list has loaded, matching how _pageAccess treats
+// "not known yet" as "allow".
+var _routersMultiple = true;
 
 // Alert thresholds — updated live from settings:pages broadcasts
 var _alertCpuThreshold = 90;
@@ -2567,7 +2709,10 @@ function applyPageVisibility(pages) {
     var sKey     = settingKeyFor[pageName];
     var byInstall = !sKey || pages[sKey] !== false;
     var byRole    = !_pageAccess || !!_pageAccess[pageName];
-    var visible   = byInstall && byRole;
+    // Routers is meaningless with one router, and that rule composes with the
+    // other two rather than overriding them.
+    var byCount   = pageName !== 'routers' || _routersMultiple;
+    var visible   = byInstall && byRole && byCount;
 
     // The user chip is no longer a match here: it carries no data-page at all
     // since the account modal replaced its navigation, so the sweep cannot
@@ -2582,6 +2727,23 @@ function applyPageVisibility(pages) {
       showPage(firstVisible || 'dashboard');
     }
   }
+
+  // A category with every child hidden is chrome, not navigation. Asked of the
+  // DOM rather than recomputed from PAGE_NAV_MAP: the loop above has just
+  // written every child's display, so the group already holds the answer, and a
+  // second computation is one that can disagree with the first.
+  //
+  // This cannot make a page unreachable — it only ever hides a wrapper whose
+  // children were already hidden — so firstVisible and the fallback above are
+  // untouched.
+  document.querySelectorAll('.nav-group').forEach(function (g) {
+    var any = false;
+    g.querySelectorAll('.nav-item[data-page]').forEach(function (el) {
+      if (el.style.display !== 'none') any = true;
+    });
+    g.style.display = any ? '' : 'none';
+  });
+
   if (pages.alertCpuThreshold != null) _alertCpuThreshold = pages.alertCpuThreshold;
   if (pages.alertPingLoss     != null) _alertPingLoss     = pages.alertPingLoss;
   if (pages.vpnDashTopN       != null) _vpnDashTopN       = pages.vpnDashTopN;
@@ -2813,6 +2975,12 @@ var staleConfig=[
   {cardId:'routingPeersCard',  event:'routing:update',   threshold:90000},
   {cardId:'routingRoutesCard', event:'routing:update',   threshold:90000},
   {cardId:'topologyCard',      event:'topology:update',  threshold:90000},  // streamed — heartbeat every 60s
+  {cardId:'vlansCard',         event:'vlans:update',     threshold:30000},  // polled — threshold follows data.pollMs
+  {cardId:'capsmanCard',       event:'capsman:update',   threshold:40000},
+  {cardId:'bridgesCard',       event:'bridges:update',   threshold:30000},
+  {cardId:'dnsCard',           event:'dns:update',       threshold:40000},
+  {cardId:'packagesCard',      event:'packages:update',  threshold:90000},
+  {cardId:'pppCard',           event:'ppp:update',       threshold:30000},  // polled — threshold follows data.pollMs
 ];
 var staleTimers={};
 
@@ -4630,28 +4798,137 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
 // Settings Page
 // ═══════════════════════════════════════════════════════════════════════════
 (function(){
+  // Two ranges, and only two. They had drifted to five — 1-30s, 2-60s, 5s-5m,
+  // 10s-5m and 10s-10m — which made "how fast can this go" a per-slider
+  // surprise. Which range a collector gets is the whole decision:
+  //
+  //   LIVE  1s - 30s    data somebody watches change: rates, sessions, uplinks
+  //   SLOW  10s - 10m   data that changes when somebody edits the router
+  //
+  // A new slider picks one. It does not invent a third.
+  //
+  // Written out as literals rather than built by a helper: the drift guard in
+  // test/per-router-collection.test.js finds these by scanning the source for
+  // `{ key:'pollX'`, and a helper call made the whole list invisible to it —
+  // it found zero sliders and every profile trivially "covered" them.
   var POLL_SLIDERS = [
-    // Polled — user-configurable interval
+    // ── Live data: 1s – 30s ────────────────────────────────────────────────
     { key:'pollSystem',    label:'System / Gauges',  min:1000,  max:30000,  step:1000,  unit:'ms' },
     { key:'pollConns',     label:'Connections',      min:1000,  max:30000,  step:1000,  unit:'ms' },
     { key:'pollTalkers',   label:'Top Talkers',      min:1000,  max:30000,  step:1000,  unit:'ms' },
     { key:'pollIfstatus',  label:'Interface Rates',  min:1000,  max:30000,  step:1000,  unit:'ms' },
     { key:'pollBandwidth', label:'Bandwidth',        min:1000,  max:30000,  step:1000,  unit:'ms' },
-    { key:'pollVpn',       label:'VPN / WireGuard', min:1000,  max:30000,  step:1000,  unit:'ms' },
-    { key:'pollFirewall',  label:'Firewall',        min:1000,  max:30000,  step:1000,  unit:'ms' },
-    { key:'pollPing',      label:'Ping',            min:1000,  max:30000,  step:1000,  unit:'ms' },
-    { key:'pollWireless',  label:'Wireless',           min:10000, max:600000, step:10000, unit:'ms' },
-    { key:'pollIfaces',    label:'Interface Status',   min:10000, max:600000, step:10000, unit:'ms' },
-    { key:'pollDhcp',           label:'DHCP Networks',    min:10000, max:600000, step:10000, unit:'ms' },
-    { key:'pollTopology',       label:'Network Topology', min:10000, max:300000, step:10000, unit:'ms' },
+    { key:'pollVpn',       label:'VPN / WireGuard',  min:1000,  max:30000,  step:1000,  unit:'ms' },
+    { key:'pollFirewall',  label:'Firewall',         min:1000,  max:30000,  step:1000,  unit:'ms' },
+    { key:'pollPing',      label:'Ping',             min:1000,  max:30000,  step:1000,  unit:'ms' },
+    { key:'pollVlans',     label:'VLANs',            min:1000,  max:30000,  step:1000,  unit:'ms' },
+    { key:'pollBridges',   label:'Bridges',          min:1000,  max:30000,  step:1000,  unit:'ms' },
+    { key:'pollPpp',       label:'PPP',              min:1000,  max:30000,  step:1000,  unit:'ms' },
+    { key:'pollWan',       label:'WAN',              min:1000,  max:30000,  step:1000,  unit:'ms' },
+    { key:'pollCapsman',   label:'CAPsMAN',          min:1000,  max:30000,  step:1000,  unit:'ms' },
+    // DNS is here rather than below because the settings row carries cache-used,
+    // which is a live gauge; the static table is the part that rarely moves.
+    { key:'pollDns',       label:'DNS',              min:1000,  max:30000,  step:1000,  unit:'ms' },
+
+    // ── Slow-changing data: 10s – 10m ──────────────────────────────────────
+    { key:'pollWireless',  label:'Wireless',         min:10000, max:600000, step:10000, unit:'ms' },
+    { key:'pollIfaces',    label:'Interface Status', min:10000, max:600000, step:10000, unit:'ms' },
+    { key:'pollDhcp',      label:'DHCP Networks',    min:10000, max:600000, step:10000, unit:'ms' },
+    { key:'pollTopology',  label:'Network Topology', min:10000, max:600000, step:10000, unit:'ms' },
+    { key:'pollPackages',  label:'Packages',         min:10000, max:600000, step:10000, unit:'ms' },
   ];
 
+  // EVERY non-streamed slider must appear in EVERY profile. A missing key sets
+  // the slider to undefined and renders "NaNms" — which is what pollTopology,
+  // pollVlans and pollPpp did until this was noticed. A drift guard in
+  // test/per-router-collection.test.js now fails if a slider is added without
+  // its profile values.
+  /* Canned view presets. Mirrors VIEW_PRESETS in src/pages.js; a drift test
+     compares the two, the same way ALL_NAV_PAGES is kept in step with the page
+     registry. Page KEYS, not settings keys: the role editor matrix below is
+     keyed on the page, and only the Visible Pages grid needs the translation.
+
+     Only the ON set is listed. Everything else is turned OFF, derived from the
+     grid itself — the polling profiles listed both halves and quietly stopped
+     covering seven sliders as pages were added. */
+  var VIEW_PRESETS = {
+    home:     ['wireless', 'interfaces', 'dhcp', 'connections', 'bandwidth'],
+    standard: ['wireless', 'interfaces', 'dhcp', 'connections', 'bandwidth',
+               'topology', 'dns', 'vlans', 'vpn', 'firewall', 'logs'],
+    advanced: null,   // filled below: every page that has a toggle
+  };
+  // Derived, so a page added to the nav joins Advanced by existing.
+  VIEW_PRESETS.advanced = Object.keys(PAGE_NAV_MAP).map(function (k) { return PAGE_NAV_MAP[k]; });
+  window._VIEW_PRESETS = VIEW_PRESETS;   // the role editor lives in another IIFE
+
+  var VIEW_PRESET_KEY = 'mkd_view_preset';
+
+  /** page key -> settings key, inverted from PAGE_NAV_MAP. */
+  function _settingKeyFor(pageKey) {
+    for (var k in PAGE_NAV_MAP) if (PAGE_NAV_MAP[k] === pageKey) return k;
+    return null;
+  }
+
+  /** Which preset the current checkbox state equals, or 'custom'. */
+  function _detectViewPreset() {
+    var names = ['home', 'standard', 'advanced'];
+    for (var i = 0; i < names.length; i++) {
+      var on = {}, match = true;
+      VIEW_PRESETS[names[i]].forEach(function (pg) { on[pg] = true; });
+      for (var sKey in PAGE_NAV_MAP) {
+        var el = $('s_' + sKey);
+        if (!el) continue;
+        if (el.checked !== !!on[PAGE_NAV_MAP[sKey]]) { match = false; break; }
+      }
+      if (match) return names[i];
+    }
+    return 'custom';
+  }
+
+  function _setViewPresetUI(name) {
+    document.querySelectorAll('.view-preset-btn').forEach(function (btn) {
+      btn.classList.toggle('active', btn.dataset.viewPreset === name);
+    });
+    try { localStorage.setItem(VIEW_PRESET_KEY, name); } catch (e) {}
+  }
+
+  /* Ticks the boxes; it does NOT save. The page's own Save button carries them,
+     exactly as the poll sliders do. Nothing here can widen what a user sees:
+     these are install toggles, and the server still ANDs the role. */
+  function _applyViewPreset(name) {
+    var pages = VIEW_PRESETS[name];
+    if (pages) {
+      var on = {};
+      pages.forEach(function (pg) { on[pg] = true; });
+      for (var sKey in PAGE_NAV_MAP) {
+        var el = $('s_' + sKey);
+        if (el) el.checked = !!on[PAGE_NAV_MAP[sKey]];
+      }
+    }
+    _setViewPresetUI(name);
+  }
+
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('.view-preset-btn') : null;
+    if (!btn || !btn.dataset.viewPreset) return;
+    _applyViewPreset(btn.dataset.viewPreset);
+  });
+
   var POLL_PROFILES = {
-    fast:     { pollSystem:1000,  pollConns:1000,  pollTalkers:1000,  pollIfstatus:1000,  pollBandwidth:1000,  pollVpn:1000,  pollFirewall:1000,  pollPing:1000,  pollWireless:10000,  pollIfaces:10000,  pollDhcp:10000  },
-    faster:   { pollSystem:5000,  pollConns:5000,  pollTalkers:5000,  pollIfstatus:5000,  pollBandwidth:5000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:60000,  pollIfaces:60000,  pollDhcp:60000  },
-    standard: { pollSystem:2000,  pollConns:3000,  pollTalkers:3000,  pollIfstatus:1000,  pollBandwidth:3000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:30000,  pollIfaces:60000,  pollDhcp:290000 },
-    slow:     { pollSystem:10000, pollConns:10000, pollTalkers:10000, pollIfstatus:10000, pollBandwidth:10000, pollVpn:10000, pollFirewall:10000, pollPing:10000, pollWireless:300000, pollIfaces:300000, pollDhcp:300000 },
-    slower:   { pollSystem:30000, pollConns:30000, pollTalkers:30000, pollIfstatus:30000, pollBandwidth:30000, pollVpn:30000, pollFirewall:30000, pollPing:30000, pollWireless:600000, pollIfaces:600000, pollDhcp:600000 },
+    fast:     { pollSystem:1000,  pollConns:1000,  pollTalkers:1000,  pollIfstatus:1000,  pollBandwidth:1000,  pollVpn:1000,  pollFirewall:1000,  pollPing:1000,  pollWireless:10000,  pollIfaces:10000,  pollDhcp:10000,
+                pollTopology:10000,  pollVlans:2000,  pollPpp:2000,  pollBridges:2000,  pollDns:5000,  pollCapsman:5000,  pollPackages:30000, pollWan:2000   },
+    faster:   { pollSystem:5000,  pollConns:5000,  pollTalkers:5000,  pollIfstatus:5000,  pollBandwidth:5000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:60000,  pollIfaces:60000,  pollDhcp:60000,
+                pollTopology:60000,  pollVlans:10000, pollPpp:10000, pollBridges:10000, pollDns:20000, pollCapsman:20000, pollPackages:120000, pollWan:5000  },
+    // The seven keys added here mirror Settings.DEFAULTS exactly. The older half
+    // of this row does not (conns, ifstatus, bandwidth, vpn and dhcp have always
+    // differed), which is why a fresh install detects "Custom" rather than
+    // "Standard" — pre-existing, and left alone.
+    standard: { pollSystem:2000,  pollConns:3000,  pollTalkers:3000,  pollIfstatus:1000,  pollBandwidth:3000,  pollVpn:5000,  pollFirewall:5000,  pollPing:5000,  pollWireless:30000,  pollIfaces:60000,  pollDhcp:290000,
+                pollTopology:30000,  pollVlans:5000,  pollPpp:5000,  pollBridges:5000,  pollDns:10000, pollCapsman:10000, pollPackages:60000, pollWan:10000   },
+    slow:     { pollSystem:10000, pollConns:10000, pollTalkers:10000, pollIfstatus:10000, pollBandwidth:10000, pollVpn:10000, pollFirewall:10000, pollPing:10000, pollWireless:300000, pollIfaces:300000, pollDhcp:300000,
+                pollTopology:120000, pollVlans:20000, pollPpp:20000, pollBridges:20000, pollDns:30000, pollCapsman:30000, pollPackages:180000, pollWan:30000  },
+    slower:   { pollSystem:30000, pollConns:30000, pollTalkers:30000, pollIfstatus:30000, pollBandwidth:30000, pollVpn:30000, pollFirewall:30000, pollPing:30000, pollWireless:600000, pollIfaces:600000, pollDhcp:600000,
+                pollTopology:300000, pollVlans:30000, pollPpp:30000, pollBridges:30000, pollDns:30000, pollCapsman:30000, pollPackages:300000, pollWan:30000  },
   };
   var POLL_PROFILE_KEY = 'mkd_poll_profile';
 
@@ -4676,6 +4953,9 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     if (p) {
       POLL_SLIDERS.forEach(function(cfg) {
         if (cfg.streamed) return;
+        // A profile with no value for this slider leaves it alone rather than
+        // writing undefined into it. Belt and braces behind the drift test.
+        if (p[cfg.key] === undefined) return;
         var slider = $('s_'+cfg.key), valEl = $('sv_'+cfg.key);
         if (slider) { slider.value = p[cfg.key]; if (valEl) valEl.textContent = fmtMs(p[cfg.key]); }
       });
@@ -4714,7 +4994,20 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   function buildSliders(data) {
     var wrap = $('pollSlidersWrap'); if (!wrap) return;
     wrap.innerHTML = '';
+    // A heading before each range, spanning both columns, so a reader can see
+    // which sliders share a ceiling rather than inferring it from the numbers.
+    var _lastRange = null;
     POLL_SLIDERS.forEach(function(cfg) {
+      var range = cfg.max === 30000 ? 'live' : 'slow';
+      if (range !== _lastRange) {
+        _lastRange = range;
+        var hdr = document.createElement('div');
+        hdr.className = 'poll-group-hdr';
+        hdr.textContent = range === 'live'
+          ? 'Live data — 1s to 30s'
+          : 'Slow-changing data — 10s to 10m';
+        wrap.appendChild(hdr);
+      }
       var row = document.createElement('div');
       row.style.cssText = 'margin-bottom:.7rem';
       if (cfg.streamed) {
@@ -4968,7 +5261,10 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   // all three delegated, because the dialogs live inside a card that starts
   // hidden. Clicking inside must not close, hence the e.target === bg test.
   // accountModal rides along for Escape-to-close and backdrop-click-to-close.
-  var _PRINCIPAL_MODALS = ['userFormWrap', 'groupFormWrap', 'siteFormWrap', 'roleFormWrap', 'accountModal'];
+  var _PRINCIPAL_MODALS = ['userFormWrap', 'groupFormWrap', 'siteFormWrap', 'roleFormWrap', 'accountModal', 'faModal',
+    // The Router Users dialogs are on their own page rather than in Settings,
+    // but Escape and backdrop-click are handled here for every dialog in the app.
+    'ruUserFormWrap', 'ruGroupFormWrap', 'qFormWrap', 'wanWarnWrap'];
 
   function _closePrincipalModals() {
     _PRINCIPAL_MODALS.forEach(function (id) {
@@ -5229,6 +5525,25 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
           b.classList.toggle('sbtn-outline', b !== want);
         });
       });
+      return;
+    }
+    /* View presets, the same three tiers offered in Settings → Visible Pages.
+       Sets READ on the tier's pages plus dashboard and clears everything else,
+       then leaves it to the admin — nothing is written until Save.
+
+       `settings` is deliberately never set, Advanced included: write on that
+       page confers system:settings, and a bulk-editor must not hand out system
+       administration as a side effect of clicking "Advanced". `reports` rides
+       with Standard and Advanced, being a history view rather than a status one. */
+    var preset = e.target.closest && e.target.closest('.rf-preset');
+    if (preset) {
+      e.preventDefault();
+      var tier  = preset.getAttribute('data-role-preset');
+      var pages = (window._VIEW_PRESETS || {})[tier] || [];
+      var want  = { dashboard: 'read' };
+      pages.forEach(function (pg) { want[pg] = 'read'; });
+      if (tier !== 'home') want.reports = 'read';
+      _renderRoleMatrix(want);
       return;
     }
     var ed = e.target.closest && e.target.closest('[data-role-edit]');
@@ -5671,9 +5986,20 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       var el = $('s_'+f); if (el) el.checked = !!data[f];
     });
     // Page visibility + dashboard widget toggles
-    ['pageWireless','pageInterfaces','pageDhcp','pageVpn','pageConnections','pageFirewall','pageLogs','pageBandwidth','pageRouting','pageTopology'].forEach(function(f) {
+    ['pageWireless','pageInterfaces','pageDhcp','pageVlans','pageVpn','pagePpp','pageConnections','pageFirewall','pageLogs','pageBandwidth','pageRouting','pageTopology','pageCapsman','pageBridges','pageDns','pagePackages','pageQueues','pageWan','pageRosusers','pageRouters','pageAudit'].forEach(function(f) {
       var el = $('s_'+f); if (el) el.checked = data[f] !== false;
     });
+    // After the boxes are filled, not before: detection reads the DOM so the
+    // preset shown always matches what is actually ticked.
+    _setViewPresetUI(_detectViewPreset());
+    // Ticking a box by hand means the selection is no longer a named preset.
+    for (var _pk in PAGE_NAV_MAP) {
+      var _el = $('s_' + _pk);
+      if (_el && !_el._viewPresetBound) {
+        _el._viewPresetBound = true;
+        _el.addEventListener('change', function () { _setViewPresetUI(_detectViewPreset()); });
+      }
+    }
     var pingEnabledEl = $('s_pingEnabled'); if (pingEnabledEl) pingEnabledEl.checked = data.pingEnabled !== false;
     var rosDebugEl = $('s_rosDebug'); if (rosDebugEl) rosDebugEl.checked = !!data.rosDebug;
     var unEnabledEl = $('s_userNotifyEnabled'); if (unEnabledEl) unEnabledEl.checked = !!data.userNotifyEnabled;
@@ -5785,7 +6111,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     ['routerTls','routerTlsInsecure'].forEach(function(f) {
       var el = $('s_'+f); if (el) out[f] = el.checked;
     });
-    ['pageWireless','pageInterfaces','pageDhcp','pageVpn','pageConnections','pageFirewall','pageLogs','pageBandwidth','pageRouting','pageTopology'].forEach(function(f) {
+    ['pageWireless','pageInterfaces','pageDhcp','pageVlans','pageVpn','pagePpp','pageConnections','pageFirewall','pageLogs','pageBandwidth','pageRouting','pageTopology','pageCapsman','pageBridges','pageDns','pagePackages','pageQueues','pageWan','pageRosusers','pageRouters','pageAudit'].forEach(function(f) {
       var el = $('s_'+f); if (el) out[f] = el.checked;
     });
     var pingEnabledEl = $('s_pingEnabled'); if (pingEnabledEl) out.pingEnabled = pingEnabledEl.checked;
@@ -7003,6 +7329,12 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
      One entry per protocol. Adding a fourth is a line here plus a button and a
      panel in the markup, which is the whole point of the strip. */
   var RT_TABS = { routes: renderRoutes, bgp: render };
+  // The card is shared, so its title and its filter group belong to whichever
+  // tab is showing.
+  var RT_TAB_META = {
+    routes: { title: 'Static & Dynamic Routes', filters: 'rtRoutesFilters' },
+    bgp:    { title: 'BGP Peers',               filters: 'rtPeersFilters'  },
+  };
   var _rtTab  = 'routes';
 
   /* Render whichever panel is on screen.
@@ -7035,6 +7367,12 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
         p.classList.toggle('active', p.id === 'rttab-' + key);
       });
     }
+    var title = $('rtCardTitle');
+    if (title && RT_TAB_META[key]) title.textContent = RT_TAB_META[key].title;
+    Object.keys(RT_TAB_META).forEach(function (k) {
+      var f = $(RT_TAB_META[k].filters);
+      if (f) f.hidden = k !== key;
+    });
     renderActiveTab();
   }
 
@@ -7248,8 +7586,12 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       navSel.value = _activeRouterId || (navSel.options[0] && navSel.options[0].value) || '';
     }
     if (ddWrap) ddWrap.style.display = 'flex';
-    var navRouters = $('nav-routers');
-    if (navRouters) navRouters.style.display = _routers.length > 1 ? '' : 'none';
+    // The router count is a third input to page visibility, not a second writer
+    // of the same style property: applyPageVisibility() also sets display on
+    // this element, so writing it here directly meant whichever ran last won —
+    // the Visible Pages toggle and the single-router rule fighting each other.
+    _routersMultiple = _routers.length > 1;
+    applyPageVisibility();
     updateDropdownLabel();
     if (_ddOpen) renderDropdown();
   }
@@ -10714,4 +11056,2775 @@ function _renderRoutersMap(rows) {
   });
 
   window._rtrMapApply = apply;
+}());
+
+/* ── Frequency Analyzer ───────────────────────────────────────────────────────
+   The only place the dashboard drives a disruptive action: a frequency scan
+   takes the chosen radio off the air and drops every client on it. The server
+   bounds that (src/wifiScan.js); this side is responsible for saying so plainly
+   before the button is pressed, and for never leaving the modal claiming to be
+   scanning when it is not. */
+(function () {
+  var modal   = $('faModal');
+  var openBtn = $('faOpenBtn');
+  if (!modal || !openBtn) return;
+
+  var ifaceSel = $('faIface'), durSel = $('faDuration');
+  var scanBtn  = $('faScanBtn'), stopBtn = $('faStopBtn'), statusEl = $('faStatus');
+  var gridEl   = $('faChanGrid'), emptyEl = $('faEmpty'), spinEl = $('faSpin');
+
+  var FA_FLOOR_DBM = -100;  // bar base and y-axis minimum
+  var _chart = null;        // built on open — a canvas sized while display:none is 0x0
+  var _rows  = [];
+  var _state = { scanning: false, scanId: null, currentChannelMhz: null, endsAt: 0 };
+  var _tick  = null;
+  var _ifaceList = [];
+
+  // Green (open) through red (congested). Same shape as pingColor(): a small
+  // ladder of thresholds rather than a gradient, so two channels a percent apart
+  // do not read as meaningfully different.
+  function congestionColour(load, alpha) {
+    var a = alpha === undefined ? 0.85 : alpha;
+    if (load == null)  return 'rgba(148,163,190,' + (a * 0.45) + ')';
+    if (load < 20)     return 'rgba(74,222,128,' + a + ')';
+    if (load < 40)     return 'rgba(163,230,53,' + a + ')';
+    if (load < 60)     return 'rgba(251,191,36,' + a + ')';
+    if (load < 80)     return 'rgba(251,146,60,' + a + ')';
+    return 'rgba(248,113,113,' + a + ')';
+  }
+
+  function setStatus(text, scanning) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle('is-scanning', !!scanning);
+  }
+
+  function setScanning(on) {
+    _state.scanning = on;
+    scanBtn.style.display = on ? 'none' : '';
+    stopBtn.style.display = on ? '' : 'none';
+    if (spinEl) spinEl.classList.toggle('on', on);
+    ifaceSel.disabled = on;
+    durSel.disabled = on;
+    if (_tick) { clearInterval(_tick); _tick = null; }
+    if (on) {
+      _tick = setInterval(function () {
+        var left = Math.max(0, Math.ceil((_state.endsAt - Date.now()) / 1000));
+        // Past zero the router owes us a result; say we are waiting rather than
+        // counting into negative numbers.
+        setStatus(left > 0 ? ('Scanning… ' + left + 's — clients disconnected') : 'Finishing…', true);
+      }, 250);
+    }
+  }
+
+  /* Best channel: lowest load, tie-broken by fewest networks.
+     Note for 2.4GHz: channels there overlap, so the lowest-load channel can sit
+     between two busy ones. Restricting the pick to 1/6/11 would avoid that; it
+     is not done here because the metric shown is exactly what the router
+     measured, with nothing inferred on top. */
+  function bestChannel(rows) {
+    var scored = rows.filter(function (r) { return r.load != null; });
+    if (!scored.length) return null;
+    return scored.slice().sort(function (a, b) {
+      if (a.load !== b.load) return a.load - b.load;
+      return (a.nets || 0) - (b.nets || 0);
+    })[0];
+  }
+
+  function renderStats() {
+    var cur = _rows.filter(function (r) { return r.ch === _state.currentChannelMhz; })[0];
+    var best = bestChannel(_rows);
+    var nf = _rows.map(function (r) { return r.nf; }).filter(function (v) { return v != null; });
+    var nets = _rows.reduce(function (n, r) { return n + (r.nets || 0); }, 0);
+
+    var unit = function (u) { return '<span class="fa-stat-unit">' + u + '</span>'; };
+    $('faCurChan').innerHTML   = (_state.currentChannelMhz || '&mdash;') + unit('MHz');
+    $('faNetworks').innerHTML  = _rows.length ? String(nets) : '&mdash;';
+    $('faCongestion').innerHTML = (cur && cur.load != null ? cur.load : '&mdash;') + unit('%');
+    $('faBestChan').innerHTML  = (best ? best.ch : '&mdash;') + unit('MHz');
+    // Median, not mean: one spurious bin should not move the reported floor.
+    var median = nf.length ? nf.slice().sort(function (a, b) { return a - b; })[Math.floor(nf.length / 2)] : null;
+    $('faNoise').innerHTML     = (median == null ? '&mdash;' : median) + unit('dBm');
+
+    if (cur && cur.load != null) {
+      $('faCongestion').style.color = congestionColour(cur.load, 1);
+    } else {
+      $('faCongestion').style.color = '';
+    }
+  }
+
+  function renderGrid() {
+    if (!_rows.length) { gridEl.innerHTML = ''; return; }
+    gridEl.innerHTML = _rows.map(function (r) {
+      var isCur = r.ch === _state.currentChannelMhz;
+      var load  = r.load == null ? null : r.load;
+      return '<div class="fa-chan' + (isCur ? ' is-current' : '') + '"' +
+             ' style="background:' + congestionColour(load, 0.22) +
+             ';border-color:' + congestionColour(load, 0.5) + '"' +
+             ' title="' + esc(String(r.chRaw || r.ch)) + (r.nets != null ? (' · ' + r.nets + ' networks') : '') + '">' +
+        '<div class="fa-chan-num">' + (r.chNum == null ? '&mdash;' : ('ch ' + r.chNum)) + '</div>' +
+        '<div class="fa-chan-freq">' + r.ch + '</div>' +
+        '<div class="fa-chan-load" style="color:' + congestionColour(load, 1) + '">' +
+          (load == null ? '&mdash;' : (load + '%')) + '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  /* A vertical band marking the radio's own channel, drawn UNDER the bars so it
+     locates you without hiding the reading. This replaces colouring that bar
+     blue, which marked the channel at the cost of the one congestion colour you
+     most want to see — your own. */
+  var faChannelBand = {
+    id: 'faChannelBand',
+    beforeDatasetsDraw: function (chart) {
+      if (_state.currentChannelMhz == null) return;
+      var idx = chart.data.labels.indexOf(_state.currentChannelMhz);
+      if (idx < 0) return;
+      // Take the width from the bar itself so the band lines up exactly, rather
+      // than from the category spacing — Chart.js insets bars within their
+      // category, so a category-wide band would sit visibly proud of them.
+      var el = (chart.getDatasetMeta(0).data || [])[idx];
+      var xs = chart.scales.x;
+      if (!el && !xs) return;
+      var x = el ? el.x : xs.getPixelForValue(idx);
+      var w = (el && el.width) ? el.width
+        : Math.max(10, Math.min(chart.data.labels.length > 1
+            ? Math.abs(xs.getPixelForValue(1) - xs.getPixelForValue(0)) : 18, 44));
+      var a = chart.chartArea, ctx = chart.ctx;
+      ctx.save();
+      ctx.fillStyle = 'rgba(56,189,248,.20)';
+      ctx.fillRect(x - w / 2, a.top, w, a.bottom - a.top);
+      ctx.strokeStyle = 'rgba(56,189,248,.85)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x - w / 2, a.top, w, a.bottom - a.top);
+      ctx.restore();
+    },
+  };
+
+  function makeChart() {
+    if (_chart) { _chart.destroy(); _chart = null; }
+    var ctx = $('faSpectrum');
+    if (!ctx || typeof Chart === 'undefined') return;
+    _chart = new Chart(ctx, {
+      type: 'bar',
+      data: { labels: [], datasets: [
+        // Signal power as bars, each coloured by that channel's congestion, so
+        // one glance answers both "is anything there" and "how busy is it".
+        // Congestion stays on the chart as the bar colour, and is readable as a
+        // number in the tooltip and the grid above — it does not need a line of
+        // its own competing with the signal trace.
+        { label: 'Signal power', data: [], yAxisID: 'y', order: 3,
+          backgroundColor: [], borderRadius: 2, borderSkipped: false },
+        // The reference the signal is measured against.
+        { label: 'Noise floor', type: 'line', data: [], yAxisID: 'y', order: 2,
+          borderColor: 'rgba(148,163,190,.75)', borderDash: [4, 3],
+          borderWidth: 1.5, pointRadius: 0, tension: 0.25, fill: false, spanGaps: true },
+        // Airtime load on its own axis. It used to be encoded only as bar
+        // colour, so a channel read as orange without reading as 44%. Stepped
+        // because load is measured per channel; interpolating between them
+        // would draw values the router never reported.
+      ] },
+      plugins: [faChannelBand],
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            display: true,
+            labels: {
+              color: 'rgba(148,163,190,.8)', boxWidth: 10, font: { size: 10 }, usePointStyle: true,
+              // The current-channel band is drawn by a plugin, so it has no
+              // dataset for the legend to pick up. Append it by hand, or the
+              // one mark people ask about is the one nothing explains.
+              generateLabels: function (chart) {
+                var items = Chart.defaults.plugins.legend.labels.generateLabels(chart);
+                items.push({
+                  text: 'Active Channel',
+                  fillStyle: 'rgba(56,189,248,.35)',
+                  strokeStyle: 'rgba(56,189,248,.85)',
+                  lineWidth: 1.5, pointStyle: 'rect', hidden: false,
+                });
+                return items;
+              },
+            },
+            // That appended item has no datasetIndex; the default handler would
+            // throw trying to toggle a dataset that does not exist.
+            onClick: function (e, item, legend) {
+              if (item.datasetIndex === undefined) return;
+              Chart.defaults.plugins.legend.onClick.call(this, e, item, legend);
+            },
+          },
+          tooltip: {
+            // Every column the scan measured. It used to show the frequency and
+            // nothing else, throwing away five values per channel.
+            callbacks: {
+              title: function (c) {
+                var r = _rows[c[0].dataIndex];
+                return r ? (r.ch + ' MHz' + (r.chNum != null ? '  (ch ' + r.chNum + ')' : '')) : '';
+              },
+              label: function () { return null; },
+              afterBody: function (c) {
+                var r = _rows[c[0].dataIndex];
+                if (!r) return [];
+                var out = [];
+                if (r.load   != null) out.push('Load        ' + r.load + '%');
+                if (r.nets   != null) out.push('Networks    ' + r.nets);
+                if (r.nf     != null) out.push('Noise floor ' + r.nf + ' dBm');
+                if (r.maxSig != null) out.push('Max signal  ' + r.maxSig + ' dBm');
+                if (r.minSig != null) out.push('Min signal  ' + r.minSig + ' dBm');
+                if (r.ch === _state.currentChannelMhz) out.push('— this radio —');
+                return out;
+              },
+            },
+          },
+        },
+        scales: {
+          x: { ticks: { color: 'rgba(148,163,190,.5)', font: { size: 9 }, maxRotation: 0, autoSkipPadding: 12 },
+               grid: { display: false } },
+          y: { position: 'left', min: FA_FLOOR_DBM, max: -20,
+               title: { display: true, text: 'dBm', color: 'rgba(148,163,190,.5)', font: { size: 9 } },
+               grid: { color: 'rgba(99,130,190,.08)' },
+               ticks: { color: 'rgba(148,163,190,.5)', font: { size: 9 } } },
+        },
+      },
+    });
+  }
+
+  function renderChart() {
+    if (!_chart) return;
+    _chart.data.labels = _rows.map(function (r) { return r.ch; });
+    // Bar height is signal strength; its colour carries congestion, so one
+    // glance answers both "is anything there" and "how busy is it".
+    // Floating bars [base, top]. Signal is negative dBm, so a plain value would
+    // hang down from the 0 line; anchoring each bar at the chart floor makes it
+    // rise out of the noise the way a spectrum display should. A channel where
+    // nothing was detected gets no bar rather than a fabricated one.
+    _chart.data.datasets[0].data = _rows.map(function (r) {
+      return r.maxSig == null ? null : [FA_FLOOR_DBM, r.maxSig];
+    });
+    _chart.data.datasets[0].backgroundColor = _rows.map(function (r) {
+      return congestionColour(r.load);
+    });
+    _chart.data.datasets[1].data = _rows.map(function (r) { return r.nf; });
+    _chart.update('none');
+  }
+
+  function render() {
+    emptyEl.style.display = _rows.length ? 'none' : '';
+    renderStats(); renderGrid(); renderChart();
+  }
+
+  function open() {
+    modal.classList.add('open');
+    _rows = []; _state.scanId = null;
+    render();
+    makeChart();               // only now is the canvas measurable
+    setStatus('Idle', false);
+    socket.emit('wifiscan:interfaces');
+  }
+
+  function close() {
+    modal.classList.remove('open');
+    // Best effort only. The server's wall-clock stop is what actually bounds the
+    // outage; this just avoids leaving a radio down because somebody wandered off.
+    if (_state.scanning) socket.emit('wifiscan:stop', { scanId: _state.scanId });
+    setScanning(false);
+    if (_chart) { _chart.destroy(); _chart = null; }
+  }
+
+  /* Measured, not assumed: scanning a radio with clients on it dropped all 15
+     within 2 seconds, held them at zero for the full 30, and they took over 15
+     seconds to start returning. Scanning an idle radio dropped nothing. So the
+     warning states which of the two you are about to do. */
+  function updateWarning() {
+    var el = $('faWarnText');
+    if (!el) return;
+    var rec = _ifaceList.filter(function (i) { return i.name === ifaceSel.value; })[0];
+    var n = rec ? (rec.clients || 0) : 0;
+    if (!rec) {
+      el.innerHTML = 'Scanning takes the selected radio off the air.';
+      return;
+    }
+    if (n === 0) {
+      el.innerHTML = 'This radio has <b>no clients connected</b>, so scanning it should ' +
+        'interrupt nobody. Other radios on this router are unaffected.';
+    } else {
+      el.innerHTML = 'Scanning takes this radio off the air. Its <b>' + n + ' connected ' +
+        (n === 1 ? 'client' : 'clients') + ' will be disconnected</b> for the duration of the ' +
+        'scan, including any on its other SSIDs, and may take some seconds to return afterwards. ' +
+        'Other radios on this router are unaffected.';
+    }
+  }
+  ifaceSel.addEventListener('change', updateWarning);
+
+  openBtn.addEventListener('click', open);
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+  var closeX = modal.querySelector('[data-modal-close]');
+  if (closeX) closeX.addEventListener('click', close);
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && modal.classList.contains('open')) close();
+  });
+
+  scanBtn.addEventListener('click', function () {
+    if (!ifaceSel.value) return;
+    socket.emit('wifiscan:start', { iface: ifaceSel.value, durationSec: parseInt(durSel.value, 10) });
+  });
+  stopBtn.addEventListener('click', function () {
+    socket.emit('wifiscan:stop', { scanId: _state.scanId });
+  });
+
+  socket.on('wifiscan:interfaces', function (d) {
+    if (!d) return;
+    // The button exists only for someone who may actually scan.
+    openBtn.style.display = (d.permitted && (d.interfaces || []).length) ? '' : 'none';
+    _ifaceList = d.interfaces || [];
+    var list = _ifaceList;
+    var keep = ifaceSel.value;
+    // The count is the whole radio's, virtual APs included. Without it the
+    // picker gives no clue which radio is idle and which carries the network:
+    // measured on a live fleet, the two obvious-looking radios had zero clients
+    // and the other two had every one of them.
+    ifaceSel.innerHTML = list.map(function (i) {
+      var n = i.clients || 0;
+      return '<option value="' + esc(i.name) + '">' + esc(i.name) +
+             ' · ' + (n ? (n + (n === 1 ? ' client' : ' clients')) : 'no clients') + '</option>';
+    }).join('');
+    if (keep && list.some(function (i) { return i.name === keep; })) ifaceSel.value = keep;
+    if (!list.length) {
+      ifaceSel.innerHTML = '<option disabled selected>No scannable radio</option>';
+      scanBtn.disabled = true;
+      emptyEl.textContent = 'This router reports no radio that can be scanned. ' +
+        'Virtual APs, CAPsMAN-managed radios and the legacy wireless package are not supported.';
+    } else {
+      scanBtn.disabled = false;
+    }
+    updateWarning();
+  });
+
+  socket.on('wifiscan:state', function (d) {
+    if (!d) return;
+    _state.scanId = d.scanId;
+    _state.currentChannelMhz = d.currentChannelMhz;
+    _state.endsAt = d.endsAt;
+    _rows = d.rows || [];
+    setScanning(!!d.scanning);
+    render();
+  });
+
+  socket.on('wifiscan:rows', function (d) {
+    if (!d || d.scanId !== _state.scanId) return;
+    _rows = d.rows || [];
+    render();
+  });
+
+  socket.on('wifiscan:done', function (d) {
+    if (!d) return;
+    _rows = d.rows || _rows;
+    setScanning(false);
+    render();
+    // A dashboard-enforced stop still produced valid readings. Reporting it as
+    // an error would teach people to distrust correct data.
+    var msg = {
+      complete:        'Scan complete',
+      timeout:         'Scan complete',
+      aborted:         'Scan stopped',
+      disconnected:    'Router went away mid-scan',
+      'session-restart': 'Scan interrupted by a router session restart',
+      error:           'Scan failed',
+    }[d.reason] || 'Scan ended';
+    if (!d.rows || !d.rows.length) {
+      // Distinguish "the scan ran and the band is empty" — which cannot happen,
+      // every band has a noise floor — from "the router returned nothing". The
+      // second is the real case, and calling it success sends people hunting
+      // for a quiet channel that was never measured.
+      emptyEl.textContent = 'The router accepted the scan but returned no data. ' +
+        'Some RouterOS builds do not emit frequency-scan results over the API, ' +
+        'even though the same scan works in WinBox.';
+      setStatus('No data returned by the router', false);
+      return;
+    }
+    setStatus(msg + (d.truncated ? ' (truncated)' : ''), false);
+  });
+
+  socket.on('wifiscan:error', function (d) {
+    if (!d) return;
+    setScanning(false);
+    var msg = {
+      busy:               'Another scan is already running on this router' + (d.iface ? (' (' + d.iface + ')') : ''),
+      'fleet-busy':       'Too many scans running at once — try again shortly',
+      cooldown:           'Please wait a few seconds before scanning again',
+      denied:             'You do not have permission to scan this router',
+      'bad-request':      'Invalid scan request',
+      'no-such-interface': 'That interface no longer exists',
+      'capsman-managed':  'This radio is managed by CAPsMAN — scan it from its manager',
+      'not-a-radio':      'That is a virtual AP, not a radio',
+      unavailable:        'Wireless collection is not running for this router',
+      'router-offline':   'The router is not connected',
+      'permission-denied': 'The RouterOS user needs the "test" policy to run a scan',
+      'unsupported-stack': 'This router uses the legacy wireless package, which is not supported',
+    }[d.code] || (d.message || 'Scan failed');
+    setStatus(msg, false);
+  });
+
+  // Ask again on page entry so the button reflects the current router.
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail === 'wireless') socket.emit('wifiscan:interfaces');
+  });
+}());
+
+/* ── VLANs page (issue #32) ───────────────────────────────────────────────────
+   Rates arrive already joined server-side from interfaceStatus, so this file
+   never sees an interface object — only VLAN-shaped rows. See src/collectors/
+   vlans.js for why that join does not happen in the browser. */
+(function () {
+  var tbody = $('vlansTable'), theadRow = $('vlansThead');
+  if (!tbody || !theadRow) return;
+
+  var _data = null;
+  var _sort = { col: 'vlanId', dir: 1 };
+  var _showDynamic = false;
+
+  var COLS = [
+    { key:'vlanId',   label:'VLAN' },
+    { key:'name',     label:'Interface' },
+    { key:'parent',   label:'Parent' },
+    { key:'mtu',      label:'MTU' },
+    { key:'tagged',   label:'Tagged Ports' },
+    { key:'untagged', label:'Untagged Ports' },
+    { key:'clients',  label:'Clients' },
+    { key:'rate',     label:'RX / TX' },
+  ];
+
+  function sortVal(v, key) {
+    if (key === 'vlanId')  return v.vlanId;
+    if (key === 'clients') return v.clients || 0;
+    if (key === 'mtu')     return (v.interfaces[0] && v.interfaces[0].mtu) || 0;
+    if (key === 'rate')    return (v.rxMbps || 0) + (v.txMbps || 0);
+    if (key === 'name')    return (v.name || '').toLowerCase();
+    if (key === 'parent')  return ((v.interfaces[0] && v.interfaces[0].parent) || '').toLowerCase();
+    if (key === 'tagged')  return v.tagged.length;
+    return v.untagged.length;
+  }
+
+  function ports(list) {
+    if (!list.length) return '<span style="color:var(--text-muted)">&mdash;</span>';
+    return list.map(function (n) { return '<span class="wl-band wl-band-5">' + esc(n) + '</span>'; }).join(' ');
+  }
+
+  // Per-VLAN rate history for the sparklines, kept here rather than server-side:
+  // it is presentation state, and the collector already ships every sample the
+  // line needs. Pushed once per update, never on re-render, or sorting or typing
+  // in the search box would forge samples the router never sent.
+  var _hist = {};           // vlanId -> { rx:[], tx:[] }
+  var HIST_MAX = 40;
+
+  function pushHistory(d) {
+    var live = {};
+    d.vlans.forEach(function (v) {
+      live[v.vlanId] = true;
+      var h = _hist[v.vlanId] || (_hist[v.vlanId] = { rx: [], tx: [] });
+      // A null rate is "not reported", so the line holds its last value rather
+      // than dropping to zero and drawing a cliff that never happened.
+      if (v.rxMbps !== null) h.rx.push(v.rxMbps);
+      if (v.txMbps !== null) h.tx.push(v.txMbps);
+      if (h.rx.length > HIST_MAX) h.rx.splice(0, h.rx.length - HIST_MAX);
+      if (h.tx.length > HIST_MAX) h.tx.splice(0, h.tx.length - HIST_MAX);
+    });
+    // Drop VLANs that no longer exist, so a deleted-and-recreated VLAN does not
+    // inherit the old one's trend line.
+    Object.keys(_hist).forEach(function (k) { if (!live[k]) delete _hist[k]; });
+  }
+
+  // Stroked with currentColor and coloured by class, so the line cannot drift
+  // from the value above it: --accent-tx is green in this theme, and a
+  // hardcoded stroke was already wrong.
+  function spark(history, dir) {
+    if (!history || history.length < 2) return '<span class="vlan-spark-slot"></span>';
+    var w = 56, h = 14, pad = 1.5;
+    var max = Math.max.apply(null, history) || 1;   // baseline always zero, so
+    var pts = history.map(function (v, i) {         // a rise reads as a rise
+      var x = pad + (i / (history.length - 1)) * (w - pad * 2);
+      var y = h - pad - (v / max) * (h - pad * 2);
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    });
+    return '<svg class="vlan-spark ' + dir + '" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">' +
+      '<polyline points="' + pts.join(' ') + '" fill="none" stroke="currentColor"' +
+      ' stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+  }
+
+  function rateLine(dir, mbps, history) {
+    var cls = (mbps ? dir : 'zero');
+    return '<div class="vlan-rate-line">' +
+      '<span class="vlan-rate-arrow ' + cls + '">' + (dir === 'rx' ? '\u2193' : '\u2191') + '</span>' +
+      '<span class="vlan-rate-val ' + cls + '">' + fmtMbps(mbps || 0) + '</span>' +
+      // The line keeps its direction colour even at zero: it is showing the
+      // trend that got here, not the current reading.
+      spark(history, dir) +
+    '</div>';
+  }
+
+  // null is "the router did not report a rate", which is not the same as idle.
+  function rate(v) {
+    if (v.rxMbps === null && v.txMbps === null) {
+      return '<span style="color:var(--text-muted)" title="Interface rates are unavailable">&mdash;</span>';
+    }
+    var h = _hist[v.vlanId] || { rx: [], tx: [] };
+    return '<div class="vlan-rate">' +
+      rateLine('rx', v.rxMbps, h.rx) +
+      rateLine('tx', v.txMbps, h.tx) +
+    '</div>';
+  }
+
+  function render() {
+    if (!_data) return;
+    var q = ($('vlansSearch') && $('vlansSearch').value || '').toLowerCase().trim();
+    var rows = _data.vlans.filter(function (v) {
+      if (!q) return true;
+      return String(v.vlanId).indexOf(q) === 0 || (v.name || '').toLowerCase().indexOf(q) !== -1 ||
+             v.tagged.concat(v.untagged).some(function (p) { return p.toLowerCase().indexOf(q) !== -1; });
+    });
+    rows = rows.slice().sort(function (a, b) {
+      var av = sortVal(a, _sort.col), bv = sortVal(b, _sort.col);
+      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
+      return _sort.dir * (av - bv);
+    });
+
+    _renderSortHeader('vlansThead', COLS, _sort, function (key) {
+      _sort.dir = _sort.col === key ? -_sort.dir : 1;
+      _sort.col = key; render();
+    });
+
+    $('vlansBadge').textContent = _data.vlans.length;
+    $('vlansBadge').className = 'card-badge' + (_data.vlans.length ? ' active-blue' : '');
+
+    tbody.innerHTML = rows.length ? rows.map(function (v) {
+      var i0 = v.interfaces[0];
+      return '<tr>' +
+        '<td><span class="wl-band wl-band-24">' + v.vlanId + '</span></td>' +
+        '<td>' + (v.name ? esc(v.name) : '<span style="color:var(--text-muted)">no L3 interface</span>') + '</td>' +
+        '<td>' + esc(i0 ? i0.parent : '') + '</td>' +
+        '<td>' + (i0 && i0.mtu ? i0.mtu : '&mdash;') + '</td>' +
+        '<td>' + ports(v.tagged) + '</td>' +
+        '<td>' + ports(v.untagged) + '</td>' +
+        '<td>' + (v.clients || 0) + '</td>' +
+        '<td>' + rate(v) + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="8" class="empty-state">No VLANs configured on this router.</td></tr>';
+
+    renderBridge();
+  }
+
+  function renderBridge() {
+    var tb = $('vlansBridgeTable'); if (!tb || !_data) return;
+    // Dynamic rows are filtered HERE, at render. They are kept in the join
+    // because on a real router most VLAN membership comes from them — filtering
+    // them earlier would show every VLAN with no tagged ports.
+    var rows = _data.bridgeVlans.filter(function (r) { return _showDynamic || !r.dynamic; });
+    $('vlansBridgeBadge').textContent = rows.length;
+    $('vlansDynChip').textContent = _data.dynamicCount;
+    tb.innerHTML = rows.length ? rows.map(function (r) {
+      // Dynamic rows carry the same weight as static ones: the "dynamic" pill
+      // already says which is which, and dimming them made real membership
+      // harder to read for no added information.
+      return '<tr>' +
+        '<td>' + esc(r.bridge) + '</td>' +
+        '<td><span class="wl-band wl-band-24">' + esc(r.raw) + '</span></td>' +
+        '<td>' + ports(r.tagged) + '</td>' +
+        '<td>' + ports(r.untagged) + '</td>' +
+        '<td>' + (r.dynamic ? '<span class="wl-band wl-band-6">dynamic</span>'
+                            : '<span class="wl-band wl-band-5">static</span>') + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="5" class="empty-state">No bridge VLAN entries.</td></tr>';
+  }
+
+  function renderSummary() {
+    if (!_data) return;
+    var tagged = new Set(), untagged = new Set();
+    var rx = 0, tx = 0, any = false;
+    _data.vlans.forEach(function (v) {
+      v.tagged.forEach(function (p) { tagged.add(p); });
+      v.untagged.forEach(function (p) { untagged.add(p); });
+      if (v.rxMbps !== null) { rx += v.rxMbps; any = true; }
+      if (v.txMbps !== null) { tx += v.txMbps; any = true; }
+    });
+    $('vlSumCount').textContent    = _data.vlans.length;
+    $('vlSumTagged').textContent   = tagged.size;
+    $('vlSumUntagged').textContent = untagged.size;
+    $('vlSumRate').innerHTML = any ? fmtMbps(rx + tx) : '&mdash;';
+  }
+
+  socket.on('vlans:update', function (d) {
+    if (!d) return;
+    _data = d;
+    pushHistory(d);
+    renderSummary();
+    if (pageVisible('vlans')) render();
+  });
+
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail === 'vlans' && _data) render();
+  });
+
+  var se = $('vlansSearch');
+  if (se) se.addEventListener('input', _debounce(render, 150));
+  var dyn = $('vlansShowDynamic');
+  if (dyn) dyn.addEventListener('change', function () { _showDynamic = dyn.checked; renderBridge(); });
+}());
+
+/* ── PPP page (issue #32) ─────────────────────────────────────────────────────
+   Rates are derived server-side from byte deltas; RouterOS reports cumulative
+   bytes only. A null rate means "no measurement window yet", not idle. */
+(function () {
+  var tbody = $('pppTable'), theadRow = $('pppThead');
+  if (!tbody || !theadRow) return;
+
+  var _data = null;
+  var _sort = { col: 'name', dir: 1 };
+
+  var COLS = [
+    { key:'name',     label:'User' },
+    { key:'service',  label:'Service' },
+    { key:'address',  label:'Address' },
+    { key:'callerId', label:'Caller ID' },
+    { key:'uptime',   label:'Uptime' },
+    { key:'rate',     label:'RX / TX' },
+    { key:'total',    label:'Total In / Out' },
+  ];
+
+  function sortVal(s, key) {
+    if (key === 'rate')  return (s.rxRate || 0) + (s.txRate || 0);
+    if (key === 'total') return s.rx + s.tx;
+    if (key === 'uptime') return parseUptime ? parseUptime(s.uptime) : 0;
+    return String(s[key] || '').toLowerCase();
+  }
+
+  function render() {
+    if (!_data) return;
+    var q = ($('pppSearch') && $('pppSearch').value || '').toLowerCase().trim();
+    var rows = _data.sessions.filter(function (s) {
+      if (!q) return true;
+      return (s.name + ' ' + s.address + ' ' + s.callerId).toLowerCase().indexOf(q) !== -1;
+    }).slice().sort(function (a, b) {
+      var av = sortVal(a, _sort.col), bv = sortVal(b, _sort.col);
+      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
+      return _sort.dir * (av - bv);
+    });
+
+    _renderSortHeader('pppThead', COLS, _sort, function (key) {
+      _sort.dir = _sort.col === key ? -_sort.dir : 1;
+      _sort.col = key; render();
+    });
+
+    $('pppBadge').textContent = _data.sessions.length;
+    $('pppBadge').className = 'card-badge' + (_data.sessions.length ? ' active-blue' : '');
+
+    var empty = _data.available
+      ? 'No active PPP sessions. They appear here when a PPPoE, L2TP, SSTP or PPTP client connects.'
+      : 'This router has no PPP service configured.';
+
+    tbody.innerHTML = rows.length ? rows.map(function (s) {
+      var r = s.rxRate === null
+        ? '<span style="color:var(--text-muted)" title="No measurement window yet">&mdash;</span>'
+        : '<span style="color:var(--accent-rx)">' + fmtMbps((s.rxRate * 8) / 1e6) + '</span> / ' +
+          '<span style="color:var(--accent-tx,#f59f00)">' + fmtMbps((s.txRate * 8) / 1e6) + '</span>';
+      return '<tr>' +
+        '<td>' + esc(s.name) + '</td>' +
+        '<td><span class="vpn-proto-pill">' + esc(s.service || 'PPP') + '</span></td>' +
+        '<td>' + esc(s.address) + '</td>' +
+        '<td>' + esc(s.callerId) + '</td>' +
+        '<td>' + esc(s.uptime) + '</td>' +
+        '<td>' + r + '</td>' +
+        '<td>' + fmtBytes(s.rx) + ' / ' + fmtBytes(s.tx) + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="7" class="empty-state">' + esc(empty) + '</td></tr>';
+
+    renderConfig();
+  }
+
+  function renderConfig() {
+    var tb = $('pppServerTable'); if (!tb || !_data) return;
+    var rows = [];
+    (_data.servers || []).forEach(function (s) {
+      rows.push(['Server', s.serviceName || '(unnamed)', s.interface,
+                 s.maxSessions ? ('max ' + s.maxSessions) : '',
+                 s.disabled ? 'disabled' : 'enabled']);
+    });
+    (_data.profiles || []).forEach(function (p) {
+      rows.push(['Profile', p.name, p.localAddress, p.rateLimit || p.remoteAddress || '', p.onlyOne || '']);
+    });
+    tb.innerHTML = rows.length ? rows.map(function (r) {
+      return '<tr><td><span class="wl-band wl-band-24">' + esc(r[0]) + '</span></td>' +
+             r.slice(1).map(function (c) { return '<td>' + (c ? esc(String(c)) : '<span style="color:var(--text-muted)">&mdash;</span>') + '</td>'; }).join('') +
+             '</tr>';
+    }).join('') : '<tr><td colspan="5" class="empty-state">No PPP servers or profiles.</td></tr>';
+  }
+
+  function renderSummary() {
+    if (!_data) return;
+    $('pppSumCount').textContent = _data.sessions.length;
+    var svc = Object.keys(_data.byService || {}).sort();
+    $('pppSumServices').textContent = svc.length
+      ? svc.map(function (k) { return k + ' ' + _data.byService[k]; }).join('  ') : '—';
+    var toMbps = function (v) { return v === null ? null : (v * 8) / 1e6; };
+    var rx = toMbps(_data.totalRxRate), tx = toMbps(_data.totalTxRate);
+    $('pppSumRx').innerHTML = rx === null ? '&mdash;' : fmtMbps(rx);
+    $('pppSumTx').innerHTML = tx === null ? '&mdash;' : fmtMbps(tx);
+  }
+
+  socket.on('ppp:update', function (d) {
+    if (!d) return;
+    _data = d;
+    renderSummary();
+    if (pageVisible('ppp')) render();
+  });
+
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail === 'ppp' && _data) render();
+  });
+
+  var se = $('pppSearch');
+  if (se) se.addEventListener('input', _debounce(render, 150));
+}());
+
+/* ── CAPsMAN page ─────────────────────────────────────────────────────────────
+   Clients are attributed to their CAP server-side, from the `cap` field the
+   router reports on each interface. See src/collectors/capsman.js. */
+(function () {
+  var tbody = $('capsmanTable'), theadRow = $('capsmanThead');
+  if (!tbody || !theadRow) return;
+
+  var _data = null;
+  var _sort = { col: 'identity', dir: 1 };
+  var _open = {};              // identity -> expanded client list
+
+  var COLS = [
+    { key:'identity',  label:'Identity' },
+    { key:'board',     label:'Board' },
+    { key:'version',   label:'Version' },
+    { key:'serial',    label:'Serial' },
+    { key:'state',     label:'State' },
+    { key:'connected', label:'Connected' },
+    { key:'radios',    label:'Radios' },
+    { key:'clients',   label:'Clients' },
+  ];
+
+  function sortVal(c, key) {
+    if (key === 'clients') return c.clientCount || 0;
+    if (key === 'radios')  return c.radios.length;
+    if (key === 'board')   return (c.boardName || '').toLowerCase();
+    if (key === 'connected') return (c.connectedTime || '').toLowerCase();
+    return (c[key] || '').toString().toLowerCase();
+  }
+
+  function stateBadge(state) {
+    var ok = /^ok$/i.test(state || '');
+    return '<span class="wl-band ' + (ok ? 'wl-band-6' : 'wl-band-24') + '">' +
+           esc(state || 'unknown') + '</span>';
+  }
+
+  function clientRow(c) {
+    return '<tr class="cap-client"><td colspan="8" style="padding-left:2.2rem">' +
+      '<span style="color:var(--text-muted)">' + esc(c.interface) + '</span> &nbsp; ' +
+      '<span class="mono">' + esc(c.mac) + '</span> &nbsp; ' +
+      (c.ssid ? '<span class="wl-band wl-band-5">' + esc(c.ssid) + '</span> &nbsp; ' : '') +
+      (c.signal === null ? '' : '<span style="color:var(--text-muted)">' + c.signal + ' dBm</span> &nbsp; ') +
+      '<span style="color:var(--text-muted)">' + esc(c.uptime) + '</span>' +
+      '</td></tr>';
+  }
+
+  function render() {
+    if (!_data) return;
+    var q = ($('capsmanSearch') && $('capsmanSearch').value || '').toLowerCase().trim();
+    var rows = (_data.caps || []).filter(function (c) {
+      if (!q) return true;
+      return (c.identity + ' ' + c.boardName + ' ' + c.serial).toLowerCase().indexOf(q) !== -1;
+    });
+    rows = rows.slice().sort(function (a, b) {
+      var av = sortVal(a, _sort.col), bv = sortVal(b, _sort.col);
+      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
+      return _sort.dir * (av - bv);
+    });
+
+    _renderSortHeader('capsmanThead', COLS, _sort, function (key) {
+      _sort.dir = _sort.col === key ? -_sort.dir : 1;
+      _sort.col = key; render();
+    });
+
+    $('capsmanBadge').textContent = (_data.caps || []).length;
+    $('capsmanBadge').className = 'card-badge' + ((_data.caps || []).length ? ' active-blue' : '');
+
+    if (!rows.length) {
+      // A CAP is not a broken manager, so the empty state says which it is.
+      var msg = !_data.available
+        ? 'This router runs the legacy wireless package, which has no CAPsMAN here.'
+        : (_data.role === 'cap'
+            ? 'This router is a CAP, not a manager — it has no CAPs of its own.'
+            : 'No CAPs are connected to this manager.');
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-state">' + msg + '</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map(function (c) {
+        var open = !!_open[c.identity];
+        var head = '<tr class="cap-row" data-cap="' + esc(c.identity) + '" style="cursor:pointer">' +
+          '<td>' + (c.clientCount ? (open ? '▾ ' : '▸ ') : '') + esc(c.identity) + '</td>' +
+          '<td>' + esc(c.boardName) + '</td>' +
+          '<td>' + esc(c.version) + '</td>' +
+          '<td>' + esc(c.serial) + '</td>' +
+          '<td>' + stateBadge(c.state) + '</td>' +
+          '<td>' + esc(c.connectedTime) + '</td>' +
+          '<td>' + (c.radios.length
+                     ? c.radios.map(function (r) { return '<span class="wl-band wl-band-5">' + esc(r.interface) + '</span>'; }).join(' ')
+                     : '<span style="color:var(--text-muted)">&mdash;</span>') + '</td>' +
+          '<td>' + c.clientCount + '</td>' +
+        '</tr>';
+        return head + (open ? c.clients.map(clientRow).join('') : '');
+      }).join('');
+      Array.prototype.forEach.call(tbody.querySelectorAll('.cap-row'), function (tr) {
+        tr.addEventListener('click', function () {
+          var id = tr.getAttribute('data-cap');
+          _open[id] = !_open[id];
+          render();
+        });
+      });
+    }
+
+    var prov = _data.provisioning || [];
+    $('capsmanProvBadge').textContent = prov.length;
+    $('capsmanProvTable').innerHTML = prov.length ? prov.map(function (p) {
+      return '<tr' + (p.disabled ? ' style="opacity:.55"' : '') + '>' +
+        '<td>' + (p.supportedBands.length
+                   ? p.supportedBands.map(function (b) { return '<span class="wl-band wl-band-5">' + esc(b) + '</span>'; }).join(' ')
+                   : '<span style="color:var(--text-muted)">any</span>') + '</td>' +
+        '<td>' + esc(p.action) + '</td>' +
+        '<td>' + esc(p.masterConfiguration || '—') + '</td>' +
+        '<td>' + (p.slaveConfigurations.length ? esc(p.slaveConfigurations.join(', '))
+                                               : '<span style="color:var(--text-muted)">&mdash;</span>') + '</td>' +
+        '<td>' + esc(p.nameFormat || '—') + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="5" class="empty-state">No provisioning rules.</td></tr>';
+
+    renderRolePanel();
+  }
+
+  // On a CAP the manager table is empty by definition, so the page says who is
+  // managing it rather than looking broken.
+  function renderRolePanel() {
+    var panel = $('capsmanRolePanel'), body = $('capsmanRoleBody');
+    if (!panel || !body || !_data) return;
+    var c = _data.cap || {};
+    if (_data.role === 'cap' || (_data.role === 'both' && c.currentIdentity)) {
+      panel.style.display = '';
+      body.innerHTML = '<div class="kv-grid">' +
+        '<div class="kv-item"><div class="kv-key">Managed by</div><div class="kv-val on">' +
+          esc(c.currentIdentity || 'discovering…') + '</div></div>' +
+        '<div class="kv-item"><div class="kv-key">Manager address</div><div class="kv-val">' +
+          esc(c.currentAddress || '—') + '</div></div>' +
+        '<div class="kv-item"><div class="kv-key">Discovery interfaces</div><div class="kv-val">' +
+          esc((c.discoveryInterfaces || []).join(', ') || '—') + '</div></div>' +
+        '<div class="kv-item"><div class="kv-key">Certificate</div><div class="kv-val">' +
+          esc(c.certificate || '—') + '</div></div>' +
+      '</div>';
+    } else {
+      panel.style.display = 'none';
+    }
+  }
+
+  function renderSummary() {
+    if (!_data) return;
+    var t = _data.totals || {};
+    var mode = { manager:'Manager', cap:'CAP', both:'Manager + CAP', none:'Off' }[_data.role] || '—';
+    $('capSumMode').textContent    = _data.available ? mode : 'Unsupported';
+    $('capSumCaps').textContent    = t.caps === undefined ? '—' : t.caps;
+    $('capSumRadios').textContent  = t.radios === undefined ? '—' : t.radios;
+    $('capSumClients').textContent = t.clients === undefined ? '—' : t.clients;
+  }
+
+  socket.on('capsman:update', function (d) {
+    if (!d) return;
+    _data = d;
+    renderSummary();
+    if (pageVisible('capsman')) render();
+  });
+
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail === 'capsman' && _data) render();
+  });
+
+  var se = $('capsmanSearch');
+  if (se) se.addEventListener('input', _debounce(render, 150));
+}());
+
+/* ── Bridges page ─────────────────────────────────────────────────────────────
+   Three tables from one payload; ports and hosts share a card behind a tab
+   strip, the way the Routing page splits Routes and BGP. The bridge VLAN table
+   deliberately lives on the VLANs page instead — it is about VLAN membership
+   rather than about the bridge, and one copy is enough. The host table is capped
+   server-side (500) and reports its true total, so the note never claims to show
+   more than it has. See src/collectors/bridges.js. */
+(function () {
+  var tbody = $('bridgesTable'), theadRow = $('bridgesThead');
+  if (!tbody || !theadRow) return;
+
+  var _data = null;
+  var _sortB = { col: 'name',      dir: 1 };
+  var _sortP = { col: 'interface', dir: 1 };
+  var _sortH = { col: 'mac',       dir: 1 };
+  var _tab   = 'ports';
+
+  var COLS_B = [
+    { key:'name',    label:'Bridge' },
+    { key:'proto',   label:'Protocol' },
+    { key:'vlan',    label:'VLAN Filter' },
+    { key:'igmp',    label:'IGMP' },
+    { key:'mac',     label:'MAC' },
+    { key:'mtu',     label:'MTU' },
+    { key:'ports',   label:'Ports' },
+    { key:'rate',    label:'RX / TX' },
+  ];
+  var COLS_P = [
+    { key:'interface', label:'Interface' },
+    { key:'bridge',    label:'Bridge' },
+    { key:'pvid',      label:'PVID' },
+    { key:'role',      label:'STP Role' },
+    { key:'edge',      label:'Edge' },
+    { key:'horizon',   label:'Horizon' },
+    { key:'state',     label:'State' },
+  ];
+  var COLS_H = [
+    { key:'mac',    label:'MAC Address' },
+    { key:'port',   label:'On Interface' },
+    { key:'bridge', label:'Bridge' },
+    { key:'vid',    label:'VLAN' },
+    { key:'type',   label:'Type' },
+  ];
+
+  function onOff(v, label) {
+    return v ? '<span class="wl-band wl-band-6">' + label + '</span>'
+             : '<span style="color:var(--text-muted)">off</span>';
+  }
+  function rate(b) {
+    if (b.rxMbps === null && b.txMbps === null) {
+      return '<span style="color:var(--text-muted)" title="Interface rates are unavailable">&mdash;</span>';
+    }
+    return '<span style="color:var(--accent-rx)">' + fmtMbps(b.rxMbps || 0) + '</span> / ' +
+           '<span style="color:var(--accent-tx,#f59f00)">' + fmtMbps(b.txMbps || 0) + '</span>';
+  }
+  function sorted(rows, sort, valFn) {
+    return rows.slice().sort(function (a, b) {
+      var av = valFn(a, sort.col), bv = valFn(b, sort.col);
+      if (typeof av === 'string') return sort.dir * av.localeCompare(bv);
+      return sort.dir * (av - bv);
+    });
+  }
+  function bind(theadId, cols, sort) {
+    _renderSortHeader(theadId, cols, sort, function (key) {
+      sort.dir = sort.col === key ? -sort.dir : 1;
+      sort.col = key; render();
+    });
+  }
+
+  function render() {
+    if (!_data) return;
+
+    // ── Bridges ──
+    bind('bridgesThead', COLS_B, _sortB);
+    var bridges = sorted(_data.bridges || [], _sortB, function (b, k) {
+      if (k === 'ports') return b.portCount;
+      if (k === 'mtu')   return b.mtu || 0;
+      if (k === 'rate')  return (b.rxMbps || 0) + (b.txMbps || 0);
+      if (k === 'vlan')  return b.vlanFiltering ? 1 : 0;
+      if (k === 'igmp')  return b.igmpSnooping ? 1 : 0;
+      if (k === 'proto') return (b.protocolMode || '').toLowerCase();
+      if (k === 'mac')   return (b.macAddress || '').toLowerCase();
+      return (b.name || '').toLowerCase();
+    });
+    $('bridgesBadge').textContent = bridges.length;
+    $('bridgesBadge').className = 'card-badge' + (bridges.length ? ' active-blue' : '');
+    tbody.innerHTML = bridges.length ? bridges.map(function (b) {
+      return '<tr' + (b.disabled ? ' style="opacity:.55"' : '') + '>' +
+        '<td>' + esc(b.name) + (b.running ? '' : ' <span class="wl-band wl-band-24">down</span>') + '</td>' +
+        '<td>' + (b.protocolMode ? '<span class="wl-band wl-band-5">' + esc(b.protocolMode) + '</span>'
+                                 : '<span style="color:var(--text-muted)">&mdash;</span>') + '</td>' +
+        '<td>' + onOff(b.vlanFiltering, 'on') + '</td>' +
+        '<td>' + onOff(b.igmpSnooping, 'on') + '</td>' +
+        '<td class="mono">' + esc(b.macAddress) + '</td>' +
+        '<td>' + (b.mtu || '&mdash;') + '</td>' +
+        '<td>' + b.portCount + '</td>' +
+        '<td>' + rate(b) + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="8" class="empty-state">' +
+      (_data.available ? 'No bridges configured on this router.' : 'This router has no bridge menu.') +
+      '</td></tr>';
+
+    // ── Ports ──
+    bind('bridgesPortThead', COLS_P, _sortP);
+    var ports = sorted(_data.ports || [], _sortP, function (p, k) {
+      if (k === 'pvid')  return p.pvid || 0;
+      if (k === 'state') return (p.disabled ? 2 : p.inactive ? 1 : 0);
+      return (p[k] || '').toString().toLowerCase();
+    });
+    $('bridgesPortBadge').textContent = ports.length;
+    $('bridgesPortTable').innerHTML = ports.length ? ports.map(function (p) {
+      var state = p.disabled ? '<span class="wl-band wl-band-24">disabled</span>'
+                : p.inactive ? '<span style="color:var(--text-muted)">inactive</span>'
+                : '<span class="wl-band wl-band-6">active</span>';
+      return '<tr>' +
+        '<td>' + esc(p.interface) + (p.dynamic ? ' <span class="wl-band wl-band-6">dyn</span>' : '') + '</td>' +
+        '<td>' + esc(p.bridge) + '</td>' +
+        '<td>' + (p.pvid === null ? '&mdash;' : '<span class="wl-band wl-band-24">' + p.pvid + '</span>') + '</td>' +
+        // A bridge with protocol-mode=none reports no role at all, which is not
+        // the same as a port whose role is unknown.
+        '<td>' + (p.role ? esc(p.role) : '<span style="color:var(--text-muted)">no STP</span>') + '</td>' +
+        '<td>' + esc(p.edge || '—') + '</td>' +
+        '<td>' + esc(p.horizon || '—') + '</td>' +
+        '<td>' + state + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="7" class="empty-state">No bridge ports.</td></tr>';
+
+    // ── Host table ──
+    bind('bridgesHostThead', COLS_H, _sortH);
+    var hq = ($('bridgesHostSearch') && $('bridgesHostSearch').value || '').toLowerCase().trim();
+    var hosts = (_data.hosts || []).filter(function (h) {
+      if (!hq) return true;
+      return (h.mac + ' ' + h.onInterface + ' ' + (h.vid === null ? '' : h.vid)).toLowerCase().indexOf(hq) !== -1;
+    });
+    hosts = sorted(hosts, _sortH, function (h, k) {
+      if (k === 'vid')  return h.vid === null ? -1 : h.vid;
+      if (k === 'port') return (h.onInterface || '').toLowerCase();
+      if (k === 'type') return (h.local ? 2 : h.dynamic ? 1 : 0);
+      return (h[k] || '').toString().toLowerCase();
+    });
+    $('bridgesHostBadge').textContent = _data.hostTotal || 0;
+    var note = $('bridgesHostNote');
+    if (note) {
+      note.textContent = !_data.hostsAvailable
+        ? 'the RouterOS user cannot read the host table'
+        : (_data.hostTotal > (_data.hostCap || 0)
+            ? 'showing ' + (_data.hostCap) + ' of ' + _data.hostTotal
+            : '');
+    }
+    $('bridgesHostTable').innerHTML = hosts.length ? hosts.map(function (h) {
+      var type = h.local ? '<span style="color:var(--text-muted)">local</span>'
+               : h.external ? '<span class="wl-band wl-band-24">external</span>'
+               : h.dynamic ? '<span class="wl-band wl-band-6">learned</span>'
+               : '<span class="wl-band wl-band-5">static</span>';
+      return '<tr>' +
+        '<td class="mono">' + esc(h.mac) + '</td>' +
+        '<td>' + esc(h.onInterface) + '</td>' +
+        '<td>' + esc(h.bridge) + '</td>' +
+        '<td>' + (h.vid === null ? '&mdash;' : '<span class="wl-band wl-band-24">' + h.vid + '</span>') + '</td>' +
+        '<td>' + type + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="5" class="empty-state">' +
+      (hq ? 'No hosts match that search.' : 'No learned hosts.') + '</td></tr>';
+
+  }
+
+  function renderSummary() {
+    if (!_data) return;
+    var modes = {};
+    (_data.bridges || []).forEach(function (b) { if (b.protocolMode) modes[b.protocolMode] = 1; });
+    var m = Object.keys(modes);
+    $('brSumCount').textContent = (_data.bridges || []).length;
+    $('brSumPorts').textContent = (_data.ports || []).length;
+    $('brSumHosts').textContent = _data.hostTotal || 0;
+    $('brSumStp').textContent   = m.length ? m.join(', ') : '—';
+  }
+
+  /* Tab strip. Both panels render from the same payload, so switching is a
+     class toggle plus a re-render — there is no second data path to keep in
+     step, and no request behind a tab. */
+  function setTab(key) {
+    _tab = (key === 'hosts') ? 'hosts' : 'ports';
+    var bar = $('brTabBar');
+    if (bar) bar.querySelectorAll('.stab').forEach(function (b) {
+      var on = b.getAttribute('data-brtab') === _tab;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    var page = $('page-bridges');
+    if (page) page.querySelectorAll('.brtab-panel').forEach(function (p) {
+      p.classList.toggle('active', p.id === 'brtab-' + _tab);
+    });
+    // The search box and the "showing 500 of N" note belong to the host view.
+    var tools = $('bridgesHostTools');
+    if (tools) tools.hidden = _tab !== 'hosts';
+    if (_data) render();
+  }
+
+  (function () {
+    var bar = $('brTabBar');
+    if (!bar) return;
+    bar.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('[data-brtab]') : null;
+      if (btn) setTab(btn.getAttribute('data-brtab'));
+    });
+    // Arrow-key movement along the strip, per the ARIA tablist pattern.
+    bar.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      setTab(_tab === 'ports' ? 'hosts' : 'ports');
+      var next = bar.querySelector('[data-brtab="' + _tab + '"]');
+      if (next) next.focus();
+    });
+  }());
+
+  socket.on('bridges:update', function (d) {
+    if (!d) return;
+    _data = d;
+    renderSummary();
+    if (pageVisible('bridges')) render();
+  });
+
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail === 'bridges' && _data) render();
+  });
+
+  var hs = $('bridgesHostSearch');
+  if (hs) hs.addEventListener('input', _debounce(render, 150));
+}());
+
+/* ── DNS page ─────────────────────────────────────────────────────────────────
+   The resolver settings and the static entry table. The cache itself is not
+   browsable here and the collector never reads it — see src/collectors/dns.js.
+   The cache-used figure in the summary comes from the settings row, not from
+   enumerating the cache. */
+(function () {
+  var settingsBody = $('dnsSettingsBody');
+  if (!settingsBody) return;
+
+  var _data = null;
+  var _sortS = { col: 'name', dir: 1 };
+
+  var COLS_S = [
+    { key:'name',    label:'Name' },
+    { key:'address', label:'Address' },
+    { key:'type',    label:'Type' },
+    { key:'ttl',     label:'TTL' },
+    { key:'comment', label:'Comment' },
+  ];
+  function kv(key, val, cls) {
+    return '<div class="kv-item"><div class="kv-key">' + esc(key) + '</div>' +
+           '<div class="kv-val' + (cls ? ' ' + cls : '') + '">' + val + '</div></div>';
+  }
+
+  function renderSettings() {
+    var s = (_data && _data.settings) || null;
+    if (!s) return;
+    var servers = s.servers.length ? s.servers.join(', ')
+                : s.dynamicServers.length ? s.dynamicServers.join(', ') + ' (dynamic)'
+                : '—';
+    var html = '';
+    html += s.dohEnabled
+      ? kv('DNS over HTTPS', esc(s.dohUrl), 'on') +
+        kv('Certificate check', s.dohVerifyCert ? 'verified' : 'NOT verified',
+           s.dohVerifyCert ? 'on' : 'warn')
+      : kv('DNS over HTTPS', 'off', 'off');
+    html += kv('Servers', esc(servers));
+    html += kv('Allow remote requests', s.allowRemoteRequests ? 'yes' : 'no',
+               s.allowRemoteRequests ? 'warn' : 'off');
+    html += kv('Cache', (s.cacheUsed === null ? '—' : s.cacheUsed) + ' / ' + (s.cacheSize === null ? '—' : s.cacheSize) + ' KiB');
+    html += kv('Cache max TTL', esc(s.cacheMaxTtl || '—'));
+    html += kv('mDNS repeat', esc(s.mdnsRepeatIfaces.join(', ') || '—'));
+    html += kv('Max UDP packet', s.maxUdpPacketSize === null ? '—' : s.maxUdpPacketSize);
+    html += kv('Query timeout', esc(s.queryServerTimeout || '—') + ' / ' + esc(s.queryTotalTimeout || '—'));
+    settingsBody.innerHTML = html;
+  }
+
+  function sorted(rows, sort) {
+    return rows.slice().sort(function (a, b) {
+      var av = (a[sort.col] || '').toString().toLowerCase();
+      var bv = (b[sort.col] || '').toString().toLowerCase();
+      return sort.dir * av.localeCompare(bv);
+    });
+  }
+
+  function renderStatic() {
+    var rows = (_data && _data.staticEntries) || [];
+    var q = ($('dnsStaticSearch') && $('dnsStaticSearch').value || '').toLowerCase().trim();
+    var list = rows.filter(function (e) {
+      if (!q) return true;
+      return ((e.name || e.regexp) + ' ' + e.address).toLowerCase().indexOf(q) !== -1;
+    });
+    _renderSortHeader('dnsStaticThead', COLS_S, _sortS, function (key) {
+      _sortS.dir = _sortS.col === key ? -_sortS.dir : 1;
+      _sortS.col = key; render();
+    });
+    $('dnsStaticBadge').textContent = rows.length;
+    $('dnsStaticTable').innerHTML = list.length ? sorted(list, _sortS).map(function (e) {
+      return '<tr' + (e.disabled ? ' style="opacity:.55"' : '') + '>' +
+        '<td>' + esc(e.name || e.regexp) +
+          (e.regexp ? ' <span class="wl-band wl-band-24">regexp</span>' : '') + '</td>' +
+        '<td class="mono">' + esc(e.address) + '</td>' +
+        '<td>' + esc(e.type) + '</td>' +
+        '<td>' + esc(e.ttl || '—') + '</td>' +
+        '<td style="color:var(--text-muted)">' + esc(e.comment || '') + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="5" class="empty-state">' +
+      (q ? 'No entries match that search.' : 'No static DNS entries.') + '</td></tr>';
+  }
+
+  function render() {
+    if (!_data) return;
+    renderSettings();
+    renderStatic();
+  }
+
+  function renderSummary() {
+    if (!_data) return;
+    var s = _data.settings || {};
+    $('dnsSumCache').textContent  = (s.cacheUsed === null || s.cacheUsed === undefined)
+      ? '—' : s.cacheUsed + ' / ' + (s.cacheSize || '?');
+    $('dnsSumStatic').textContent = (_data.staticEntries || []).length;
+    $('dnsSumServers').textContent = s.dohEnabled ? 'DoH'
+      : (s.servers && s.servers.length) ? 'static'
+      : (s.dynamicServers && s.dynamicServers.length) ? 'dynamic' : '—';
+    $('dnsSumRemote').textContent = s.allowRemoteRequests ? 'allowed' : 'blocked';
+  }
+
+  socket.on('dns:update', function (d) {
+    if (!d) return;
+    _data = d;
+    renderSummary();
+    if (pageVisible('dns')) render();
+  });
+
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail === 'dns' && _data) render();
+  });
+
+  var ss = $('dnsStaticSearch');
+  if (ss) ss.addEventListener('input', _debounce(renderStatic, 150));
+}());
+
+/* ── Packages page ────────────────────────────────────────────────────────────
+   The only page that writes router configuration. enable/disable/uninstall do
+   not act — they SCHEDULE, undoable with unschedule, and inert until
+   apply-changes reboots the router. The page is built around that: pending
+   changes lead, every one has an Undo, and the reboot is a separate button that
+   demands the router's name typed back. See the packages:* actions in index.js. */
+(function () {
+  var tbody = $('packagesTable'), theadRow = $('packagesThead');
+  if (!tbody || !theadRow) return;
+
+  var _data = null;
+  var _caps = { permitted: false, routerName: '' };
+  // Default to state, not name: what is scheduled matters most, then what is
+  // actually on the router. Alphabetical order buries both under the packages
+  // MikroTik merely offers.
+  var _sort = { col: 'state', dir: 1 };
+  var _busy = '';
+  var STATE_RANK = { scheduled: 0, installed: 1, disabled: 2, available: 3, unknown: 4 };
+
+  // No global toast exists in app.js — the frequency analyzer uses a local
+  // status line for the same reason, so this follows it.
+  var _statusTimer = null;
+  function setStatus(text) {
+    var el = $('pkgStatus');
+    if (!el) return;
+    el.textContent = text || '';
+    if (_statusTimer) clearTimeout(_statusTimer);
+    if (text) _statusTimer = setTimeout(function () { el.textContent = ''; }, 8000);
+  }
+
+  var COLS = [
+    { key:'name',    label:'Package' },
+    { key:'version', label:'Version' },
+    { key:'size',    label:'Size' },
+    { key:'built',   label:'Built' },
+    { key:'state',   label:'State' },
+    { key:'actions', label:'' },
+  ];
+
+  function stateCell(p) {
+    if (p.scheduled) {
+      return '<span class="wl-band wl-band-24" title="' + esc(p.scheduled) + '">' +
+             esc(p.scheduledAction || 'scheduled') + ' pending</span>';
+    }
+    if (p.state === 'installed') return '<span class="wl-band wl-band-6">installed</span>';
+    if (p.state === 'disabled')  return '<span style="color:var(--text-muted)">disabled</span>';
+    if (p.state === 'available') return '<span class="wl-band wl-band-5">available</span>';
+    return '<span style="color:var(--text-muted)">unknown</span>';
+  }
+
+  // The verbs offered depend on where the package currently is, so the page
+  // never shows an action the router would refuse.
+  function actionsFor(p) {
+    if (!_caps.permitted) return '';
+    var dis = _busy === p.name ? ' disabled' : '';
+    var b = function (act, label, cls) {
+      return '<button class="pkg-act' + (cls ? ' ' + cls : '') + '" data-act="' + act +
+             '" data-name="' + esc(p.name) + '"' + dis + '>' + label + '</button>';
+    };
+    if (p.scheduled) return b('unschedule', 'Undo', 'undo');
+    if (p.state === 'available') return b('enable', 'Install');
+    if (p.state === 'disabled')  return b('enable', 'Enable') + ' ' + b('uninstall', 'Uninstall');
+    if (p.state === 'installed') return b('disable', 'Disable') + ' ' + b('uninstall', 'Uninstall');
+    return '';
+  }
+
+  function render() {
+    if (!_data) return;
+    var q = ($('packagesSearch') && $('packagesSearch').value || '').toLowerCase().trim();
+    var rows = (_data.packages || []).filter(function (p) {
+      return !q || p.name.toLowerCase().indexOf(q) !== -1;
+    });
+    rows = rows.slice().sort(function (a, b) {
+      var f = function (p, k) {
+        if (k === 'size')    return p.size || 0;
+        if (k === 'built')   return p.buildTime || '';
+        if (k === 'state')   return p.scheduled ? -1 : (STATE_RANK[p.state] === undefined ? 9 : STATE_RANK[p.state]);
+        if (k === 'actions') return p.name.toLowerCase();
+        return (p[k] || '').toString().toLowerCase();
+      };
+      var av = f(a, _sort.col), bv = f(b, _sort.col);
+      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
+      return _sort.dir * (av - bv);
+    });
+
+    _renderSortHeader('packagesThead', COLS, _sort, function (key) {
+      _sort.dir = _sort.col === key ? -_sort.dir : 1;
+      _sort.col = key; render();
+    });
+
+    $('packagesBadge').textContent = (_data.packages || []).length;
+    $('packagesBadge').className = 'card-badge' + ((_data.packages || []).length ? ' active-blue' : '');
+    var an = $('pkgActionNote');
+    if (an) an.textContent = _caps.permitted ? '' : 'read-only — you do not have write access to this router';
+
+    tbody.innerHTML = rows.length ? rows.map(function (p) {
+      return '<tr>' +
+        '<td>' + esc(p.name) + '</td>' +
+        '<td>' + (p.version ? esc(p.version) : '<span style="color:var(--text-muted)">&mdash;</span>') + '</td>' +
+        '<td>' + (p.size ? fmtBytes(p.size) : '<span style="color:var(--text-muted)">&mdash;</span>') + '</td>' +
+        '<td style="color:var(--text-muted)">' + esc((p.buildTime || '').split(' ')[0] || '—') + '</td>' +
+        '<td>' + stateCell(p) + '</td>' +
+        '<td>' + actionsFor(p) + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="6" class="empty-state">' +
+      (q ? 'No packages match that search.' : 'Waiting for package data…') + '</td></tr>';
+
+    Array.prototype.forEach.call(tbody.querySelectorAll('.pkg-act'), function (btn) {
+      btn.addEventListener('click', function () {
+        var act = btn.getAttribute('data-act'), name = btn.getAttribute('data-name');
+        _busy = name; render();
+        socket.emit('packages:schedule', { action: act, name: name });
+      });
+    });
+
+    renderPending();
+    renderFirmware();
+  }
+
+  function renderPending() {
+    var card = $('pkgPendingCard'), list = $('pkgPendingList');
+    if (!card || !list || !_data) return;
+    var pending = (_data.packages || []).filter(function (p) { return p.scheduled; });
+    if (!pending.length) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    list.innerHTML = pending.map(function (p) {
+      return esc(p.name) + ' — ' + esc(p.scheduledAction || 'change');
+    }).join(' · ') + ' · nothing has happened yet; the router applies these on reboot';
+    var btn = $('pkgApplyBtn');
+    if (btn) btn.disabled = !_caps.permitted;
+  }
+
+  function renderFirmware() {
+    var body = $('pkgFwBody');
+    if (!body || !_data) return;
+    var f = _data.firmware || {}, u = _data.update || {};
+    var kv = function (k, v, cls) {
+      return '<div class="kv-item"><div class="kv-key">' + esc(k) + '</div>' +
+             '<div class="kv-val' + (cls ? ' ' + cls : '') + '">' + v + '</div></div>';
+    };
+    var html = '';
+    html += kv('RouterOS', esc(u.installedVersion || '—') +
+      (u.updateAvailable ? ' → ' + esc(u.latestVersion) : ''), u.updateAvailable ? 'warn' : 'on');
+    html += kv('Channel', esc(u.channel || '—'));
+    html += kv('Update status', esc(u.status || '—'), u.updateAvailable ? 'warn' : 'off');
+    if (f.isRouterboard) {
+      html += kv('Firmware', esc(f.currentFirmware || '—') +
+        (f.upgradeAvailable ? ' → ' + esc(f.upgradeFirmware) : ''), f.upgradeAvailable ? 'warn' : 'on');
+      html += kv('Minimum firmware', esc(f.minimumFirmware || '—'));
+      html += kv('Board', esc(f.boardName || '—') + (f.model ? ' (' + esc(f.model) + ')' : ''));
+    }
+    body.innerHTML = html;
+  }
+
+  function renderSummary() {
+    if (!_data) return;
+    var c = _data.counts || {};
+    $('pkgSumInstalled').textContent = c.installed === undefined ? '—' : c.installed;
+    $('pkgSumAvailable').textContent = c.available === undefined ? '—' : c.available;
+    $('pkgSumDisabled').textContent  = c.disabled === undefined ? '—' : c.disabled;
+    $('pkgSumUpdate').textContent    = (_data.update && _data.update.updateAvailable)
+      ? (_data.update.latestVersion || 'update') : (_data.update && _data.update.installedVersion) || '—';
+  }
+
+  socket.on('packages:update', function (d) {
+    if (!d) return;
+    _data = d;
+    _busy = '';
+    renderSummary();
+    if (pageVisible('packages')) render();
+  });
+  socket.on('packages:caps', function (d) {
+    if (!d) return;
+    _caps = d;
+    if (pageVisible('packages')) render();
+  });
+  socket.on('packages:ok', function (d) {
+    _busy = '';
+    if (d && d.action === 'apply') setStatus('Applying changes — the router is rebooting');
+    else if (d && d.action === 'check') setStatus('Update check finished');
+  });
+  socket.on('packages:error', function (d) {
+    _busy = '';
+    var msg = {
+      denied:              'You do not have write access to this router',
+      unavailable:         'Package collection is not running for this router',
+      'bad-request':       'Invalid request',
+      'no-such-package':   'That package is no longer listed',
+      'router-write-policy': 'The RouterOS user needs write permission for this',
+      unsupported:         'This router does not support that command',
+      'confirm-mismatch':  'The router name did not match — nothing was applied',
+      'nothing-scheduled': 'There are no scheduled changes to apply',
+    }[d && d.code] || ((d && d.message) || 'Action failed');
+    setStatus(msg);
+    if (pageVisible('packages')) render();
+  });
+
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail !== 'packages') return;
+    // Permission is a property of this socket, not of the shared payload, so it
+    // is asked for on entry rather than carried in packages:update.
+    socket.emit('packages:caps');
+    if (_data) render();
+  });
+
+  var se = $('packagesSearch');
+  if (se) se.addEventListener('input', _debounce(render, 150));
+
+  var chk = $('pkgCheckBtn');
+  if (chk) chk.addEventListener('click', function () {
+    if (!_caps.permitted) return setStatus('You do not have write access to this router');
+    setStatus('Checking for updates…');
+    socket.emit('packages:check');
+  });
+
+  var apply = $('pkgApplyBtn');
+  if (apply) apply.addEventListener('click', function () {
+    if (!_caps.permitted) return;
+    var name = _caps.routerName || '';
+    // Typed confirmation, not an "are you sure": this reboots a production
+    // router, and the name is what makes "the wrong router" a hard mistake to
+    // make rather than an easy one.
+    var typed = window.prompt(
+      'This applies all scheduled package changes and REBOOTS the router.\n\n' +
+      'Type the router name to confirm: ' + name);
+    if (typed === null) return;
+    socket.emit('packages:apply', { confirm: typed });
+  });
+}());
+
+/* ── WAN page ─────────────────────────────────────────────────────────────────
+   The uplinks RouterOS reports as state=internet — the same set the Dashboard
+   Network card shows, in detail.
+
+   Two things carry most of the meaning. WHICH UPLINK IS ACTIVE: a router can
+   hold several default routes, and only the active one is moving traffic; the
+   rest are standby, in distance order. And THE LEASE: for a DHCP uplink, status
+   and countdown are what tell you whether the ISP side is healthy.
+
+   Renew and release both interrupt the uplink. When that would cut the path
+   MikroDash manages this router through, the server says so before writing and
+   the dialog below names the specifics. */
+(function () {
+  var tb = $('wanTable');
+  if (!tb) return;
+
+  var _data = null;
+  var _caps = { permitted: false, routerName: '' };
+  var _busy = '';
+
+  var _statusTimer = null;
+  function setStatus(text) {
+    var el = $('wanActionNote');
+    if (!el) return;
+    el.textContent = text || '';
+    if (_statusTimer) clearTimeout(_statusTimer);
+    if (text) _statusTimer = setTimeout(function () { el.textContent = ''; }, 8000);
+  }
+
+  var COLS = [{key:'',label:'Uplink'},{key:'',label:'Address'},{key:'',label:'Gateway'},
+              {key:'',label:'Route'},{key:'',label:'Lease'},{key:'',label:'Rate'},{key:'',label:''}];
+
+  function dash(t) { return '<span style="color:var(--text-muted)"' + (t ? ' title="' + t + '"' : '') + '>&mdash;</span>'; }
+  function fmtMb(v) { return v >= 1000 ? (v/1000).toFixed(2) + ' Gb/s' : v >= 1 ? v.toFixed(1) + ' Mb/s' : (v*1000).toFixed(0) + ' kb/s'; }
+
+  /** The router's own timestamp, as an age. Its clock, not ours. */
+  function since(ts) {
+    if (!ts) return '';
+    var t = Date.parse(ts.replace(' ', 'T'));
+    if (!isFinite(t)) return '';
+    var s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (s < 90) return s + 's';
+    if (s < 5400) return Math.round(s/60) + 'm';
+    if (s < 172800) return Math.round(s/3600) + 'h';
+    return Math.round(s/86400) + 'd';
+  }
+
+  function rateCell(w) {
+    if (w.rxMbps === null && w.txMbps === null) {
+      // null is "Interface Rates is not collecting", which is not "idle".
+      return dash('Interface Rates collection is off for this router');
+    }
+    return '<div class="q-rate">' +
+      '<div class="q-rate-line"><span class="q-rate-arrow ' + (w.rxMbps ? 'rx' : 'zero') + '">&#8595;</span>' +
+        '<span class="q-rate-val ' + (w.rxMbps ? 'rx' : 'zero') + '">' + esc(fmtMb(w.rxMbps || 0)) + '</span></div>' +
+      '<div class="q-rate-line"><span class="q-rate-arrow ' + (w.txMbps ? 'tx' : 'zero') + '">&#8593;</span>' +
+        '<span class="q-rate-val ' + (w.txMbps ? 'tx' : 'zero') + '">' + esc(fmtMb(w.txMbps || 0)) + '</span></div>' +
+    '</div>';
+  }
+
+  function leaseCell(w) {
+    // "no DHCP client", not "static": a tunnel's address is configured rather
+    // than leased, and calling that static invites reading it as a static WAN.
+    if (!w.dhcp) return '<span class="muted-note">no DHCP client</span>';
+    var d = w.dhcp;
+    var ok = d.status === 'bound';
+    return '<div><span class="wl-band ' + (ok ? 'wl-band-6' : 'wl-band-24') + '">' + esc(d.status || '?') + '</span>' +
+      (d.expiresAfter ? '<div class="muted-note">expires in ' + esc(d.expiresAfter) + '</div>' : '') +
+      (d.invalid ? '<div class="muted-note" style="color:rgba(248,113,113,.9)">invalid</div>' : '') + '</div>';
+  }
+
+  function actions(w) {
+    if (!w.dhcp) return '';                    // nothing to renew on a static uplink
+    if (!_caps.permitted) return '';
+    var b = function (verb, label, cls) {
+      return '<button class="ru-act' + (cls ? ' ' + cls : '') + '" data-wanact="' + verb +
+             '" data-id="' + esc(w.dhcp.id) + '" data-name="' + esc(w.name) + '"' +
+             (_busy === w.dhcp.id ? ' disabled' : '') + '>' + label + '</button>';
+    };
+    return b('renew', 'Renew') + ' ' + b('release', 'Release', 'danger');
+  }
+
+  function render() {
+    var wans = (_data && _data.wans) || [];
+    _renderSortHeader('wanThead', COLS, { col: '', dir: 'asc' }, function () {});
+    $('wanBadge').textContent = wans.length;
+
+    tb.innerHTML = wans.length ? wans.map(function (w) {
+      var age = since(w.since);
+      return '<tr' + (w.running === false ? ' style="opacity:.62"' : '') + '>' +
+        '<td>' + esc(w.name) +
+          '<div class="muted-note">' + esc(w.isTunnel ? 'tunnel · ' + w.type : w.type || 'interface') +
+          (age ? ' · up ' + esc(age) : '') + '</div></td>' +
+        '<td>' + (w.address ? esc(w.address) : dash()) +
+          (w.isPublic === true ? '<div class="muted-note" style="color:var(--accent-rx)">public</div>' :
+           w.isPublic === false ? '<div class="muted-note">private</div>' : '') + '</td>' +
+        '<td>' + (w.gateway ? esc(w.gateway) : dash()) + '</td>' +
+        '<td>' + (w.hasDefaultRoute
+            ? (w.routeActive
+                ? '<span class="wl-band wl-band-6">active</span>'
+                : '<span class="wl-band wl-band-24">standby</span>') +
+              '<div class="muted-note">distance ' + esc(w.routeDistance || '?') + '</div>'
+            : dash('No default route via this uplink')) + '</td>' +
+        '<td>' + leaseCell(w) + '</td>' +
+        '<td>' + rateCell(w) + '</td>' +
+        '<td>' + actions(w) + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="7" class="empty-state">' + emptyState() + '</td></tr>';
+
+    var note = $('wanActionNote');
+    if (note) note.textContent = _caps.permitted ? '' : 'read-only — you do not have write access to this router';
+    renderNotice();
+    renderSummary();
+  }
+
+  function emptyState() {
+    if (!_data) return 'Waiting for WAN data&hellip;';
+    if (_data.denied) return 'This router\'s MikroDash account cannot read the internet-detection state.';
+    if (!_data.detectionEnabled) return 'Internet detection is not enabled on this router.';
+    return 'No uplink currently reports an internet connection.';
+  }
+
+  function renderNotice() {
+    var card = $('wanNoticeCard'), body = $('wanNotice');
+    if (!card || !body) return;
+    if (!_data || _data.detectionEnabled || _data.denied) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    // The default is detect-interface-list=none, so this is the common case
+    // rather than a fault. Say what to run.
+    body.innerHTML = '<strong>Internet detection is switched off on this router.</strong> ' +
+      'RouterOS decides which interfaces reach the internet, and it is not looking. ' +
+      'This page shows what it reports, so it has nothing to show until detection is on. Enable it with ' +
+      '<code>/interface detect-internet set detect-interface-list=all</code> — it is read-only and adds no traffic ' +
+      'beyond an occasional probe.';
+  }
+
+  function renderSummary() {
+    var d = _data || {}, wans = d.wans || [];
+    $('wanSumCount').textContent  = wans.length || '—';
+    $('wanSumActive').textContent = d.activeDefaultWan || (wans.length ? 'none active' : '—');
+    $('wanSumPublic').textContent = (d.publicIp || '').split('/')[0] || '—';
+    var any = wans.some(function (w) { return w.rxMbps !== null || w.txMbps !== null; });
+    if (!any) { $('wanSumRate').innerHTML = '&mdash;'; return; }
+    var rx = 0, tx = 0;
+    wans.forEach(function (w) { rx += w.rxMbps || 0; tx += w.txMbps || 0; });
+    // Coloured per direction rather than as one figure, so the summary reads the
+    // same way as the rate cells in the table below it.
+    $('wanSumRate').innerHTML =
+      '<span style="color:var(--accent-rx)">&#8595; ' + esc(fmtMb(rx)) + '</span> ' +
+      '<span style="color:var(--accent-tx)">&#8593; ' + esc(fmtMb(tx)) + '</span>';
+  }
+
+  function send(verb, id, name, ack) {
+    _busy = id; render();
+    socket.emit('wan:' + verb, { id: id, expectedName: name, ack: ack || undefined });
+  }
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('[data-wanact]');
+    if (!b) return;
+    var verb = b.getAttribute('data-wanact'), id = b.getAttribute('data-id'), name = b.getAttribute('data-name');
+    var msg = verb === 'release'
+      ? 'Release the DHCP lease on "' + name + '"?\n\nThe uplink goes down until the client rebinds — usually seconds, but it is a real outage.'
+      : 'Renew the DHCP lease on "' + name + '"?\n\nThe uplink blips briefly while the lease is renewed.';
+    if (!window.confirm(msg)) return;
+    send(verb, id, name);
+  });
+
+  $('wanWarnGo').addEventListener('click', function () {
+    $('wanWarnWrap').classList.remove('open');
+    send($('wanWarnVerb').value, $('wanWarnId').value, $('wanWarnName').value, $('wanWarnAck').value);
+  });
+
+  socket.on('wan:update', function (d) {
+    if (!d) return;
+    _data = d; _busy = '';
+    renderSummary();
+    if (pageVisible('wan')) render();
+  });
+  socket.on('wan:caps', function (d) {
+    if (!d) return;
+    _caps = d;
+    if (pageVisible('wan')) render();
+  });
+  socket.on('wan:ok', function (d) {
+    _busy = '';
+    // "Requested", not "renewed": the lease settles over the next second or two
+    // and the next tick is what reports the outcome.
+    setStatus((d && d.action === 'release' ? 'Released the lease on ' : 'Requested a renewal on ') + ((d && d.name) || ''));
+  });
+  socket.on('wan:error', function (d) {
+    _busy = '';
+    var code = d && d.code;
+
+    if (code === 'self-cutoff' || code === 'stale-warning') {
+      var w = (d && d.warning) || {};
+      $('wanWarnId').value   = '';   // filled from the row that triggered it
+      $('wanWarnName').value = (d && d.name) || '';
+      $('wanWarnVerb').value = (d && d.verb) || 'renew';
+      $('wanWarnAck').value  = (d && d.fingerprint) || '';
+      var row = ((_data && _data.wans) || []).find(function (x) { return x.name === (d && d.name); });
+      $('wanWarnId').value = (row && row.dhcp && row.dhcp.id) || '';
+      $('wanWarnBody').innerHTML =
+        '<p>MikroDash reaches ' + esc(_caps.routerName || 'this router') + ' from <code>' + esc(w.address || '') + '</code>, ' +
+        'which is not on any of its connected subnets — so that traffic arrives over a WAN.</p>' +
+        (w.certain
+          ? '<p><strong>' + esc(w.wan || '') + ' is the uplink carrying the active default route</strong>, which means it is carrying this session.</p>'
+          : '<p>This router has more than one active default route, so which uplink carries this session cannot be determined — ' +
+            '<strong>' + esc(w.wan || '') + ' may be the one.</strong></p>') +
+        '<p>' + ($('wanWarnVerb').value === 'release'
+          ? 'Releasing the lease takes the uplink down until the client rebinds.'
+          : 'Renewing blips the uplink briefly.') +
+        ' The dashboard will lose this router until it comes back. It should return on its own.</p>' +
+        (code === 'stale-warning' ? '<p><em>The situation changed since you confirmed, so please confirm again.</em></p>' : '');
+      $('wanWarnWrap').classList.add('open');
+      return;
+    }
+
+    var msg = {
+      denied:       'You do not have write access to this router',
+      unavailable:  'WAN collection is not running for this router',
+      'bad-request':'Invalid request',
+      'stale-row':  'That uplink changed on the router — the page has been refreshed',
+      'router-write-policy': 'The RouterOS user needs write permission for this',
+      unsupported:  'This router does not support that command',
+    }[code] || ((d && d.message) || 'Action failed');
+    setStatus(msg);
+    if (pageVisible('wan')) render();
+  });
+
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail !== 'wan') return;
+    socket.emit('wan:caps');
+    if (_data) render();
+  });
+}());
+
+/* ── Queues page ──────────────────────────────────────────────────────────────
+   RouterOS traffic shaping: /queue/simple (per-target limits, ORDERED) and
+   /queue/tree (mangle-driven HTB).
+
+   Two things here are not decoration:
+
+   ORDER. Simple queues are walked in list order and the first match wins, so a
+   queue's position changes what it does. The table therefore defaults to router
+   order and offers move up/down — sorting alphabetically by default would
+   misrepresent the router.
+
+   FASTTRACK. A fasttracked connection bypasses simple queues and any tree
+   parented to `global` — so a queue can look perfectly configured and do
+   nothing at all. The banner says so, and only when a queue is actually
+   affected. */
+(function () {
+  var simpleTb = $('qSimpleTable'), treeTb = $('qTreeTable');
+  if (!simpleTb || !treeTb) return;
+
+  var _data = null;
+  var _caps = { permitted: false, routerName: '' };
+  var _tab  = 'simple';
+  var _busy = '';
+
+  var _statusTimer = null;
+  function setStatus(text) {
+    var el = $('qActionNote');
+    if (!el) return;
+    el.textContent = text || '';
+    if (_statusTimer) clearTimeout(_statusTimer);
+    if (text) _statusTimer = setTimeout(function () { el.textContent = ''; }, 8000);
+  }
+
+  // Order first, and it is not cosmetic — see the header.
+  var SIMPLE_COLS = [{key:'',label:'#'},{key:'name',label:'Name'},{key:'target',label:'Target'},
+                     {key:'',label:'Limits'},{key:'',label:'Rate'},{key:'',label:''}];
+  var TREE_COLS   = [{key:'name',label:'Name'},{key:'parent',label:'Parent'},{key:'packetMark',label:'Packet Mark'},
+                     {key:'',label:'Max Limit'},{key:'',label:'Rate'},{key:'',label:''}];
+
+  function q() { var e = $('qSearch'); return (e && e.value || '').toLowerCase().trim(); }
+  function dash(t) { return '<span style="color:var(--text-muted)"' + (t ? ' title="' + t + '"' : '') + '>&mdash;</span>'; }
+
+  /** bits/sec to something readable. 0 is a real reading; null is not. */
+  function fmtBps(bps) {
+    if (bps === null || bps === undefined) return null;
+    if (bps >= 1e9) return (bps / 1e9).toFixed(2) + ' Gb/s';
+    if (bps >= 1e6) return (bps / 1e6).toFixed(2) + ' Mb/s';
+    if (bps >= 1e3) return (bps / 1e3).toFixed(0) + ' kb/s';
+    return Math.round(bps) + ' b/s';
+  }
+  /** A configured limit. 0 means explicitly unlimited, which is not "unset". */
+  function fmtLimit(bps) {
+    if (bps === null || bps === undefined) return '&mdash;';
+    if (bps === 0) return '<span style="color:var(--text-muted)">unlimited</span>';
+    return esc(fmtBps(bps));
+  }
+
+  // Rate history for the sparklines, client-side for the reason the VLANs page
+  // gives: it is presentation state, and pushing on re-render would forge
+  // samples the router never sent.
+  var _hist = {};
+  var HIST_MAX = 40;
+
+  function pushHistory(d) {
+    var live = {};
+    (d.simple || []).forEach(function (x) {
+      live['s' + x.id] = true;
+      var h = _hist['s' + x.id] || (_hist['s' + x.id] = { up: [], down: [] });
+      if (x.rateBps && x.rateBps.up   !== null) h.up.push(x.rateBps.up);
+      if (x.rateBps && x.rateBps.down !== null) h.down.push(x.rateBps.down);
+      if (h.up.length   > HIST_MAX) h.up.splice(0, h.up.length - HIST_MAX);
+      if (h.down.length > HIST_MAX) h.down.splice(0, h.down.length - HIST_MAX);
+    });
+    (d.tree || []).forEach(function (x) {
+      live['t' + x.id] = true;
+      var h = _hist['t' + x.id] || (_hist['t' + x.id] = { up: [], down: [] });
+      if (x.rateBps !== null) h.up.push(x.rateBps);
+      if (h.up.length > HIST_MAX) h.up.splice(0, h.up.length - HIST_MAX);
+    });
+    // A removed queue must not leave its trend behind for a recreated one.
+    Object.keys(_hist).forEach(function (k) { if (!live[k]) delete _hist[k]; });
+  }
+
+  // Stroked with currentColor and coloured by class, so the line cannot drift
+  // from the value printed beside it.
+  function spark(history, dir) {
+    if (!history || history.length < 2) return '<span class="q-spark-slot"></span>';
+    var w = 56, h = 14, pad = 1.5;
+    var max = Math.max.apply(null, history) || 1;
+    var pts = history.map(function (v, i) {
+      var x = pad + (i / (history.length - 1)) * (w - pad * 2);
+      var y = h - pad - (v / max) * (h - pad * 2);
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    });
+    return '<svg class="q-spark ' + dir + '" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">' +
+      '<polyline points="' + pts.join(' ') + '" fill="none" stroke="currentColor"' +
+      ' stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+  }
+
+  function rateLine(dir, bps, history) {
+    var cls = bps ? dir : 'zero';
+    return '<div class="q-rate-line">' +
+      '<span class="q-rate-arrow ' + cls + '">' + (dir === 'rx' ? '↓' : '↑') + '</span>' +
+      '<span class="q-rate-val ' + cls + '">' + esc(fmtBps(bps || 0)) + '</span>' +
+      spark(history, dir) +
+    '</div>';
+  }
+
+  /**
+   * The rate cell.
+   *
+   * null is "the router did not report this", which is not "idle" — the
+   * distinction the collector goes to some trouble to preserve, so the page must
+   * not throw it away at the last step. The title says how the number was
+   * arrived at, including the measurement window.
+   */
+  function rateCell(key, up, down, source, windowMs) {
+    if (up === null && down === null) {
+      return dash(source === null ? 'No measurement yet' : 'The router reported no rate for this queue');
+    }
+    var h = _hist[key] || { up: [], down: [] };
+    var title = source === 'router'
+      ? 'Router-reported average (bytes/sec), shown until a window is measured'
+      : 'Measured over ' + ((windowMs || 0) / 1000).toFixed(1) + ' s';
+    return '<div class="q-rate" title="' + esc(title) + '">' +
+      rateLine('tx', up, h.up) +
+      (down === null ? '' : rateLine('rx', down, h.down)) + '</div>';
+  }
+
+  function actions(row, menu) {
+    if (row.dynamic) {
+      return '<span class="muted-note" title="Created automatically by another RouterOS feature — Kid Control, a DHCP lease, or a PPP profile. Change the feature that creates it.">&#128274; dynamic</span>';
+    }
+    if (!_caps.permitted) return '';
+    var b = function (act, label, cls, extra) {
+      return '<button class="ru-act' + (cls ? ' ' + cls : '') + '" data-qact="' + act +
+             '" data-id="' + esc(row.id) + '" data-menu="' + menu + '" data-name="' + esc(row.name) + '"' +
+             (extra || '') + (_busy === row.id ? ' disabled' : '') + '>' + label + '</button>';
+    };
+    var out = b('edit', 'Edit') + ' ' + b('toggle', row.disabled ? 'Enable' : 'Disable');
+    if (menu === 'simple') {
+      out += ' ' + b('up', '&uarr;', '', ' title="Move earlier — the first matching queue wins"') +
+             b('down', '&darr;', '', ' title="Move later"');
+    }
+    out += ' ' + b('reset', 'Reset') + ' ' + b('remove', 'Remove', 'danger');
+    return out;
+  }
+
+  function renderSimple() {
+    var term = q();
+    var rows = (_data && _data.simple || []).filter(function (x) {
+      return !term || (x.name + ' ' + x.target + ' ' + x.comment).toLowerCase().indexOf(term) !== -1;
+    });
+    _renderSortHeader('qSimpleThead', SIMPLE_COLS, { col: '', dir: 'asc' }, function () {});
+    $('qSimpleBadge').textContent = (_data && _data.simple || []).length;
+
+    simpleTb.innerHTML = rows.length ? rows.map(function (x) {
+      var flags = (x.disabled ? '<span class="wl-band wl-band-24">disabled</span> ' : '') +
+                  (x.invalid  ? '<span class="wl-band wl-band-24">invalid</span> '  : '');
+      return '<tr' + (x.disabled ? ' style="opacity:.62"' : '') + '>' +
+        '<td class="q-order">' + (x.order + 1) + '</td>' +
+        '<td>' + flags + esc(x.name) + (x.comment ? '<div class="muted-note">' + esc(x.comment) + '</div>' : '') + '</td>' +
+        '<td>' + (x.target ? esc(x.target) : dash()) + '</td>' +
+        '<td><div style="font-size:.72rem">&uarr; ' + fmtLimit(x.maxLimit.up) + '<br>&darr; ' + fmtLimit(x.maxLimit.down) + '</div></td>' +
+        '<td>' + rateCell('s' + x.id, x.rateBps.up, x.rateBps.down, x.rateSource, x.rateWindowMs) + '</td>' +
+        '<td>' + actions(x, 'simple') + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="6" class="empty-state">' + emptyState(term, 'simple') + '</td></tr>';
+  }
+
+  function renderTree() {
+    var term = q();
+    var rows = (_data && _data.tree || []).filter(function (x) {
+      return !term || (x.name + ' ' + x.parent + ' ' + x.packetMark).toLowerCase().indexOf(term) !== -1;
+    });
+    _renderSortHeader('qTreeThead', TREE_COLS, { col: '', dir: 'asc' }, function () {});
+    $('qTreeBadge').textContent = (_data && _data.tree || []).length;
+
+    var ftActive = _data && _data.fasttrack && _data.fasttrack.state === 'active';
+    treeTb.innerHTML = rows.length ? rows.map(function (x) {
+      var flags = (x.disabled ? '<span class="wl-band wl-band-24">disabled</span> ' : '') +
+                  (x.invalid  ? '<span class="wl-band wl-band-24">invalid</span> '  : '');
+      // Only a global-parented tree is bypassed by FastTrack; one parented to an
+      // interface still works, so the chip is per row rather than per table.
+      var ft = (ftActive && x.fasttrackBypassable && !x.disabled)
+        ? ' <span class="wl-band wl-band-24" title="FastTrack bypasses queue trees parented to global">bypassed</span>' : '';
+      return '<tr' + (x.disabled ? ' style="opacity:.62"' : '') + '>' +
+        '<td>' + flags + esc(x.name) + (x.comment ? '<div class="muted-note">' + esc(x.comment) + '</div>' : '') + '</td>' +
+        '<td>' + esc(x.parent || '—') + ft + '</td>' +
+        '<td>' + (x.packetMark ? esc(x.packetMark) : dash()) + '</td>' +
+        '<td style="font-size:.72rem">' + fmtLimit(x.maxLimit) + '</td>' +
+        '<td>' + rateCell('t' + x.id, x.rateBps, null, x.rateSource, x.rateWindowMs) + '</td>' +
+        '<td>' + actions(x, 'tree') + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="6" class="empty-state">' + emptyState(term, 'tree') + '</td></tr>';
+  }
+
+  /**
+   * The empty state does real work here.
+   *
+   * A fresh install has no queues on any router, so this — not a populated table
+   * — is what most people see first. Saying "Waiting for data…" forever would be
+   * both wrong and unhelpful, so it explains what the tab is for.
+   */
+  function emptyState(term, menu) {
+    if (term) return 'No queues match that search.';
+    if (!_data) return 'Waiting for queue data&hellip;';
+    if (_data.denied) return 'This router\'s MikroDash account cannot read queues.';
+    return menu === 'simple'
+      ? 'No simple queues on this router. A simple queue caps the bandwidth of one target &mdash; an address, a subnet, or an interface.' +
+        (_caps.permitted ? ' Use <strong>Add Queue</strong> to create one.' : '')
+      : 'No queue trees on this router. A tree shapes traffic that firewall mangle rules have marked, which makes it the tool for shaping by protocol or application rather than by address.';
+  }
+
+  function renderFasttrack() {
+    var card = $('qFtCard'), banner = $('qFtBanner');
+    var nCard = $('qNoticeCard'), notice = $('qNotice');
+    if (!card || !banner) return;
+    var ft = (_data && _data.fasttrack) || { state: 'unknown' };
+
+    if (ft.state === 'unknown') {
+      card.style.display = 'none';
+      // A footnote, not an alarm: we cannot check, which is not the same as bad.
+      nCard.style.display = '';
+      notice.innerHTML = 'Cannot check for a FastTrack rule &mdash; Firewall collection is switched off for this router.';
+      return;
+    }
+    nCard.style.display = 'none';
+
+    // Only warn when something is actually affected. On a router with no queues
+    // — which is every router until somebody makes one — this stays hidden.
+    var affected = (_data.simple || []).some(function (x) { return !x.disabled && !x.dynamic; }) ||
+                   (_data.tree   || []).some(function (x) { return !x.disabled && x.fasttrackBypassable; });
+    if (ft.state !== 'active' || !affected) { card.style.display = 'none'; return; }
+
+    card.style.display = '';
+    // Measured against a live router rather than assumed: with the default
+    // FastTrack rule active, a fresh queue on the LAN still counted several
+    // megabits within seconds. FastTrack diverts the connections it matches, not
+    // all traffic, so the honest claim is "some of it bypasses these queues" —
+    // saying they do nothing would be wrong, and would be disproved by the rate
+    // column right underneath.
+    banner.innerHTML = '<strong>FastTrack is active on this router.</strong> ' +
+      'FastTracked connections bypass simple queues and any queue tree parented to <code>global</code>, so a queue here ' +
+      'only shapes the traffic FastTrack did not take' +
+      (ft.scoped ? ' — and this rule is narrowed, so it takes only part of it.' : ', which can be a small fraction of the total.') +
+      ' If a limit looks like it is having no effect, this is usually why. ' +
+      'To shape that traffic too, disable the FastTrack rule in <em>IP &rarr; Firewall &rarr; Filter</em>, or exclude the traffic from it.';
+  }
+
+  function renderSummary() {
+    var d = _data || {};
+    $('qSumSimple').textContent = (d.simple || []).length || '—';
+    $('qSumTree').textContent   = (d.tree   || []).length || '—';
+    var live = (d.simple || []).filter(function (x) { return x.rateBps && (x.rateBps.up || x.rateBps.down); }).length +
+               (d.tree   || []).filter(function (x) { return x.rateBps; }).length;
+    $('qSumActive').textContent = (d.simple || d.tree) ? live : '—';
+    var total = 0, any = false;
+    (d.simple || []).forEach(function (x) { if (x.bytes.up !== null) { total += x.bytes.up + x.bytes.down; any = true; } });
+    (d.tree   || []).forEach(function (x) { if (x.bytes !== null) { total += x.bytes; any = true; } });
+    $('qSumBytes').textContent = any ? fmtBytes(total) : '—';
+  }
+
+  function render() {
+    renderSimple(); renderTree(); renderFasttrack(); renderSummary();
+    var add = $('qAddBtn');
+    if (add) {
+      add.textContent = _tab === 'tree' ? 'Add Tree Queue' : 'Add Simple Queue';
+      add.style.display = _caps.permitted ? '' : 'none';
+    }
+    var note = $('qActionNote');
+    if (note) {
+      note.textContent = !_caps.permitted ? 'read-only — you do not have write access to this router'
+                       : (_data && _data.stats === 'none') ? 'this router reports no queue statistics' : '';
+    }
+  }
+
+  // ── Dialog ────────────────────────────────────────────────────────────────
+
+  function openForm(menu, row) {
+    $('qf_title').textContent = (row ? 'Edit ' : 'Add ') + (menu === 'tree' ? 'Tree Queue' : 'Simple Queue');
+    $('qf_menu').value  = menu;
+    $('qf_id').value    = row ? row.id : '';
+    $('qf_expectedName').value = row ? row.name : '';
+    $('qf_ack').value   = '';
+    $('qf_name').value  = row ? row.name : '';
+    $('qf_comment').value  = row ? row.comment : '';
+    $('qf_priority').value = row ? row.priority : '';
+    $('qf_disabled').checked = row ? !!row.disabled : false;
+
+    var simple = menu === 'simple';
+    $('qf_targetWrap').style.display = simple ? '' : 'none';
+    $('qf_parentWrap').style.display = simple ? 'none' : '';
+    $('qf_markLabel').textContent = simple ? 'Packet Marks' : 'Packet Mark';
+    $('qf_maxHint').textContent = simple ? '(up/down, e.g. 15M/20M)' : '(e.g. 10M)';
+    $('qf_target').value = (simple && row) ? row.target : '';
+    $('qf_parent').value = (!simple && row) ? row.parent : (simple ? '' : 'global');
+    $('qf_packetMark').value = row ? (simple ? row.packetMarks : row.packetMark) : '';
+
+    // The router answers in raw bps; the form shows the same suffixed form the
+    // operator would have typed.
+    var lim = function (v) { return v === null || v === undefined ? '' : bpsToShort(v); };
+    $('qf_maxLimit').value = row ? (simple ? lim(row.maxLimit.up) + '/' + lim(row.maxLimit.down) : lim(row.maxLimit)) : '';
+    $('qf_limitAt').value  = row ? (simple ? lim(row.limitAt.up)  + '/' + lim(row.limitAt.down)  : lim(row.limitAt))  : '';
+
+    $('qf_error').style.display = 'none';
+    $('qf_warn').style.display = 'none';
+    $('qFormWrap').classList.add('open');
+  }
+
+  /** Raw bps back to the suffixed form, so an edit round-trips what was typed. */
+  function bpsToShort(bps) {
+    if (bps === null || bps === undefined) return '';
+    if (bps === 0) return '0';
+    if (bps % 1e9 === 0) return (bps / 1e9) + 'G';
+    if (bps % 1e6 === 0) return (bps / 1e6) + 'M';
+    if (bps % 1e3 === 0) return (bps / 1e3) + 'k';
+    return String(bps);
+  }
+
+  function formError(msg) { var el = $('qf_error'); el.textContent = msg; el.style.display = ''; }
+
+  function submit(ack) {
+    var menu = $('qf_menu').value;
+    var name = $('qf_name').value.trim();
+    if (!name) return formError('A queue name is required');
+    var payload = {
+      menu: menu,
+      id: $('qf_id').value || undefined,
+      expectedName: $('qf_expectedName').value || undefined,
+      name: name,
+      maxLimit: $('qf_maxLimit').value.trim(),
+      limitAt:  $('qf_limitAt').value.trim(),
+      priority: $('qf_priority').value.trim(),
+      comment:  $('qf_comment').value.trim(),
+      disabled: $('qf_disabled').checked,
+      ack: ack || undefined,
+    };
+    if (menu === 'simple') {
+      payload.target = $('qf_target').value.trim();
+      payload.packetMarks = $('qf_packetMark').value.trim();
+      if (!payload.target) return formError('A target is required — an address, a subnet, or an interface');
+    } else {
+      payload.parent = $('qf_parent').value.trim();
+      payload.packetMark = $('qf_packetMark').value.trim();
+      if (!payload.parent) return formError('A parent is required — "global", or an interface name');
+    }
+    _busy = payload.id || '';
+    socket.emit('queue:save', payload);
+  }
+
+  // ── Wiring ────────────────────────────────────────────────────────────────
+
+  Array.prototype.forEach.call(document.querySelectorAll('#qTabBar .stab'), function (b) {
+    b.addEventListener('click', function () {
+      _tab = b.getAttribute('data-qtab');
+      Array.prototype.forEach.call(document.querySelectorAll('#qTabBar .stab'), function (o) {
+        var on = o === b;
+        o.classList.toggle('active', on);
+        o.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('#queuesCard .brtab-panel'), function (pnl) {
+        pnl.classList.toggle('active', pnl.id === 'qtab-' + _tab);
+      });
+      render();
+    });
+  });
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('[data-qact]');
+    if (!b) return;
+    var act = b.getAttribute('data-qact'), id = b.getAttribute('data-id');
+    var menu = b.getAttribute('data-menu'), name = b.getAttribute('data-name');
+    var list = (menu === 'tree' ? _data.tree : _data.simple) || [];
+    var row = list.find(function (x) { return x.id === id; });
+    if (!row) return;
+
+    if (act === 'edit') return openForm(menu, row);
+    if (act === 'up' || act === 'down') {
+      _busy = id; render();
+      return socket.emit('queue:move', { id: id, expectedName: name, direction: act });
+    }
+    if (act === 'toggle') {
+      _busy = id; render();
+      return socket.emit('queue:toggle', { id: id, expectedName: name, menu: menu });
+    }
+    if (act === 'reset') {
+      _busy = id; render();
+      return socket.emit('queue:resetCounters', { id: id, expectedName: name, menu: menu });
+    }
+    if (act === 'remove') {
+      if (!window.confirm('Remove the queue "' + name + '"?\n\nTraffic it was limiting will no longer be shaped.')) return;
+      _busy = id; render();
+      return socket.emit('queue:remove', { id: id, expectedName: name, menu: menu });
+    }
+  });
+
+  var add = $('qAddBtn');
+  if (add) add.addEventListener('click', function () {
+    if (!_caps.permitted) return;
+    openForm(_tab === 'tree' ? 'tree' : 'simple', null);
+  });
+
+  $('qf_save').addEventListener('click', function () { submit($('qf_ack').value || undefined); });
+
+  socket.on('queues:update', function (d) {
+    if (!d) return;
+    _data = d;
+    _busy = '';
+    pushHistory(d);
+    renderSummary();
+    if (pageVisible('queues')) render();
+  });
+  socket.on('queues:caps', function (d) {
+    if (!d) return;
+    _caps = d;
+    if (pageVisible('queues')) render();
+  });
+  socket.on('queues:ok', function (d) {
+    _busy = '';
+    $('qFormWrap').classList.remove('open');
+    var what = { create:'Created ', update:'Updated ', 'delete':'Removed ', enable:'Enabled ',
+                 disable:'Disabled ', reset:'Reset counters for ', move:'Reordered ' }[d && d.action] || 'Done: ';
+    setStatus(what + ((d && d.name) || ''));
+  });
+  socket.on('queues:error', function (d) {
+    _busy = '';
+    var code = d && d.code;
+
+    // The self-throttle prompt is not an error — it is a question, asked once,
+    // and answered by re-submitting with the fingerprint the server issued.
+    if (code === 'self-throttle' || code === 'stale-warning') {
+      var w = (d && d.warning) || {};
+      var cap = w.maxLimit || {};
+      var el = $('qf_warn');
+      el.innerHTML = '<strong>This queue covers MikroDash\'s own connection to this router.</strong><br>' +
+        'MikroDash reaches ' + esc(_caps.routerName || 'this router') + ' from <code>' + esc(w.address || '') + '</code>, ' +
+        'which is inside <code>' + esc(w.target || '') + '</code>, and this queue caps traffic at <code>' +
+        esc(bpsToShort(cap.up) + '/' + bpsToShort(cap.down)) + '</code>.<br>' +
+        'The dashboard\'s own polling will be throttled and this page may become slow. ' +
+        'You will still be able to edit or remove the queue from its row.' +
+        (code === 'stale-warning' ? '<br><em>The values changed since you confirmed, so please confirm again.</em>' : '') +
+        '<div style="margin-top:.5rem;display:flex;gap:.5rem;justify-content:flex-end">' +
+        '<button class="sbtn sbtn-outline" id="qf_warnCancel" style="padding:.3rem .7rem;font-size:.72rem">Cancel</button>' +
+        '<button class="sbtn sbtn-danger" id="qf_warnGo" style="padding:.3rem .7rem;font-size:.72rem">Create anyway</button></div>';
+      el.style.display = '';
+      $('qf_ack').value = (d && d.fingerprint) || '';
+      $('qf_warnCancel').addEventListener('click', function () { el.style.display = 'none'; $('qf_ack').value = ''; });
+      $('qf_warnGo').addEventListener('click', function () { el.style.display = 'none'; submit($('qf_ack').value); });
+      // A toggle that trips the warning has no dialog open, so open one.
+      if (!$('qFormWrap').classList.contains('open')) $('qFormWrap').classList.add('open');
+      return;
+    }
+
+    var msg = {
+      denied:        'You do not have write access to this router',
+      unavailable:   'Queue collection is not running for this router',
+      'bad-request': 'Invalid request',
+      'stale-row':   'That queue changed on the router — the page has been refreshed',
+      'dynamic-row': 'That queue is created automatically by another RouterOS feature (Kid Control, a DHCP lease, or a PPP profile) and cannot be edited here',
+      'limit-above-max': 'Max Limit must be at least as large as Limit At — the router refuses otherwise',
+      'router-write-policy': 'The RouterOS user needs write permission for this',
+      unsupported:   'This router does not support that command',
+    }[code] || ((d && d.message) || 'Action failed');
+    if ($('qFormWrap').classList.contains('open')) formError(msg); else setStatus(msg);
+    if (pageVisible('queues')) render();
+  });
+
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail !== 'queues') return;
+    socket.emit('queues:caps');
+    if (_data) render();
+  });
+
+  var se = $('qSearch');
+  if (se) se.addEventListener('input', _debounce(render, 150));
+}());
+
+/* ── Router Users page ────────────────────────────────────────────────────────
+   RouterOS accounts, not MikroDash accounts — the two are unrelated, which is
+   why this page is called Router Users and lives outside Settings.
+
+   Three tabs over one card: who may log in, what each group may do, and who is
+   logged in right now.
+
+   THE PADLOCK. MikroDash logs into this router as one of these users, so
+   editing that account or its group is how somebody locks the dashboard out of
+   the device it manages. Those rows show a padlock and no buttons. That is a
+   COURTESY — every refusal is enforced server-side in src/routeros/selfGuard.js,
+   which re-reads from the router rather than trusting anything on this page. */
+(function () {
+  var userTb = $('ruUserTable'), groupTb = $('ruGroupTable'), sessTb = $('ruSessionTable');
+  if (!userTb || !groupTb || !sessTb) return;
+
+  var _data = null;
+  var _caps = { permitted: false, routerName: '' };
+  var _tab  = 'users';
+  var _busy = '';          // id of the row with an action in flight
+
+  var _statusTimer = null;
+  function setStatus(text) {
+    var el = $('ruActionNote');
+    if (!el) return;
+    el.textContent = text || '';
+    if (_statusTimer) clearTimeout(_statusTimer);
+    if (text) _statusTimer = setTimeout(function () { el.textContent = ''; }, 8000);
+  }
+
+  // A keyless column is not sortable — see _renderSortHeader. The action column
+  // is the only one here that must never be.
+  var USER_COLS = [{key:'name',label:'User'},{key:'group',label:'Group'},{key:'address',label:'Allowed From'},
+                   {key:'lastLogin',label:'Last Login'},{key:'disabled',label:'Status'},{key:'',label:''}];
+  var GROUP_COLS = [{key:'name',label:'Group'},{key:'granted',label:'Permissions'},
+                    {key:'members',label:'Users'},{key:'',label:''}];
+  var SESS_COLS = [{key:'name',label:'User'},{key:'address',label:'From'},{key:'via',label:'Via'},
+                   {key:'group',label:'Group'},{key:'when',label:'Since'},{key:'',label:''}];
+
+  // Sessions default to newest first; the other two to name, which is how an
+  // operator looks for an account they already have in mind.
+  var _sort = { users:    { col: 'name', dir: 'asc' },
+                groups:   { col: 'name', dir: 'asc' },
+                sessions: { col: 'when', dir: 'desc' } };
+
+  function sortRows(rows, st) {
+    var mul = st.dir === 'desc' ? -1 : 1;
+    return rows.slice().sort(function (a, b) {
+      var x = a[st.col], y = b[st.col];
+      if (Array.isArray(x)) { x = x.length; y = y.length; }
+      if (typeof x === 'boolean') { x = x ? 1 : 0; y = y ? 1 : 0; }
+      if (typeof x === 'number' && typeof y === 'number') return (x - y) * mul;
+      return String(x == null ? '' : x).localeCompare(String(y == null ? '' : y)) * mul;
+    });
+  }
+
+  /** Clicking a header toggles direction on the same column, else selects it. */
+  function onSort(which) {
+    return function (key) {
+      var st = _sort[which];
+      if (st.col === key) st.dir = st.dir === 'asc' ? 'desc' : 'asc';
+      else { st.col = key; st.dir = 'asc'; }
+      render();
+    };
+  }
+
+  function q() { var e = $('ruSearch'); return (e && e.value || '').toLowerCase().trim(); }
+  function dash() { return '<span style="color:var(--text-muted)">&mdash;</span>'; }
+
+  /** The padlock cell. Says which of the two reasons applies, because "you
+      cannot edit this" without a why reads as a bug. */
+  function lockCell(what) {
+    return '<span class="muted-note" title="MikroDash signs in to this router with this ' + what +
+           '. Editing it here could lock the dashboard out, so it is managed in WinBox.">' +
+           '&#128274; in use by MikroDash</span>';
+  }
+
+  function btn(act, id, name, label, cls) {
+    return '<button class="ru-act' + (cls ? ' ' + cls : '') + '" data-act="' + act +
+           '" data-id="' + esc(id) + '" data-name="' + esc(name) + '"' +
+           (_busy === id ? ' disabled' : '') + '>' + label + '</button>';
+  }
+
+  function renderUsers() {
+    var term = q();
+    var rows = (_data && _data.users || []).filter(function (u) {
+      return !term || (u.name + ' ' + u.group + ' ' + u.comment).toLowerCase().indexOf(term) !== -1;
+    });
+    rows = sortRows(rows, _sort.users);
+    _renderSortHeader('ruUserThead', USER_COLS, _sort.users, onSort('users'));
+    $('ruUserBadge').textContent = (_data && _data.users || []).length;
+
+    userTb.innerHTML = rows.length ? rows.map(function (u) {
+      var status = u.disabled ? '<span class="wl-band wl-band-24">disabled</span>'
+                 : u.expired  ? '<span style="color:var(--text-muted)">expired</span>'
+                              : '<span class="wl-band wl-band-6">enabled</span>';
+      return '<tr>' +
+        '<td>' + esc(u.name) + (u.comment ? '<div class="muted-note">' + esc(u.comment) + '</div>' : '') + '</td>' +
+        '<td>' + esc(u.group) + '</td>' +
+        '<td>' + (u.address ? esc(u.address) : dash()) + '</td>' +
+        '<td style="color:var(--text-muted)">' + (u.lastLogin ? esc(u.lastLogin) : dash()) + '</td>' +
+        '<td>' + status + '</td>' +
+        '<td>' + (u.protected ? lockCell('account')
+                : !_caps.permitted ? ''
+                : btn('user-edit', u.id, u.name, 'Edit') + ' ' +
+                  btn('user-toggle', u.id, u.name, u.disabled ? 'Enable' : 'Disable') + ' ' +
+                  btn('user-remove', u.id, u.name, 'Remove', 'danger')) + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="6" class="empty-state">' +
+      (term ? 'No users match that search.' : 'Waiting for user data&hellip;') + '</td></tr>';
+  }
+
+  function renderGroups() {
+    var term = q();
+    var rows = (_data && _data.groups || []).filter(function (g) {
+      return !term || (g.name + ' ' + g.granted.join(' ')).toLowerCase().indexOf(term) !== -1;
+    });
+    rows = sortRows(rows, _sort.groups);
+    _renderSortHeader('ruGroupThead', GROUP_COLS, _sort.groups, onSort('groups'));
+    $('ruGroupBadge').textContent = (_data && _data.groups || []).length;
+
+    groupTb.innerHTML = rows.length ? rows.map(function (g) {
+      // Only what is granted. The denied half is every other policy, and listing
+      // seventeen names per row would bury the four that matter.
+      var pol = g.granted.length
+        ? g.granted.map(function (p) { return '<span class="wl-band wl-band-5" style="margin:0 .15rem .15rem 0">' + esc(p) + '</span>'; }).join('')
+        : '<span class="muted-note">no permissions</span>';
+      return '<tr>' +
+        '<td>' + esc(g.name) + (g.comment ? '<div class="muted-note">' + esc(g.comment) + '</div>' : '') + '</td>' +
+        '<td>' + pol + '</td>' +
+        '<td>' + g.members + '</td>' +
+        '<td>' + (g.protected ? lockCell('group')
+                : !_caps.permitted ? ''
+                : btn('group-edit', g.id, g.name, 'Edit') + ' ' +
+                  btn('group-remove', g.id, g.name, 'Remove', 'danger')) + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="4" class="empty-state">' +
+      (term ? 'No groups match that search.' : 'Waiting for group data&hellip;') + '</td></tr>';
+  }
+
+  function renderSessions() {
+    var term = q();
+    var rows = (_data && _data.sessions || []).filter(function (x) {
+      return !term || (x.name + ' ' + x.address + ' ' + x.via).toLowerCase().indexOf(term) !== -1;
+    });
+    rows = sortRows(rows, _sort.sessions);
+    _renderSortHeader('ruSessionThead', SESS_COLS, _sort.sessions, onSort('sessions'));
+    $('ruSessionBadge').textContent = (_data && _data.sessions || []).length;
+
+    sessTb.innerHTML = rows.length ? rows.map(function (x) {
+      return '<tr>' +
+        '<td>' + esc(x.name) + '</td>' +
+        '<td>' + (x.address ? esc(x.address) : dash()) + '</td>' +
+        '<td>' + esc(x.via || '—') + '</td>' +
+        '<td>' + esc(x.group || '—') + '</td>' +
+        '<td style="color:var(--text-muted)">' + (x.when ? esc(x.when) : dash()) + '</td>' +
+        '<td>' + (x.protected ? lockCell('session')
+                : !_caps.permitted ? ''
+                : btn('session-remove', x.id, x.name, 'End Session', 'danger')) + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="6" class="empty-state">' +
+      (term ? 'No sessions match that search.' : 'Nobody is logged in.') + '</td></tr>';
+  }
+
+  function renderNotice() {
+    var card = $('ruNoticeCard'), body = $('ruNotice');
+    if (!card || !body) return;
+    var msg = '';
+    if (_data && _data.denied) {
+      // The recommended monitoring group denies `policy`, and RouterOS gates
+      // /user behind it. Show the fix rather than an empty table.
+      msg = 'This router\'s MikroDash account cannot read <code>/user</code>. RouterOS requires the ' +
+            '<code>policy</code> permission for user management. To enable this page for this router: ' +
+            '<code>/user group set [find name=&lt;group&gt;] policy=read,write,policy,api,test</code>';
+    } else if (_data && _data.self && !_data.self.resolved) {
+      // Fail-closed, and the page must say so rather than showing buttons that
+      // will be refused one by one.
+      msg = 'MikroDash cannot identify its own account on this router, so every change here is refused. ' +
+            'This is expected when the dashboard authenticates through RADIUS.';
+    }
+    card.style.display = msg ? '' : 'none';
+    body.innerHTML = msg;
+  }
+
+  function render() {
+    if (_tab === 'users') renderUsers();
+    else if (_tab === 'groups') renderGroups();
+    else renderSessions();
+    // The other two tabs still carry counts in their badges, so all three render.
+    if (_tab !== 'users') renderUsers();
+    if (_tab !== 'groups') renderGroups();
+    if (_tab !== 'sessions') renderSessions();
+
+    var add = $('ruAddBtn');
+    if (add) {
+      add.textContent = _tab === 'groups' ? 'Add Group' : 'Add User';
+      add.style.display = (_caps.permitted && _tab !== 'sessions') ? '' : 'none';
+    }
+    var note = $('ruActionNote');
+    if (note) note.textContent = _caps.permitted ? '' : 'read-only — you do not have write access to this router';
+    renderNotice();
+    renderSummary();
+  }
+
+  function renderSummary() {
+    var d = _data || {};
+    $('ruSumUsers').textContent    = (d.users || []).length || '—';
+    $('ruSumGroups').textContent   = (d.groups || []).length || '—';
+    $('ruSumSessions').textContent = (d.sessions || []).length || '—';
+    $('ruSumSelf').textContent     = (d.self && d.self.names && d.self.names[0]) || '—';
+  }
+
+  // ── Dialogs ───────────────────────────────────────────────────────────────
+
+  function openUserForm(u) {
+    $('ruf_title').textContent  = u ? 'Edit Router User' : 'Add Router User';
+    $('ruf_id').value           = u ? u.id : '';
+    $('ruf_expectedName').value = u ? u.name : '';
+    $('ruf_name').value    = u ? u.name : '';
+    $('ruf_address').value = u ? u.address : '';
+    $('ruf_comment').value = u ? u.comment : '';
+    $('ruf_disabled').checked = u ? !!u.disabled : false;
+    $('ruf_password').value = '';
+    var pol = (_data && _data.passwordPolicy) || {};
+    $('ruf_passHint').textContent = u
+      ? '(leave blank to keep)'
+      : (pol.minLength ? '(at least ' + pol.minLength + ' characters)' : '(required)');
+    // Groups the guard would refuse are not offered. The server refuses them
+    // anyway; leaving them in the list only invites the refusal.
+    var sel = $('ruf_group');
+    sel.innerHTML = (_data && _data.groups || []).filter(function (g) { return !g.protected; })
+      .map(function (g) {
+        return '<option value="' + esc(g.name) + '"' + (u && u.group === g.name ? ' selected' : '') + '>' +
+               esc(g.name) + '</option>';
+      }).join('');
+    $('ruf_error').style.display = 'none';
+    $('ruUserFormWrap').classList.add('open');
+  }
+
+  function openGroupForm(g) {
+    $('rgf_title').textContent  = g ? 'Edit Group' : 'Add Group';
+    $('rgf_id').value           = g ? g.id : '';
+    $('rgf_expectedName').value = g ? g.name : '';
+    $('rgf_name').value    = g ? g.name : '';
+    $('rgf_comment').value = g ? g.comment : '';
+    var granted = g ? g.granted : [];
+    // From the payload, so a RouterOS that grows an eighteenth policy shows it
+    // here without a frontend release.
+    $('rgf_policies').innerHTML = ((_data && _data.policies) || []).map(function (p) {
+      return '<label style="display:flex;align-items:center;gap:.35rem;cursor:pointer">' +
+             '<input type="checkbox" class="rgf-pol" value="' + esc(p) + '"' +
+             (granted.indexOf(p) !== -1 ? ' checked' : '') + '>' + esc(p) + '</label>';
+    }).join('');
+    $('rgf_error').style.display = 'none';
+    $('ruGroupFormWrap').classList.add('open');
+  }
+
+  function formError(id, msg) {
+    var el = $(id);
+    el.textContent = msg;
+    el.style.display = '';
+  }
+
+  // ── Wiring ────────────────────────────────────────────────────────────────
+
+  Array.prototype.forEach.call(document.querySelectorAll('#ruTabBar .stab'), function (b) {
+    b.addEventListener('click', function () {
+      _tab = b.getAttribute('data-rutab');
+      Array.prototype.forEach.call(document.querySelectorAll('#ruTabBar .stab'), function (o) {
+        var on = o === b;
+        o.classList.toggle('active', on);
+        o.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('#rosusersCard .brtab-panel'), function (pnl) {
+        pnl.classList.toggle('active', pnl.id === 'rutab-' + _tab);
+      });
+      render();
+    });
+  });
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.ru-act');
+    if (!b) return;
+    var act = b.getAttribute('data-act'), id = b.getAttribute('data-id'), name = b.getAttribute('data-name');
+    if (act === 'user-edit')  return openUserForm((_data.users || []).find(function (u) { return u.id === id; }));
+    if (act === 'group-edit') return openGroupForm((_data.groups || []).find(function (g) { return g.id === id; }));
+
+    if (act === 'user-toggle') {
+      var u = (_data.users || []).find(function (x) { return x.id === id; });
+      if (!u) return;
+      _busy = id; render();
+      // A full save, not a disable-only action: one write path is one place for
+      // the guard to be called from.
+      return socket.emit('rosuser:save', { id: u.id, expectedName: u.name, name: u.name, group: u.group,
+                                           address: u.address, comment: u.comment, disabled: !u.disabled });
+    }
+    var prompts = {
+      'user-remove':    'Remove the router user "' + name + '"?\n\nThey will no longer be able to log in to this router.',
+      'group-remove':   'Remove the group "' + name + '"?\n\nRouterOS refuses this if any user is still in it.',
+      'session-remove': 'End "' + name + '"’s session?\n\nThey will be disconnected from the router immediately.',
+    };
+    if (!prompts[act]) return;
+    if (!window.confirm(prompts[act])) return;
+    _busy = id; render();
+    var ev = act === 'user-remove' ? 'rosuser:remove'
+           : act === 'group-remove' ? 'rosgroup:remove' : 'rossession:remove';
+    socket.emit(ev, { id: id, expectedName: name });
+  });
+
+  var add = $('ruAddBtn');
+  if (add) add.addEventListener('click', function () {
+    if (!_caps.permitted) return;
+    if (_tab === 'groups') openGroupForm(null); else openUserForm(null);
+  });
+
+  $('ruf_save').addEventListener('click', function () {
+    var name = $('ruf_name').value.trim(), group = $('ruf_group').value;
+    if (!name)  return formError('ruf_error', 'A username is required');
+    if (!group) return formError('ruf_error', 'Pick a group');
+    _busy = $('ruf_id').value;
+    socket.emit('rosuser:save', {
+      id: $('ruf_id').value || undefined,
+      expectedName: $('ruf_expectedName').value || undefined,
+      name: name, group: group,
+      address: $('ruf_address').value.trim(),
+      comment: $('ruf_comment').value.trim(),
+      disabled: $('ruf_disabled').checked,
+      password: $('ruf_password').value || undefined,
+    });
+  });
+
+  $('rgf_save').addEventListener('click', function () {
+    var name = $('rgf_name').value.trim();
+    if (!name) return formError('rgf_error', 'A group name is required');
+    var policy = Array.prototype.map.call(
+      document.querySelectorAll('#rgf_policies .rgf-pol:checked'), function (c) { return c.value; });
+    _busy = $('rgf_id').value;
+    socket.emit('rosgroup:save', {
+      id: $('rgf_id').value || undefined,
+      expectedName: $('rgf_expectedName').value || undefined,
+      name: name, comment: $('rgf_comment').value.trim(), policy: policy,
+    });
+  });
+
+  socket.on('rosusers:update', function (d) {
+    if (!d) return;
+    _data = d;
+    _busy = '';
+    renderSummary();
+    if (pageVisible('rosusers')) render();
+  });
+  socket.on('rosusers:caps', function (d) {
+    if (!d) return;
+    _caps = d;
+    if (pageVisible('rosusers')) render();
+  });
+  socket.on('rosusers:ok', function (d) {
+    _busy = '';
+    $('ruUserFormWrap').classList.remove('open');
+    $('ruGroupFormWrap').classList.remove('open');
+    var what = {
+      create: 'Created ', update: 'Updated ', 'delete': 'Removed ',
+      'group-create': 'Created group ', 'group-update': 'Updated group ', 'group-delete': 'Removed group ',
+      'session-remove': 'Ended the session for ',
+    }[d && d.action] || 'Done: ';
+    setStatus(what + ((d && d.name) || ''));
+  });
+  socket.on('rosusers:error', function (d) {
+    _busy = '';
+    var code = d && d.code;
+    var msg = {
+      denied:       'You do not have write access to this router',
+      unavailable:  'Router user collection is not running for this router',
+      'bad-request':'Invalid request',
+      'stale-row':  'That row changed on the router — the page has been refreshed',
+      'no-such-group': 'That group no longer exists on the router',
+      'group-in-use':  'That group still has users in it — move them first',
+      'weak-password': 'The router requires a password of at least ' + ((d && d.minLength) || 8) + ' characters',
+      'protected-account':    'That is the account MikroDash signs in with — manage it in WinBox',
+      'protected-group':      'That is the group MikroDash signs in with — manage it in WinBox',
+      'protected-name-value': 'That name belongs to the account MikroDash signs in with',
+      'protected-group-value':'Users cannot be placed in the group MikroDash signs in with',
+      'self-unresolved':      'MikroDash cannot identify its own account on this router, so changes are refused',
+      'router-write-policy':  'The RouterOS user needs the "policy" permission for this',
+      unsupported:  'This router does not support that command',
+    }[code] || ((d && d.message) || 'Action failed');
+    // Refusals belong in the dialog that caused them; everything else is a
+    // row action and belongs in the status line.
+    var open = $('ruUserFormWrap').classList.contains('open') ? 'ruf_error'
+             : $('ruGroupFormWrap').classList.contains('open') ? 'rgf_error' : '';
+    if (open) formError(open, msg); else setStatus(msg);
+    if (pageVisible('rosusers')) render();
+  });
+
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail !== 'rosusers') return;
+    // Permission is a property of this socket, not of the shared payload.
+    socket.emit('rosusers:caps');
+    if (_data) render();
+  });
+
+  var se = $('ruSearch');
+  if (se) se.addEventListener('input', _debounce(render, 150));
+}());
+
+/* ── Audit page ───────────────────────────────────────────────────────────────
+   Rows are filtered server-side, per row: app-scope events need system
+   administration, router events need history on that router. The page shows
+   whatever came back and says so when that is nothing — an empty audit log for
+   a reader who may not see it is a legitimate answer, not an error. */
+(function () {
+  var tbody = $('auditTable'), theadRow = $('auditThead');
+  if (!tbody || !theadRow) return;
+
+  /* The Reports page has a fmtTs, but it lives inside that IIFE. Rather than
+     hoist a function this page is the only other user of, this formats locally
+     from the same _displayTimezone global the topbar clock reads. */
+  function fmtTs(ts) {
+    if (!ts) return '—';
+    var d = new Date(ts);
+    if (_displayTimezone) {
+      return new Intl.DateTimeFormat('sv-SE', {
+        timeZone: _displayTimezone, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      }).format(d).replace(' ', ' ');
+    }
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+           p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  var _rows = [], _total = 0, _offset = 0, _facets = { actors: [], actions: [] };
+  var PAGE = 200;
+  var _sort = { col: 'ts', dir: -1 };
+
+  var COLS = [
+    { key:'ts',      label:'When' },
+    { key:'actor',   label:'Who' },
+    { key:'ip',      label:'From' },
+    { key:'action',  label:'Action' },
+    { key:'target',  label:'Target' },
+    { key:'outcome', label:'Result' },
+    { key:'detail',  label:'Detail' },
+  ];
+
+  function outcomeCell(o) {
+    if (o === 'denied') return '<span class="wl-band wl-band-24">refused</span>';
+    if (o === 'failed') return '<span class="wl-band wl-band-24">failed</span>';
+    return '<span class="wl-band wl-band-6">ok</span>';
+  }
+
+  /* The stored detail is JSON. Rendered as "field: from → to" so a settings
+     change reads as a change, not as a blob — and a redacted credential shows
+     the marker the server wrote, never a value. */
+  function detailCell(raw) {
+    if (!raw) return '<span style="color:var(--text-muted)">&mdash;</span>';
+    var d;
+    try { d = JSON.parse(raw); } catch (e) { return esc(String(raw).slice(0, 120)); }
+    var bits = [];
+    (d.changes || []).slice(0, 4).forEach(function (c) {
+      bits.push('<span style="color:var(--text-muted)">' + esc(c.field) + '</span> ' +
+                esc(_short(c.from)) + ' &rarr; ' + esc(_short(c.to)));
+    });
+    if ((d.changes || []).length > 4) bits.push('+' + (d.changes.length - 4) + ' more');
+    Object.keys(d).forEach(function (k) {
+      if (k === 'changes' || k === 'note') return;
+      bits.push('<span style="color:var(--text-muted)">' + esc(k) + '</span> ' + esc(_short(d[k])));
+    });
+    if (d.note) bits.push('<span style="color:var(--text-muted)">' + esc(d.note) + '</span>');
+    return bits.join(' &middot; ') || '<span style="color:var(--text-muted)">&mdash;</span>';
+  }
+  function _short(v) {
+    if (v === null || v === undefined) return '—';
+    var s = typeof v === 'string' ? v : JSON.stringify(v);
+    return s.length > 40 ? s.slice(0, 40) + '…' : s;
+  }
+
+  function flat(r) {
+    return {
+      ts: r.ts, actor: r.actor_name || '', ip: r.actor_ip || '',
+      action: r.action || '', target: r.target_name || r.target_id || '',
+      outcome: r.outcome || '', detail: r.detail || '', router_id: r.router_id || '',
+    };
+  }
+
+  function render() {
+    _renderSortHeader('auditThead', COLS, _sort, function (key) {
+      _sort.dir = _sort.col === key ? -_sort.dir : 1;
+      _sort.col = key; render();
+    });
+
+    var rows = _rows.map(flat).sort(function (a, b) {
+      var av = a[_sort.col], bv = b[_sort.col];
+      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
+      return _sort.dir * ((av || 0) - (bv || 0));
+    });
+
+    $('auditBadge').textContent = _total;
+    $('auditBadge').className = 'card-badge' + (_total ? ' active-blue' : '');
+
+    tbody.innerHTML = rows.length ? rows.map(function (r) {
+      return '<tr>' +
+        '<td>' + esc(fmtTs(r.ts)) + '</td>' +
+        '<td>' + (r.actor === 'system'
+                   ? '<span style="color:var(--text-muted)">system</span>' : esc(r.actor)) + '</td>' +
+        '<td class="mono" style="color:var(--text-muted)">' + esc(r.ip || '—') + '</td>' +
+        '<td>' + esc(r.action) + '</td>' +
+        '<td>' + (r.target ? esc(r.target) : '<span style="color:var(--text-muted)">&mdash;</span>') +
+          (r.router_id ? ' <span class="wl-band wl-band-5">router</span>' : '') + '</td>' +
+        '<td>' + outcomeCell(r.outcome) + '</td>' +
+        '<td>' + detailCell(r.detail) + '</td>' +
+      '</tr>';
+    }).join('') : '<tr><td colspan="7" class="empty-state">' +
+      (_offset ? 'No more events.' : 'No audit events visible to you yet.') + '</td></tr>';
+
+    var lbl = $('auPageLbl');
+    if (lbl) {
+      var first = _total ? _offset + 1 : 0;
+      lbl.textContent = _total ? (first + '–' + Math.min(_offset + PAGE, _total) + ' of ' + _total) : '';
+    }
+    $('auPrev').disabled = _offset <= 0;
+    $('auNext').disabled = _offset + PAGE >= _total;
+  }
+
+  function renderSummary() {
+    $('auSumTotal').textContent  = _total;
+    $('auSumDenied').textContent = _rows.filter(function (r) { return r.outcome === 'denied'; }).length;
+    $('auSumActors').textContent = _facets.actors.length;
+    $('auSumNewest').textContent = _rows.length ? fmtTs(_rows[0].ts) : '—';
+  }
+
+  function query() {
+    var p = new URLSearchParams();
+    if ($('auActor').value)   p.set('actor',   $('auActor').value);
+    if ($('auAction').value)  p.set('action',  $('auAction').value);
+    if ($('auOutcome').value) p.set('outcome', $('auOutcome').value);
+    if ($('auSearch').value)  p.set('search',  $('auSearch').value.trim());
+    p.set('limit', PAGE); p.set('offset', _offset);
+    return p;
+  }
+
+  function load() {
+    var p = query();
+    fetch('/api/audit?' + p.toString(), { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.ok) return;
+        _rows = d.rows || []; _total = d.total || 0;
+        if (d.facets) { _facets = d.facets; fillFacets(); }
+        var note = $('auditNote');
+        // Say plainly that the view is partial rather than letting a filtered
+        // list look like the whole trail.
+        if (note) note.textContent = _total > PAGE ? 'showing ' + PAGE + ' at a time' : '';
+        renderSummary();
+        render();
+        var ex = new URLSearchParams(query()); ex.delete('limit'); ex.delete('offset');
+        $('auCsvLink').href = '/api/audit/export?format=csv&' + ex.toString();
+        $('auPdfLink').href = '/api/audit/export?format=pdf&' + ex.toString();
+      })
+      .catch(function () {});
+  }
+
+  function fillFacets() {
+    [['auActor', _facets.actors, 'All actors'], ['auAction', _facets.actions, 'All actions']]
+      .forEach(function (spec) {
+        var el = $(spec[0]); if (!el) return;
+        var keep = el.value;
+        el.innerHTML = '<option value="">' + spec[2] + '</option>' +
+          spec[1].map(function (v) { return '<option value="' + esc(v) + '">' + esc(v) + '</option>'; }).join('');
+        el.value = keep;
+      });
+  }
+
+  ['auActor', 'auAction', 'auOutcome'].forEach(function (id) {
+    var el = $(id);
+    if (el) el.addEventListener('change', function () { _offset = 0; load(); });
+  });
+  var se = $('auSearch');
+  if (se) se.addEventListener('input', _debounce(function () { _offset = 0; load(); }, 250));
+  $('auPrev').addEventListener('click', function () { _offset = Math.max(0, _offset - PAGE); load(); });
+  $('auNext').addEventListener('click', function () { _offset = _offset + PAGE; load(); });
+
+  // Fetched on entry rather than streamed: the trail is history, and a page that
+  // reloads itself while being read is worse than one that does not.
+  document.addEventListener('mikrodash:pagechange', function (e) {
+    if (e.detail === 'audit') { _offset = 0; load(); }
+  });
 }());

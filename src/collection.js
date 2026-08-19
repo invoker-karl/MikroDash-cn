@@ -75,6 +75,59 @@ const COLLECTORS = Object.freeze([
     streamKey: 'streamNetwatch', pollable: true,  disableable: true,  requires: [], page: 'dashboard', cards: ['netwatchCard'] },
   { key: 'topology', label: 'Network Topology', sessionProp: 'topology', pollKey: 'pollTopology', defaultPollMs: 30000,
     streamKey: 'streamTopology', pollable: true,  disableable: true,  requires: [], page: 'topology', cards: ['topologyCard'] },
+  // requires: [] on purpose for vlans. It reads live rates out of ifStatus and
+  // client counts out of dhcpLeases, but declaring those here would cascade into
+  // a hard disable — turning off Interface Rates would blank the whole VLANs
+  // page, when membership, trunk ports and client counts are all still there.
+  // Degrade the rates, not the page.
+  { key: 'vlans', label: 'VLANs',        sessionProp: 'vlans',        pollKey: 'pollVlans',    defaultPollMs: 5000,
+    streamKey: 'streamVlans',    pollable: true,  disableable: true,  requires: [], page: 'vlans', cards: [] },
+  { key: 'ppp',   label: 'PPP',          sessionProp: 'ppp',          pollKey: 'pollPpp',      defaultPollMs: 5000,
+    streamKey: 'streamPpp',      pollable: true,  disableable: true,  requires: [], page: 'ppp',   cards: [] },
+  // bridges borrows rates from ifStatus the way vlans does, and for the same
+  // reason declares no requires: without Interface Rates a bridge still has
+  // ports, STP roles and a host table worth showing.
+  { key: 'bridges', label: 'Bridges',    sessionProp: 'bridges',      pollKey: 'pollBridges',  defaultPollMs: 5000,
+    streamKey: 'streamBridges',  pollable: true,  disableable: true,  requires: [], page: 'bridges', cards: [] },
+  { key: 'capsman', label: 'CAPsMAN',    sessionProp: 'capsman',      pollKey: 'pollCapsman',  defaultPollMs: 10000,
+    streamKey: 'streamCapsman',  pollable: true,  disableable: true,  requires: [], page: 'capsman', cards: [] },
+  // dns, packages and rosusers are streamKey: null ON PURPOSE, and they are the
+  // only entries in this registry that are. RouterOS would accept /listen on both menus, so this
+  // is a choice rather than a limitation:
+  //
+  //   dns       the settings row is one record and the static table is single
+  //             digits, so there is nothing a channel would save. The expensive
+  //             part is the cache, which is already opt-in and fetched only
+  //             while somebody has the browser open — an open channel would
+  //             hold a resource for a table nobody is looking at.
+  //   packages  an inventory changes on a reboot, not on a tick. It polls every
+  //             60 s and the page forces a refresh after an action, which is
+  //             strictly better than a channel held open for weeks.
+  //
+  // Both still honour the router's poll interval, so the Poll/Stream switch has
+  // nothing to change for them.
+  { key: 'dns',   label: 'DNS',          sessionProp: 'dns',          pollKey: 'pollDns',      defaultPollMs: 10000,
+    streamKey: null,             pollable: true,  disableable: true,  requires: [], page: 'dns',   cards: [] },
+  { key: 'packages', label: 'Packages',  sessionProp: 'packages',     pollKey: 'pollPackages', defaultPollMs: 60000,
+    streamKey: null,             pollable: true,  disableable: true,  requires: [], page: 'packages', cards: [] },
+  // wan borrows rates from ifStatus the way vlans and bridges do, and declares
+  // no requires for the same reason: switching Interface Rates off should cost
+  // the rate column, not the page.
+  { key: 'wan',   label: 'WAN',        sessionProp: 'wan',          pollKey: 'pollWan',      defaultPollMs: 10000,
+    streamKey: 'streamWan',      pollable: true,  disableable: true,  requires: [], page: 'wan', cards: [] },
+  // queues borrows the FastTrack summary from the firewall collector the way
+  // vlans borrows rates from ifStatus, and declares no `requires` for the same
+  // reason: a hard dependency would blank the whole Queues page when somebody
+  // switched Firewall collection off. Degrade the banner, not the page.
+  { key: 'queues', label: 'Queues',   sessionProp: 'queues',       pollKey: 'pollQueues',   defaultPollMs: 5000,
+    streamKey: 'streamQueues',   pollable: true,  disableable: true,  requires: [], page: 'queues', cards: [] },
+  // rosusers is the third streamKey: null entry, for the same reason as
+  // packages rather than dns: a router's user list changes when an operator
+  // edits it, which is a human-timescale event. It polls slowly and the page
+  // forces a re-read after every action, so a channel held open for weeks would
+  // buy nothing.
+  { key: 'rosusers', label: 'Router Users', sessionProp: 'rosusers',  pollKey: 'pollRosusers', defaultPollMs: 60000,
+    streamKey: null,             pollable: true,  disableable: true,  requires: [], page: 'rosusers', cards: [] },
   // logs stays streamed even in poll mode: /log/listen pushes new entries, and
   // polling /log/print would drop lines between polls. Correctness, not fidelity.
   { key: 'logs', label: 'Logs',         sessionProp: 'logs',         pollKey: null,           defaultPollMs: 0,

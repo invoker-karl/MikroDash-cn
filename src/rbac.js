@@ -34,6 +34,7 @@ const SCOPED = new Set([
   'router:ack',       // acknowledge alerts
   'router:history',   // historical reports and exports
   'router:diagnose',  // connection test, ping, firewall table selection
+  'router:scan',      // wireless frequency scan — takes the radio off the air
   'router:write',     // RouterOS writes — reserved for issue #97, no call sites yet
   'router:manage',    // edit or delete a router, change its site
   'router:purge',     // purge that router's history
@@ -64,6 +65,7 @@ const READ_CONFERS = Object.freeze({
 const WRITE_CONFERS = Object.freeze({
   dashboard: ['router:ack'],                        // acknowledge alerts
   firewall:  ['router:diagnose'],                   // switch the shared firewall table
+  wireless:  ['router:scan'],                       // frequency scan — disconnects every client on the radio
   routers:   ['router:manage'],                     // edit/delete a router, change its site
   settings:  ['system:settings', 'router:purge'],   // app settings; purge one router's history
 });
@@ -309,8 +311,34 @@ function visibleSiteIds(session) {
 
 // ── Express middleware ───────────────────────────────────────────────────────
 
+/**
+ * Record a refused write.
+ *
+ * The refusal happens HERE, in middleware, before the route handler ever runs —
+ * so a handler that records its own audit row cannot see it. Doing it once at
+ * the guard covers every route uniformly, including ones added later.
+ *
+ * Only mutating methods: a GET refused is a permission working normally and
+ * would bury the writes that matter under routine noise.
+ *
+ * Required lazily to keep the dependency one-way at load time; audit needs db,
+ * db needs nothing, and rbac is used by both.
+ */
+function _auditDenied(req, permission) {
+  if (!/^(POST|PUT|PATCH|DELETE)$/.test(req.method || '')) return;
+  try {
+    require('./audit').fromReq(req).denied({
+      action: 'access.denied',
+      targetType: 'route',
+      targetName: req.method + ' ' + (req.baseUrl || '') + (req.route ? req.route.path : (req.path || '')),
+      extra: { permission },
+    });
+  } catch (_) { /* a refusal must still be a refusal if bookkeeping fails */ }
+}
+
 function requireGlobalAdmin(req, res, next) {
   if (can(req.authSession, 'system:principals')) return next();
+  _auditDenied(req, 'system:principals');
   return res.status(403).json({ ok: false, error: 'Administrator access required' });
 }
 
@@ -322,6 +350,7 @@ function requirePerm(permission, targetFn) {
   return function (req, res, next) {
     const target = typeof targetFn === 'function' ? targetFn(req) : undefined;
     if (can(req.authSession, permission, target)) return next();
+    _auditDenied(req, permission);
     return res.status(403).json({ ok: false, error: 'Not permitted' });
   };
 }
@@ -337,6 +366,7 @@ function requirePage(page, access, targetFn) {
   return (req, res, next) => {
     const target = targetFn ? targetFn(req) : undefined;
     if (canPage(req.authSession, page, access, target)) return next();
+    _auditDenied(req, 'page:' + page + ':' + access);
     res.status(403).json({ ok: false, error: 'Not permitted' });
   };
 }
@@ -460,6 +490,7 @@ function capsFor(session) {
       history:     effectiveRouterIds(session, 'router:history'),
       ackable:     effectiveRouterIds(session, 'router:ack'),
       diagnosable: effectiveRouterIds(session, 'router:diagnose'),
+      scannable:   effectiveRouterIds(session, 'router:scan'),
     },
   };
 }

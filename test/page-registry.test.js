@@ -25,6 +25,7 @@ const root     = path.join(__dirname, '..');
 const INDEX_JS = fs.readFileSync(path.join(root, 'src', 'index.js'), 'utf8');
 const APP_JS   = fs.readFileSync(path.join(root, 'public', 'app.js'), 'utf8');
 const HTML     = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
+const PREFLIGHT = fs.readFileSync(path.join(root, 'public', 'preflight.js'), 'utf8');
 
 // ── Registry integrity ───────────────────────────────────────────────────────
 
@@ -33,11 +34,13 @@ test('page keys are unique and non-empty', () => {
   for (const k of Pages.KEYS) assert.match(k, /^[a-z]{2,20}$/, k + ' must match the page:focus guard');
 });
 
-test('the four role-only pages are the ones with no install toggle', () => {
+test('the three role-only pages are the ones with no install toggle', () => {
   // These have no Settings switch, so a role is the only thing that can hide
   // them. If this list changes, applyPageVisibility's conjunction changes too.
   const noToggle = Pages.PAGES.filter(p => !p.settingsKey).map(p => p.key).sort();
-  assert.deepStrictEqual(noToggle, ['dashboard', 'reports', 'routers', 'settings']);
+  // Routers left this list when the view presets landed: it is Advanced-only,
+  // which needs a real toggle for the preset to switch.
+  assert.deepStrictEqual(noToggle, ['dashboard', 'reports', 'settings']);
 });
 
 test('every collector names a real page, or none at all', () => {
@@ -86,12 +89,36 @@ test('index.js derives both page allow-lists rather than restating them', () => 
 
 test('the stream-room map is derived and covers only suspendable pages', () => {
   assert.match(INDEX_JS, /const _PAGE_STREAM_ROOMS = Pages\.STREAM_ROOMS;/);
-  // Suspend/resume is an efficiency mechanism, not a security boundary, and it
-  // only exists for the five collectors that hold an open counter stream.
+  // Suspend/resume is an efficiency mechanism, not a security boundary.
+  //
+  // Pinned as a LIST rather than a count, because the failure it guards against
+  // is a page-scoped collector quietly declaring [] and polling the router from
+  // the Dashboard forever — which is what nine of them did. A page whose
+  // collector reads the router on a timer belongs here; the exceptions are the
+  // ones with no page of their own.
   assert.deepStrictEqual(Object.keys(Pages.STREAM_ROOMS).sort(),
-    ['firewall', 'routing', 'topology', 'vpn', 'wireless']);
+    ['bridges', 'capsman', 'dns', 'firewall', 'packages', 'ppp', 'queues',
+     'rosusers', 'routing', 'topology', 'vlans', 'vpn', 'wan', 'wireless']);
   for (const [page, rooms] of Object.entries(Pages.STREAM_ROOMS)) {
     assert.ok(rooms.includes('page-' + page), page + ' must watch its own page room');
+  }
+
+  // Every page-scoped collector must be reachable by the room-driven sweep,
+  // which indexes the session by the page key.
+  const { COLLECTORS } = require('../src/collection');
+  for (const page of Object.keys(Pages.STREAM_ROOMS)) {
+    const col = COLLECTORS.find(c => c.page === page && c.sessionProp === page);
+    assert.ok(col, page + ' declares stream rooms but has no collector at session.' + page);
+  }
+
+  // And _idleResume must not resume any of them by name, which would defeat the
+  // gate: a collector resumed unconditionally polls whether or not its page is
+  // being viewed. Only the three page-less collectors may appear there.
+  const at = INDEX_JS.indexOf('function _idleResume');
+  const body = INDEX_JS.slice(at, INDEX_JS.indexOf('\n}', at));
+  for (const page of Object.keys(Pages.STREAM_ROOMS)) {
+    assert.ok(!body.includes('session.' + page + '.resume()'),
+      '_idleResume resumes ' + page + ' by name, defeating its page gate');
   }
 });
 
@@ -204,4 +231,230 @@ test('the Settings page is closed to non-admins, not merely hidden', () => {
   // that gap would bounce a genuine administrator out of Settings.
   assert.ok(/if \(!window\._caps\) return true/.test(pred),
     'unknown caps must permit — otherwise an admin is locked out during the async gap');
+});
+
+// ── Canned view presets ──────────────────────────────────────────────────────
+//
+// Home / Standard / Advanced are bulk-editors for the Visible Pages toggles and
+// for a role's page matrix. They decide nothing on their own — RBAC is still the
+// ceiling — but a preset that names a page which cannot be toggled, or that
+// skips a tier, is wrong in a way nothing else would notice.
+
+test('every preset names only pages that have an install toggle', () => {
+  // A preset naming `dashboard` or `settings` would look right in the list and
+  // do nothing: those pages have no switch to set.
+  for (const [tier, pages] of Object.entries(Pages.VIEW_PRESETS)) {
+    for (const key of pages) {
+      const def = Pages.BY_KEY[key];
+      assert.ok(def, tier + ' names an unknown page: ' + key);
+      assert.ok(def.settingsKey, tier + ' names ' + key + ', which has no install toggle');
+    }
+    assert.strictEqual(new Set(pages).size, pages.length, tier + ' has no duplicates');
+  }
+});
+
+test('the presets nest, and Advanced is every toggleable page', () => {
+  const { home, standard, advanced } = Pages.VIEW_PRESETS;
+  // Nesting is the whole meaning of the tiers. Without it a page could land in
+  // Home but not Standard, and "step up a level" would take something away.
+  for (const k of home)     assert.ok(standard.includes(k), 'standard must include home\'s ' + k);
+  for (const k of standard) assert.ok(advanced.includes(k), 'advanced must include standard\'s ' + k);
+  assert.deepStrictEqual([...advanced].sort(),
+    Pages.PAGES.filter(p => p.settingsKey).map(p => p.key).sort(),
+    'advanced is every toggleable page — derived, so a new page joins it by existing');
+  assert.ok(home.length < standard.length && standard.length < advanced.length,
+    'the tiers must actually differ');
+});
+
+test('Routers is Advanced-only', () => {
+  // The reason that page gained a toggle at all: fleet management is a pro
+  // feature, so it must not appear in the two lower tiers.
+  assert.ok(!Pages.VIEW_PRESETS.home.includes('routers'));
+  assert.ok(!Pages.VIEW_PRESETS.standard.includes('routers'));
+  assert.ok(Pages.VIEW_PRESETS.advanced.includes('routers'));
+  assert.strictEqual(Pages.BY_KEY.routers.settingsKey, 'pageRouters');
+});
+
+test('app.js mirrors the preset definition in src/pages.js', () => {
+  // Same drift guard as ALL_NAV_PAGES: the browser needs its own copy, and two
+  // copies of a list is exactly how pageTopology went missing for a release.
+  const m = APP_JS.match(/var VIEW_PRESETS = \{([\s\S]*?)\n  \};/);
+  assert.ok(m, 'found VIEW_PRESETS in app.js');
+  const read = (tier) => {
+    const at = m[1].indexOf(tier + ':');
+    assert.ok(at !== -1, 'app.js VIEW_PRESETS has a ' + tier + ' tier');
+    const chunk = m[1].slice(at, m[1].indexOf('\n', m[1].indexOf(']', at)) + 1);
+    return [...chunk.matchAll(/'([a-z]+)'/g)].map(x => x[1]).sort();
+  };
+  assert.deepStrictEqual(read('home'),     [...Pages.VIEW_PRESETS.home].sort());
+  assert.deepStrictEqual(read('standard'), [...Pages.VIEW_PRESETS.standard].sort());
+  // advanced is derived on both sides rather than listed, so there is nothing to
+  // compare beyond it being derived — assert that, so nobody hand-writes it.
+  assert.ok(/advanced:\s*null/.test(m[1]) && /VIEW_PRESETS\.advanced = /.test(APP_JS),
+    'advanced must be derived in app.js, not typed out');
+});
+
+test('a preset cannot widen what a role allows', () => {
+  // The security claim of the whole feature. Presets write install toggles;
+  // _pageAllowed() ANDs the role, so turning everything on grants nothing.
+  const src  = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  const at   = src.indexOf('function _pageAllowed(');
+  const body = src.slice(at, at + 700);
+  assert.ok(/Rbac\.canPage\(/.test(body), '_pageAllowed must still consult the role');
+  assert.ok(/settingsKey\] === false\) return false;/.test(body),
+    'the install toggle must only be able to subtract');
+  // And the preset UI must never write role state.
+  const presetJs = APP_JS.slice(APP_JS.indexOf('function _applyViewPreset'), APP_JS.indexOf('function _applyViewPreset') + 800);
+  assert.ok(!/fetch\(/.test(presetJs), 'applying a preset must not call the server by itself');
+});
+
+// ── Nav categories ───────────────────────────────────────────────────────────
+// The sidebar groups 23 pages into 7 collapsible categories. src/pages.js owns
+// the taxonomy; the markup, the CSS and the route all mirror it, and these are
+// what stop those mirrors drifting.
+
+test('every page declares a nav category from the registry vocabulary', () => {
+  for (const p of Pages.PAGES) {
+    assert.ok('category' in p, p.key + ' is missing the category field');
+    if (p.category !== null) {
+      assert.ok(Pages.CATEGORY_KEYS.includes(p.category),
+        p.key + ' names unknown category ' + p.category);
+    }
+  }
+  // The five at top level are a decision, not an accident — a new page landing
+  // here silently means somebody forgot to file it.
+  const top = Pages.PAGES.filter(p => p.category === null).map(p => p.key).sort();
+  assert.deepStrictEqual(top, ['audit', 'dashboard', 'reports', 'routers', 'settings']);
+  // An empty category is a header the visibility sweep has to hide and nobody
+  // meant to write.
+  for (const c of Pages.CATEGORY_KEYS) {
+    assert.ok(Pages.PAGES.some(p => p.category === c), 'category ' + c + ' has no pages');
+  }
+});
+
+test('the registry is ordered as the nav renders it', () => {
+  // The docblock has always claimed this. Grouping makes it checkable: pages of
+  // one category must be contiguous, and the categories must appear in
+  // CATEGORIES order, or reading the registry no longer tells you what the
+  // sidebar looks like.
+  const seen = [];
+  for (const p of Pages.PAGES) {
+    if (p.category === null) continue;
+    if (seen[seen.length - 1] !== p.category) {
+      assert.ok(!seen.includes(p.category), p.category + ' is split into two runs');
+      seen.push(p.category);
+    }
+  }
+  assert.deepStrictEqual(seen, [...Pages.CATEGORY_KEYS]);
+});
+
+test('the nav markup groups pages exactly as the registry says', () => {
+  // Order- and nesting-independent: the category is on the LEAF, so this cannot
+  // be fooled by where a </div> happens to close a group.
+  const nav = [...HTML.matchAll(/class="nav-item[^"]*"\s+data-page="([a-z]+)"(?:\s+data-cat="([a-z]+)")?/g)];
+  const fromMarkup   = Object.fromEntries(nav.map(m => [m[1], m[2] || null]));
+  const fromRegistry = Object.fromEntries(Pages.PAGES.map(p => [p.key, p.category]));
+  assert.deepStrictEqual(fromMarkup, fromRegistry,
+    'nav markup and src/pages.js disagree about which category a page is in');
+
+  const wrappers = [...HTML.matchAll(/class="nav-group" data-cat="([a-z]+)"/g)].map(m => m[1]);
+  assert.deepStrictEqual(wrappers, [...Pages.CATEGORY_KEYS],
+    'group wrappers must match the registry categories, in order');
+  for (const c of Pages.CATEGORIES) {
+    assert.ok(HTML.includes('<span class="nav-label">' + c.title + '</span>'),
+      c.key + ' header does not carry its registry title "' + c.title + '"');
+  }
+});
+
+test('a category header is chrome, not a page', () => {
+  // Three separate mechanisms key on .nav-item[data-page]: the drift regex
+  // above, applyPageVisibility's sweep, and the mobile drawer-closing loop. A
+  // header wearing that class would be hidden by the sweep and would slam the
+  // drawer shut every time somebody expanded a category — the same failure the
+  // signed-in user chip had, for the same reason.
+  assert.ok(/class="nav-group-hdr"/.test(HTML), 'no group headers found');
+  assert.ok(!/class="[^"]*\bnav-item\b[^"]*\bnav-group-hdr\b|class="[^"]*\bnav-group-hdr\b[^"]*\bnav-item\b/.test(HTML),
+    'a header must not also be a .nav-item');
+  assert.ok(!/class="nav-group-hdr"[^>]*data-page=/.test(HTML), 'a header must carry no data-page');
+  // aria-expanded is the disclosure contract, and with a screen reader the
+  // 52px/190px rail distinction does not exist — it is the only affordance there.
+  const n = (HTML.match(/class="nav-group-hdr"[^>]*aria-expanded=/g) || []).length;
+  assert.strictEqual(n, Pages.CATEGORY_KEYS.length, 'every header needs aria-expanded');
+});
+
+test('the header click loop is separate from the nav-item loop', () => {
+  // Kept apart deliberately: headers navigate nowhere, and folding them into the
+  // .nav-item loop would call showPage(undefined).
+  assert.ok(APP_JS.includes("document.querySelectorAll('.nav-group-hdr').forEach"),
+    'the header click loop is gone');
+  const at = APP_JS.indexOf("document.querySelectorAll('.nav-group-hdr').forEach");
+  const body = APP_JS.slice(at, at + 700);
+  assert.ok(!/showPage\(/.test(body), 'expanding a category must not navigate');
+});
+
+test('preflight paints the cached nav state without holding a category list', () => {
+  // preflight.js runs before the nav parses and is the only thing that can stop
+  // the sidebar painting in one shape and rearranging. It must stay
+  // vocabulary-free: a copy of the taxonomy in a file with no module system is
+  // one nothing could keep honest.
+  assert.match(PREFLIGHT, /data-nav/, 'preflight must set the grouped/flat attribute');
+  assert.match(PREFLIGHT, /navBoot/, 'preflight must paint the open categories');
+  for (const c of Pages.CATEGORY_KEYS) {
+    assert.ok(!PREFLIGHT.includes("'" + c + "'") && !PREFLIGHT.includes('"' + c + '"'),
+      'preflight.js names the category ' + c + ' — it must pass tokens through, not know them');
+  }
+});
+
+test('the nav-prefs route validates categories and inherits no page guard', () => {
+  const at = INDEX_JS.indexOf("app.post('/api/nav-prefs'");
+  assert.ok(at > -1, 'the /api/nav-prefs POST is gone');
+  const body = INDEX_JS.slice(at, at + 1400);
+  assert.match(body, /Pages\.CATEGORY_KEYS/,
+    'the expanded list must be filtered through the registry, not persisted as sent');
+  // Unlike /api/dashboard-layout this must NOT require a page: every signed-in
+  // user has a sidebar, including one whose role grants a single page.
+  assert.ok(!/canPageAnywhere|requirePage|requireGlobalAdmin/.test(body),
+    'a personal nav preference must not inherit a page guard');
+});
+
+test('both copies of the grouping toggle share one handler', () => {
+  // Settings is unreachable without manageSettings/managePrincipals, so the
+  // account-modal copy is what lets a Read Only user turn grouping off at all.
+  const inputs = (HTML.match(/class="nav-grouped-input"/g) || []).length;
+  assert.strictEqual(inputs, 2, 'expected the Settings and account-modal toggles');
+  assert.ok(APP_JS.includes("document.querySelectorAll('.nav-grouped-input')"),
+    'the toggle handler must bind by class, so both copies stay in step');
+});
+
+test('a category can be collapsed even while it holds the current page', () => {
+  // Two ways this broke, both silently:
+  //
+  //  1. _navRender derived the open category from the active page on every
+  //     render, so a collapse was undone by the very next render.
+  //  2. The click keyed on membership of _navExpanded. An auto-expanded category
+  //     is open WITHOUT being in that array, so the first click pushed it —
+  //     expanding an already-open group and taking two clicks to shut.
+  //
+  // Both are invisible to a source scan unless it looks for the specific shape
+  // that fixes them: a module-level _navAutoCat that the toggle consults and
+  // clears.
+  assert.match(APP_JS, /var _navAutoCat = null;/, '_navAutoCat must be state, not re-derived');
+  assert.match(APP_JS, /function _navRender\(\)/,
+    '_navRender must read _navAutoCat rather than take the active category as an argument');
+
+  const at   = APP_JS.indexOf("document.querySelectorAll('.nav-group-hdr').forEach");
+  const body = APP_JS.slice(at, at + 1200);
+  assert.match(body, /if \(at !== -1 \|\| _navAutoCat === cat\)/,
+    'the toggle must key on what is rendered — saved OR auto-expanded — not on membership alone');
+  assert.match(body, /if \(_navAutoCat === cat\) _navAutoCat = null;/,
+    'collapsing must clear the auto-expand, or the next render puts it back');
+});
+
+test('auto-expanding a category is never saved', () => {
+  // Otherwise visiting one page in each category leaves every category open for
+  // good, which is grouping that undoes itself.
+  const at   = APP_JS.indexOf('function showPage(');
+  const body = APP_JS.slice(at, APP_JS.indexOf('\n}', at));
+  assert.match(body, /_navAutoCat = navGrp\.dataset\.cat/, 'navigation sets the auto-expand');
+  assert.ok(!/_navSave\(/.test(body), 'navigation must not persist the auto-expand');
 });

@@ -222,6 +222,17 @@ Change only the `"version"` field. Nothing else.
 | `routing.js` | **Stream** | `/ip/route/listen` + `/routing/bgp/session/listen` | BGP keepalives fingerprint-suppressed |
 | `netwatch.js` | **Stream** | `/tool/netwatch/listen` | Initial `/print` on connect; 60 s heartbeat re-emit; drives NetWatch host-down alerts |
 | `logs.js` | **Stream** | `/log/listen` | Bounded history buffer (500 entries) |
+| `queues.js` | **Stream** (`/listen` ×2) + Poll | `/queue/simple/print`, `/queue/tree/print` | Two listen channels (one per menu) carrying no data — they mark the tables stale and the ordinary tick reads them. The tick runs on its own rather than waiting for stream data: a router with no queues would never fire a listen, and the page would sit on "waiting for data" forever. Rates are derived from the byte counter over our own poll window (ppp.js idiom), seeded on the first tick only from the router's `rate`. Borrows the FastTrack summary from `firewall.js` by reference, `requires: []` |
+| `wan.js` | **Stream** (`/listen`) + Poll | `/interface/detect-internet/state`, `/ip/dhcp-client`, `/ip/route`, `/ip/address`, `/interface` | The uplink set is RouterOS's (`state=internet`), matching the Dashboard Network card; it does NOT infer uplinks from default routes. `/ip/route/listen` because a default route going inactive IS a failover. Rates borrowed from `ifStatus` by reference, projected by name; `requires: []`. `detectionEnabled` distinguishes "detection is off" — the common case, since `detect-interface-list` defaults to `none` — from "no uplinks" |
+| `rosusers.js` | Poll | `/user/print`, `/user/group/print`, `/user/active/print`, `/user/settings/print` | Poll-only by design (`streamKey: null`), like `packages.js`: a router's user list changes when an operator edits it, so a channel held open for weeks buys nothing. Slow default (60 s) with `refreshNow()` after every action. **Reads only** — every write lives in the socket handlers, enforced by a source guard |
+
+**Page gating — a new page must opt in.** `streamRooms` in `src/pages.js` means "suspend this
+collector when nobody occupies these rooms". It once held only the five collectors with an
+`=interval=N` counter stream, so every page added afterwards declared `[]` and kept polling the
+router from the Dashboard — four collectors at 5 s and six idle `/listen` channels, for pages nobody
+was viewing. A page whose collector reads the router on a timer names its own `page-<key>` room. Two
+consequences to keep in step: the collector must live at `session.<page>` for the room sweep to find
+it, and `_idleResume()` must NOT resume it by name, which is what defeated the gate the first time.
 
 **Rule:** always prefer streaming. Use `/listen` for event-driven data; use `=interval=N` on print commands that lack a `/listen` variant. Fall back to `setInterval` polling only when the RouterOS command genuinely cannot push (rare — check both mechanisms first).
 
@@ -236,6 +247,44 @@ RouterOS v7 on some firmware builds omits the `.flags` field for routes in their
 ### `=.proplist=` on registration-table calls — can filter rows
 
 On RouterOS v7 new wifi package, including unknown or absent field names in `=.proplist=` for `/interface/wifi/registration-table/print` can cause RouterOS to **filter rows** rather than simply omitting those fields per row. For example, requesting `'signal'` (which is `'signal-strength'` in the new API) may return only clients where that field is non-empty — resulting in only 1 of N clients being returned. **Do not use `=.proplist=` on wireless registration-table calls.** The table is small enough that the optimisation is not worth the risk.
+
+### `/queue/*` — units, unlimited, and where the statistics come from
+
+Settled against a live router while building the Queues page:
+
+- **Statistics need no flag.** `rate`, `packet-rate`, `bytes`, `packets`, `dropped` and the
+  `queued-*` fields all come back on a plain `/queue/simple/print`. The CLI's `print stats` has no
+  API equivalent to pass.
+- **The API answers in raw bps.** `max-limit=15M/20M` on input reads back as `"15000000/20000000"`.
+  Suffixes are accepted on the way in and never returned on the way out.
+- **Unlimited is `0`, not absent.** An unlimited queue reads back as `"0/0"`, so `0` means
+  "explicitly unlimited" and a missing field means "the router said nothing". Collapsing the two
+  reports a deliberate choice as an unknown.
+- **`max-limit` must be ≥ `limit-at`**, refused as `failure: download-max-limit less than
+  download-limit`. The pair has to move together, so a form that edits only one half fails.
+- **The two menus are different shapes.** Simple uses pairs and `packet-marks` (plural) and has a
+  `dynamic` flag; tree uses single values and `packet-mark` (singular) and has **no `dynamic` field
+  at all**.
+- **FastTrack does not disable a queue, it diverts connections.** Measured: a fresh queue on the LAN
+  still counted several megabits within seconds while the default `fasttrack-connection` rule was
+  active. It bypasses simple queues and queue trees with `parent=global` — an interface-parented tree
+  is unaffected.
+
+### `/user/group/set` — a positive policy list is ADDITIVE
+
+On `add`, RouterOS fills in the negations itself: send `=policy=read,api` and it stores all 17
+policies with every unnamed one negated. On **`set` it does not**. A positive-only list only adds,
+and a policy is removed only when it is explicitly named with a `!`:
+
+```
+group holds read,test,api
+/user/group/set =policy=read                      -> read,test,api   (silently unchanged)
+/user/group/set =policy=!local,...,read,...,!api  -> read
+```
+
+This is a quiet failure, not an error: a permissions editor built on the `add` behaviour appears to
+work while never removing anything. `RosUsersCollector.buildPolicy()` therefore always emits the
+full vocabulary with explicit negations, which is correct for both verbs. Verified on RouterOS 7.24.
 
 ### `!empty` reply — RouterOS 7.18+
 
@@ -255,7 +304,7 @@ switched to Poll mode, may have individual collectors disabled, and may override
 resolved by `resolveCollection()` in `src/collection.js` and applied in `buildSession()`. A collector
 marked `pollable` in the registry **must** implement both paths, and both must produce the identical
 `lastPayload` for the same rows. A disabled collector is replaced by `makeNullCollector(key)` rather
-than merely left unstarted, because 11 of the 16 open their streams from a `ros.on('connected')`
+than merely left unstarted, because most of them open their streams from a `ros.on('connected')`
 handler in the constructor. See the constraint table above. Use the polling pattern only when no stream is available.
 
 ### Streaming collector pattern (preferred)
@@ -499,7 +548,7 @@ therefore means:
 
 ## Shared infrastructure in index.js
 
-**`buildSession(routerCfg)`** — creates a fresh ROS instance + all 16 collectors + connTableCache wired to the given router config. Called on startup and on every hot-swap.
+**`buildSession(routerCfg)`** — creates a fresh ROS instance + all 26 collectors + connTableCache wired to the given router config. Called on startup and on every hot-swap.
 
 **`teardownSession(session)`** — stops all collectors (timers + streams), stops the ROS connection, waits 150 ms for in-flight callbacks to settle.
 
