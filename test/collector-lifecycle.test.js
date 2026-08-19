@@ -1173,6 +1173,94 @@ test('BandwidthCollector updates state timestamps and clears error on success', 
   assert.equal(state.lastBandwidthErr, null, 'lastBandwidthErr cleared on success');
 });
 
+test('BandwidthCollector publishes its computed device projection even when socket output is unchanged', async () => {
+  const { ros, dhcpLeases, arp, dhcpNetworks, ifStatus, io, state } = makeBandwidthDeps();
+  let snapshot = 1000;
+  const projected = [];
+  const connTableCache = { latestWithTs: () => ({
+    ts: snapshot,
+    rows: [{
+      '.id': '*1', 'src-address': '192.168.1.10:54321',
+      'dst-address': '1.1.1.1:443', protocol: 'tcp',
+      'orig-bytes': String(snapshot), 'repl-bytes': String(snapshot * 2),
+    }],
+  }) };
+  const collector = new BandwidthCollector({
+    ros, io, pollMs: 3000, dhcpNetworks, dhcpLeases, arp, ifStatus, state,
+    connTableCache, onDevices: payload => projected.push(payload),
+  });
+
+  await collector.tick();
+  snapshot = 2000;
+  await collector.tick();
+  assert.equal(projected.length, 2);
+  assert.equal(projected.at(-1).devices[0].srcIp, '192.168.1.10');
+  assert.ok(projected.at(-1).devices[0].totalMbps > 0);
+
+  collector.stop();
+  assert.equal(projected.at(-1), null, 'stopping explicitly invalidates the preferred source');
+});
+
+test('Bandwidth shared rate engine works headlessly and consumes same-millisecond snapshots by sequence', async () => {
+  const { ros, dhcpLeases, arp, dhcpNetworks, ifStatus, state } = makeBandwidthDeps();
+  const emitted = [];
+  const io = {
+    engine: { clientsCount: 1 },
+    to() { const chain = { to: () => chain, emit: (event, data) => emitted.push({ event, data }) }; return chain; },
+  };
+  let seq = 1;
+  let bytes = 1000;
+  const projected = [];
+  const connTableCache = { latestWithTs: () => ({
+    ts: 5000, seq,
+    rows: [{
+      '.id': '*1', 'src-address': '10.0.0.2', 'dst-address': '1.1.1.1',
+      protocol: 'tcp', 'orig-bytes': String(bytes), 'repl-bytes': String(bytes),
+    }],
+  }) };
+  const collector = new BandwidthCollector({
+    ros, io, pollMs: 3000, dhcpNetworks, dhcpLeases, arp, ifStatus, state,
+    connTableCache, emitEnabled: false, onDevices: payload => projected.push(payload),
+  });
+  await collector.tick();
+  seq = 2;
+  bytes = 2000;
+  await collector.tick();
+  assert.equal(projected.length, 2, 'sequence, not millisecond timestamp, distinguishes snapshots');
+  assert.equal(emitted.length, 0, 'a disabled Bandwidth page receives no bandwidth:update');
+});
+
+test('Bandwidth does not publish an invalidated cache as an authoritative empty table', async () => {
+  const { ros, dhcpLeases, arp, dhcpNetworks, ifStatus, io, state } = makeBandwidthDeps();
+  const projected = [];
+  const collector = new BandwidthCollector({
+    ros, io, pollMs: 3000, dhcpNetworks, dhcpLeases, arp, ifStatus, state,
+    connTableCache: { latestWithTs: () => ({ rows: [], ts: 0, seq: 7, available: false }) },
+    onDevices: payload => projected.push(payload),
+  });
+  await collector.tick();
+  assert.deepEqual(projected, []);
+  assert.equal(collector.lastPayload, null);
+});
+
+test('BandwidthCollector isolates a failing projection callback from collection', async () => {
+  const { ros, dhcpLeases, arp, dhcpNetworks, ifStatus, io, state } = makeBandwidthDeps();
+  const connTableCache = { latestWithTs: () => ({ rows: [], ts: 1000 }) };
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const collector = new BandwidthCollector({
+      ros, io, pollMs: 3000, dhcpNetworks, dhcpLeases, arp, ifStatus, state,
+      connTableCache, onDevices: () => { throw new Error('projection consumer failed'); },
+    });
+    await assert.doesNotReject(() => collector.tick());
+    assert.ok(collector.lastPayload);
+    assert.ok(state.lastBandwidthTs > 0);
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test('BandwidthCollector records error in state on tick failure', async () => {
   const { ros, dhcpLeases, arp, dhcpNetworks, ifStatus, io, state } = makeBandwidthDeps();
   // Make the cache throw so tick() propagates an error that start()'s run() wrapper records

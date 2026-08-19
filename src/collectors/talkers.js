@@ -51,7 +51,7 @@ function parseBytes(value) {
 }
 
 class TopTalkersCollector {
-  constructor({ ros, io, pollMs, state, topN, streamMode }) {
+  constructor({ ros, io, pollMs, state, topN, streamMode, connectionStaleMs }) {
     this.ros    = ros;
     this.io     = io;
     this._lbl   = ros.routerLabel ? `[${ros.routerLabel}][talkers]` : '[talkers]';
@@ -73,6 +73,12 @@ class TopTalkersCollector {
     this._pollTimer    = null;
     this._pollInflight = false;
     this._counterPrev  = new Map();
+    this._kidPayload   = null;
+    this._connectionPayload = null;
+    this._connectionTimer = null;
+    this._connectionStaleMs = Number.isFinite(connectionStaleMs) ? Math.max(10, connectionStaleMs) : null;
+    this._lastEmitTs = 0;
+    this._active = false;
     this._snapshotProbe = new AuthoritativeSnapshotProbe({
       cooldownMs: Math.max(1000, this._pollDelayMs),
       // This must use the same stats view as the stream. A plain print may
@@ -89,6 +95,7 @@ class TopTalkersCollector {
       if (this.streamMode && !this._stream) this._startStream();
     });
     ros.on('close', () => {
+      this._clearConnectionPayload(false);
       this._stopStream();
       if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
     });
@@ -97,15 +104,18 @@ class TopTalkersCollector {
       this._backoffMs    = 60000;
       this._unavailable  = false;
       this._lastFp       = '';
+      this._kidPayload   = null;
+      this._clearConnectionPayload(false);
       clearTimeout(this._backoffTimer);
       this._backoffTimer = null;
       this._stream = null;
-      this._startTalkers();
+      if (this._active) this._startTalkers();
     });
   }
 
   _startStream() {
     if (this._stream) return;
+    if (!this._active || this._connectionPayload) return;
     if (!this.ros.connected) return;
     if (Date.now() < this._backoffUntil) return;
 
@@ -174,7 +184,7 @@ class TopTalkersCollector {
 
   _restartStream() {
     this._stopStream();
-    this._startStream();
+    if (!this._connectionPayload) this._startStream();
   }
 
   _scheduleCommit() {
@@ -216,7 +226,9 @@ class TopTalkersCollector {
     }
     return {
       key,
-      name: name || mac || id,
+      // RouterOS .id is an internal implementation key, not a device label.
+      // Never expose it through the public name fallback.
+      name: name || mac || 'Unknown device',
       mac,
       rateUp: rateUp === null ? 0 : rateUp,
       rateDown: rateDown === null ? 0 : rateDown,
@@ -238,12 +250,12 @@ class TopTalkersCollector {
   _setUnavailable(reason) {
     this._unavailable = true;
     const now = Date.now();
-    const payload = { ts: now, devices: [], pollMs: this.pollMs, unavailable: true, reason };
-    this.lastPayload = payload;
-    this._lastFp = 'unavailable:' + reason;
-    this.io.to('page-dashboard').emit('talkers:update', payload);
-    this.state.lastTalkersTs = now;
-    this.state.lastTalkersErr = null;
+    this._kidPayload = {
+      ts: now, devices: [], pollMs: this.pollMs, unavailable: true, reason,
+      source: 'kid-control', basis: 'kid-control-stats', status: 'error',
+      stale: false, emptyText: null,
+    };
+    this._publishSelected();
   }
 
   _handleSnapshotError(error, classification = classifySnapshotError(error)) {
@@ -284,12 +296,117 @@ class TopTalkersCollector {
 
     const fp = JSON.stringify(devices.map(d => ({ key: d.key, tx: d.tx_mbps, rx: d.rx_mbps })));
     const publicDevices = devices.map(({ key: _key, ...device }) => device);
-    this.lastPayload = { ts: now, devices: publicDevices, pollMs: this.pollMs, unavailable: false, reason: null };
-    if (fp !== this._lastFp) {
-      this._lastFp = fp;
-      this.io.to('page-dashboard').emit('talkers:update', this.lastPayload);
+    this._kidPayload = {
+      ts: now, devices: publicDevices, pollMs: this.pollMs,
+      unavailable: false, reason: null, source: 'kid-control', basis: 'kid-control-stats',
+      status: 'ok', stale: false, emptyText: null,
+      _fp: fp,
+    };
+    this._publishSelected();
+  }
+
+  /**
+   * Accept the already-computed per-LAN-device rates from BandwidthCollector.
+   * This is the preferred dashboard source because it covers ordinary LAN
+   * clients without requiring RouterOS parental-control configuration.
+   * null means that source stopped or became unavailable; Kid Control then
+   * resumes as a compatibility fallback.
+   */
+  acceptConnectionPayload(payload) {
+    if (!payload) {
+      this._clearConnectionPayload(true);
+      return;
     }
-    this.state.lastTalkersTs  = now;
+    if (!this._active || !Array.isArray(payload.devices)) return;
+
+    const byIdentity = new Map();
+    for (const row of payload.devices) {
+      if (!row || typeof row !== 'object') continue;
+      const srcIp = String(row.srcIp || '').trim();
+      if (!srcIp) continue;
+      const rx = Number(row.rxMbps);
+      const tx = Number(row.txMbps);
+      const mac = String(row.mac || '').trim().toUpperCase().replace(/-/g, ':');
+      const key = mac ? `mac:${mac}` : `ip:${srcIp}`;
+      const current = byIdentity.get(key) || {
+        name: String(row.name || mac || srcIp), mac,
+        rx_mbps: 0, tx_mbps: 0, _key: key,
+      };
+      current.rx_mbps += Number.isFinite(rx) && rx >= 0 ? rx : 0;
+      current.tx_mbps += Number.isFinite(tx) && tx >= 0 ? tx : 0;
+      if ((!current.name || current.name === mac) && row.name) current.name = String(row.name);
+      byIdentity.set(key, current);
+    }
+    const devices = [...byIdentity.values()].map(device => ({
+      ...device,
+      rx_mbps: +device.rx_mbps.toFixed(4),
+      tx_mbps: +device.tx_mbps.toFixed(4),
+    }));
+    devices.sort((a, b) =>
+      ((b.rx_mbps + b.tx_mbps) - (a.rx_mbps + a.tx_mbps)) || a._key.localeCompare(b._key));
+    const selected = devices.slice(0, this.topN);
+    const publicDevices = selected.map(({ _key, ...device }) => device);
+    const ts = Number.isFinite(payload.ts) && payload.ts > 0 ? payload.ts : Date.now();
+    const pollMs = Number.isFinite(payload.pollMs) && payload.pollMs > 0 ? payload.pollMs : 5000;
+    this._connectionPayload = {
+      ts, devices: publicDevices, pollMs, unavailable: false, reason: null,
+      source: 'connections', basis: 'connection-byte-delta', status: 'ok',
+      stale: false, emptyText: 'No active LAN devices',
+      _fp: JSON.stringify(selected.map(d => ({ key: d._key, rx: d.rx_mbps, tx: d.tx_mbps }))),
+    };
+
+    // The connection-derived source is authoritative even when it is empty.
+    // Stop the redundant Kid Control command while this source is fresh.
+    // Do not retain an older Kid Control payload: if the preferred source later
+    // disappears, replaying that payload would make stale devices look current.
+    this._kidPayload = null;
+    this._stopStream();
+    if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
+    clearTimeout(this._connectionTimer);
+    const staleMs = this._connectionStaleMs || Math.max(20000, pollMs * 4 + 5000);
+    this._connectionTimer = setTimeout(() => {
+      this._connectionTimer = null;
+      this._clearConnectionPayload(true);
+    }, staleMs);
+    if (this._connectionTimer.unref) this._connectionTimer.unref();
+    this._publishSelected();
+  }
+
+  _clearConnectionPayload(restartFallback) {
+    clearTimeout(this._connectionTimer);
+    this._connectionTimer = null;
+    const hadConnection = !!this._connectionPayload;
+    this._connectionPayload = null;
+    if (hadConnection && restartFallback) {
+      const now = Date.now();
+      this._kidPayload = {
+        ts: now, devices: [], pollMs: this.pollMs, unavailable: true,
+        reason: 'Device traffic is unavailable', source: 'fallback-pending',
+        basis: null, status: 'error', stale: true, emptyText: null,
+      };
+      this._publishSelected();
+    }
+    if (restartFallback && this._active && this.ros.connected) this._startTalkers();
+  }
+
+  _publishSelected() {
+    const internal = this._connectionPayload || this._kidPayload;
+    if (!internal) return;
+    const { _fp, ...payload } = internal;
+    this.lastPayload = payload;
+    const fp = JSON.stringify({
+      source: payload.source,
+      unavailable: !!payload.unavailable,
+      reason: payload.reason || '',
+      devices: _fp || payload.devices,
+    });
+    const now = Date.now();
+    if (fp !== this._lastFp || now - this._lastEmitTs >= 10000) {
+      this._lastFp = fp;
+      this._lastEmitTs = now;
+      this.io.to('page-dashboard').emit('talkers:update', payload);
+    }
+    this.state.lastTalkersTs = payload.ts || now;
     this.state.lastTalkersErr = null;
   }
 
@@ -334,6 +451,7 @@ class TopTalkersCollector {
   }
 
   _startTalkers() {
+    if (!this._active || this._connectionPayload) return;
     if (this.streamMode) {
       this._startStream();
     } else {
@@ -344,15 +462,19 @@ class TopTalkersCollector {
   }
 
   start() {
+    this._active = true;
     this._startTalkers();
   }
 
   suspend() {
+    this._active = false;
+    this._clearConnectionPayload(false);
     this._stopStream();
     if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
   }
   resume() {
     if (!this.ros.connected) return;
+    this._active = true;
     // Same trap as ping: suspend() clears _pollTimer, so a resume that only
     // restarts the stream strands poll mode permanently once the last viewer
     // has ever gone away — which is why the Top Talkers card stayed stale.
@@ -362,6 +484,8 @@ class TopTalkersCollector {
   }
 
   stop() {
+    this._active = false;
+    this._clearConnectionPayload(false);
     this._stopStream();
     if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
   }

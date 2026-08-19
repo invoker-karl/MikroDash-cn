@@ -2,6 +2,28 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.8-cn.7] — Connection-derived Top Talkers
+
+- Dashboard Top Talkers now uses the per-LAN-device byte-delta rates already
+  computed from the Connections snapshot. Ordinary wired and wireless clients
+  therefore appear without requiring a Kid Control device configuration.
+- The connection-derived source is authoritative even when its successful
+  snapshot is empty. Kid Control remains a compatibility fallback only when the
+  preferred source stops or becomes stale, and it can no longer race a fresh
+  connection result or replay stale rows.
+- The shared rate engine remains available to Top Talkers when the optional
+  Bandwidth page is disabled, opens no additional RouterOS command, and never
+  publishes that disabled page's event. Disabling Connections still leaves the
+  explicit Kid Control fallback without secretly reopening the connection table.
+- Device rates are grouped by normalized MAC where possible, deterministically
+  sorted and capped to the configured top five. RouterOS item IDs, source and
+  destination addresses, internal keys, and router IDs are excluded from the
+  Dashboard payload; device labels are also protected from runtime translation.
+- Rejected partial connection bursts no longer advance the rate snapshot, and a
+  monotonic per-session sequence distinguishes two accepted snapshots in the
+  same millisecond. Invalidated or not-yet-ready caches are not treated as a
+  successful empty table after reconnect.
+
 ## [0.7.8-cn.6] — RouterOS Kid Control statistics compatibility
 
 - Top Talkers now requests the Kid Control `stats` view for streaming,

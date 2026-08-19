@@ -111,6 +111,22 @@ test('Connections authoritative non-empty snapshot atomically accepts a large re
   assert.equal(c._partialStreak, 0);
 });
 
+test('Connections rejected partial burst does not advance the shared rate snapshot', () => {
+  const deposits = [];
+  const c = new ConnectionsCollector({
+    ros: rosStub(), io: ioStub(0), pollMs: 5000, topN: 5, maxConns: 1000,
+    dhcpNetworks: { getLanCidrs: () => [] },
+    dhcpLeases: { getNameByIP: () => null, getNameByMAC: () => null },
+    arp: { getByIP: () => null }, state: {}, geoLookup: null,
+    connTableCache: { deposit: rows => deposits.push(rows) },
+  });
+  c._rowsPrev = Array.from({ length: 100 }, (_, i) => ({ '.id': `*old${i}` }));
+  c._rowsNext = Array.from({ length: 5 }, (_, i) => ({ '.id': `*partial${i}` }));
+  c._onBatchComplete(false);
+  assert.equal(deposits.length, 0, 'retained old counters cannot be timestamped as a fresh rate sample');
+  assert.equal(c._rowsPrev.length, 100);
+});
+
 test('Firewall failed confirmation preserves rules and successful empty removes them', async () => {
   let reject = true;
   const ros = rosStub(async () => {
@@ -311,6 +327,118 @@ test('Talkers falls back to byte-counter deltas and accepts a stable .id without
   assert.equal(c._normaliseDevice({ name: 'duplicate-name-only', 'rate-up': 1 }, 3000), null,
     'a mutable or duplicate name is not a stable identity');
   c.stop();
+});
+
+test('Talkers prefers connection-derived LAN rates, including an authoritative empty list', () => {
+  const ros = rosStub();
+  const io = ioStub();
+  const c = new TopTalkersCollector({
+    ros, io, pollMs: 3000, state: {}, topN: 2, streamMode: true,
+    connectionStaleMs: 60000,
+  });
+  c.start();
+  assert.ok(c._stream, 'Kid Control starts only as the compatibility fallback');
+
+  c._replaceAuthoritativeRows([
+    { '.id': '*kid', name: 'old-kid-row', 'rate-up': '1Mbps', 'rate-down': '1Mbps' },
+  ]);
+  c.acceptConnectionPayload({
+    ts: 1234, pollMs: 5000,
+    devices: [
+      { srcIp: '192.168.1.20', name: 'laptop', mac: 'AA:BB', rxMbps: 3, txMbps: 4 },
+      { srcIp: '192.168.1.30', name: '', mac: '', rxMbps: 9, txMbps: 2 },
+      { srcIp: '192.168.1.40', name: 'third', mac: 'CC:DD', rxMbps: 1, txMbps: 1 },
+    ],
+  });
+
+  assert.equal(c._stream, null, 'preferred source closes the redundant Kid Control stream');
+  assert.equal(c.lastPayload.source, 'connections');
+  assert.equal(c.lastPayload.devices.length, 2, 'the configured dashboard top-N is enforced');
+  assert.equal(c.lastPayload.devices[0].name, '192.168.1.30', 'an IP is the safe name fallback');
+  assert.equal(c.lastPayload.devices[1].name, 'laptop');
+  assert.equal(JSON.stringify(c.lastPayload).includes('srcIp'), false,
+    'internal connection identity is not exposed in the compact dashboard payload');
+
+  c.acceptConnectionPayload({ ts: 2345, pollMs: 5000, devices: [] });
+  assert.deepEqual(c.lastPayload.devices, []);
+  assert.equal(c.lastPayload.source, 'connections');
+  assert.equal(c.lastPayload.emptyText, 'No active LAN devices');
+  c.stop();
+});
+
+test('Talkers merges multiple addresses by normalized MAC and never exposes RouterOS internal ids', () => {
+  const c = new TopTalkersCollector({
+    ros: rosStub(), io: ioStub(), pollMs: 3000, state: {}, topN: 5, streamMode: false,
+    connectionStaleMs: 60000,
+  });
+  c.start();
+  c.acceptConnectionPayload({
+    ts: 1, pollMs: 5000,
+    devices: [
+      { srcIp: '192.168.1.2', name: 'phone', mac: 'aa-bb-cc-dd-ee-ff', rxMbps: 1, txMbps: 2 },
+      { srcIp: '2001:db8::2', name: 'phone', mac: 'AA:BB:CC:DD:EE:FF', rxMbps: 3, txMbps: 4 },
+    ],
+  });
+  assert.equal(c.lastPayload.devices.length, 1);
+  assert.equal(c.lastPayload.devices[0].mac, 'AA:BB:CC:DD:EE:FF');
+  assert.equal(c.lastPayload.devices[0].rx_mbps, 4);
+  assert.equal(c.lastPayload.devices[0].tx_mbps, 6);
+  assert.equal(JSON.stringify(c.lastPayload).includes('192.168.1.2'), false);
+
+  c._clearConnectionPayload(false);
+  c._replaceAuthoritativeRows([{ '.id': '*secret', 'rate-up': 1, 'rate-down': 2 }]);
+  assert.equal(c.lastPayload.devices[0].name, 'Unknown device');
+  assert.equal(JSON.stringify(c.lastPayload).includes('*secret'), false);
+  c.stop();
+});
+
+test('Talkers does not let Kid Control race or stale data override a fresh connection source', () => {
+  const ros = rosStub();
+  const c = new TopTalkersCollector({
+    ros, io: ioStub(), pollMs: 3000, state: {}, topN: 5, streamMode: true,
+    connectionStaleMs: 60000,
+  });
+  c.start();
+  c.acceptConnectionPayload({
+    ts: 1000, pollMs: 5000,
+    devices: [{ srcIp: '10.0.0.2', name: 'connection-device', rxMbps: 5, txMbps: 1 }],
+  });
+  c._replaceAuthoritativeRows([
+    { '.id': '*late', name: 'late-kid-row', 'rate-up': '99Mbps', 'rate-down': '99Mbps' },
+  ]);
+  assert.equal(c.lastPayload.source, 'connections');
+  assert.equal(c.lastPayload.devices[0].name, 'connection-device');
+
+  c.acceptConnectionPayload(null);
+  assert.equal(c.lastPayload.unavailable, true, 'source loss never replays the stale Kid Control row');
+  assert.equal(c.lastPayload.reason, 'Device traffic is unavailable');
+  assert.ok(c._stream, 'Kid Control restarts only after the preferred source is lost');
+  c.stop();
+});
+
+test('Talkers instances keep connection-derived devices isolated per router session', () => {
+  const a = new TopTalkersCollector({
+    ros: rosStub(), io: ioStub(), pollMs: 3000, state: {}, topN: 5, streamMode: false,
+    connectionStaleMs: 60000,
+  });
+  const b = new TopTalkersCollector({
+    ros: rosStub(), io: ioStub(), pollMs: 3000, state: {}, topN: 5, streamMode: false,
+    connectionStaleMs: 60000,
+  });
+  a.start();
+  b.start();
+  a.acceptConnectionPayload({
+    ts: 1, pollMs: 5000,
+    devices: [{ srcIp: '10.0.0.2', name: 'router-a', rxMbps: 1, txMbps: 2 }],
+  });
+  b.acceptConnectionPayload({
+    ts: 2, pollMs: 5000,
+    devices: [{ srcIp: '192.168.1.2', name: 'router-b', rxMbps: 3, txMbps: 4 }],
+  });
+  assert.equal(a.lastPayload.devices[0].name, 'router-a');
+  assert.equal(b.lastPayload.devices[0].name, 'router-b');
+  a.stop();
+  b.stop();
 });
 
 test('Wireless synthetic idle and transient confirmation do not age clients or switch mode', async () => {

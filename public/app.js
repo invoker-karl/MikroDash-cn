@@ -1010,12 +1010,12 @@ socket.on('conn:update',function(data){
 socket.on('talkers:update',function(data){
   var devices=data.devices||[];
   if(!devices.length){
-    var emptyText=data.unavailable?(data.reason||'Kid Control is unavailable'):'No devices';
+    var emptyText=data.unavailable?(data.reason||'Device traffic is unavailable'):(data.emptyText||'No devices');
     talkersTable.innerHTML='<tr><td colspan="4" class="empty-state">'+esc(emptyText)+'</td></tr>';
     return;
   }
   talkersTable.innerHTML=devices.map(function(d){
-    return'<tr><td>'+esc(d.name||'\u2014')+'</td><td style="color:var(--text-muted)">'+esc(d.mac||'\u2014')+'</td>'+
+    return'<tr data-i18n-user-data><td>'+esc(d.name||'\u2014')+'</td><td style="color:var(--text-muted)">'+esc(d.mac||'\u2014')+'</td>'+
       '<td class="text-end" style="color:var(--accent-rx)">'+fmtMbps(d.rx_mbps)+'</td>'+
       '<td class="text-end" style="color:var(--accent-tx)">'+fmtMbps(d.tx_mbps)+'</td></tr>';
   }).join('');
