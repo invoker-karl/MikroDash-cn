@@ -111,7 +111,8 @@ class TopTalkersCollector {
 
     stream.on('error', (err) => {
       const msg = String(err && err.message ? err.message : err);
-      this._stream = null;
+      // Stop the actual errored stream before clearing our reference. Clearing
+      // first made _stopStream() return early and leaked the RouterOS stream.
       this._stopStream();
       if (msg.includes('unknown command') || msg.includes('no such')) {
         // Feature not present on this router — disable permanently, no retries.

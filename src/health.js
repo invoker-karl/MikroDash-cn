@@ -21,7 +21,7 @@ function computeHealthStatus({ startupReady, rosConnected, state = {}, now = Dat
   // A fresh sample from a browser-selected fallback does not make an invalid
   // configured default healthy. The formal default is operational config;
   // temporary UI selection is deliberately independent of it.
-  if (startupReady && rosConnected &&
+  if (startupReady && rosConnected && requiredCollectors.includes('traffic') &&
       (state.trafficConfigValid === false || state.trafficConfigValid === null)) {
     stale.push('traffic-config');
   }

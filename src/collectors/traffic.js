@@ -94,9 +94,33 @@ class TrafficCollector {
 
   setAvailableInterfaces(interfaces) {
     const streamWasStarted = !!this._allStream || this._ifNamesKey !== '';
-    const names = (interfaces || []).map(i => typeof i === 'string' ? i : i && i.name).filter(Boolean);
+    const rows = interfaces || [];
+    const names = rows.map(i => typeof i === 'string' ? i : i && i.name).filter(Boolean);
     this.availableIfs = new Set(names);
     this._interfacesLoaded = true;
+
+    // /interface/print already gives authoritative running/disabled state.
+    // Seed the selected-interface cache immediately instead of showing
+    // "waiting" until monitor-traffic happens to produce its first sample.
+    const nextStatus = new Map();
+    const statusTs = Date.now();
+    for (const row of rows) {
+      const name = typeof row === 'string' ? row : row && row.name;
+      if (!name) continue;
+      if (row && typeof row === 'object' &&
+          (Object.prototype.hasOwnProperty.call(row, 'running') ||
+           Object.prototype.hasOwnProperty.call(row, 'disabled'))) {
+        const disabled = row.disabled === true || row.disabled === 'true';
+        nextStatus.set(name, {
+          ifName: name, ts: statusTs,
+          running: !disabled && (row.running === true || row.running === 'true'),
+          disabled, unavailable: false,
+        });
+      } else if (this._interfaceStatus.has(name)) {
+        nextStatus.set(name, this._interfaceStatus.get(name));
+      }
+    }
+    this._interfaceStatus = nextStatus;
 
     // A renamed/removed defaultIf used to poison the consolidated RouterOS
     // command even after the browser selected a valid interface:
@@ -128,6 +152,24 @@ class TrafficCollector {
       if (this.lastWanStatus && this.lastWanStatus.unavailable) this.lastWanStatus = null;
     } else {
       this.state.trafficConfigValid = true;
+    }
+
+    const defaultStatus = this._interfaceStatus.get(this.defaultIf);
+    if (this.availableIfs.has(this.defaultIf) && defaultStatus) {
+      this.lastWanStatus = { ...defaultStatus };
+      this.io.emit('wan:status', this.lastWanStatus);
+    }
+
+    // Refresh every selected-interface badge from the same authoritative
+    // snapshot. Removed selections receive an explicit unavailable state;
+    // the browser's interfaces:list reconciliation will then choose a valid
+    // fallback and issue the normal traffic:select event.
+    for (const { ifName, socket } of this.subscriptions.values()) {
+      const status = this._interfaceStatus.get(ifName);
+      if (status) socket.emit('traffic:status', status);
+      else if (!this.availableIfs.has(ifName)) socket.emit('traffic:status', {
+        ifName, ts: statusTs, running: false, disabled: false, unavailable: true,
+      });
     }
 
     // Loading the whitelist can remove an invalid name from a stream that was

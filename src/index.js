@@ -41,6 +41,7 @@ const { verifyRouterOSPatchMarkers } = require('./routeros/patchVerification');
 const { classifyRosError } = require('./routeros/classifyError');
 const { scheduleForcedShutdownTimer } = require('./shutdown');
 const { isPublicI18nPath } = require('./i18nAssets');
+const { applySessionInterfaceMetadata } = require('./interfaceMetadata');
 
 try {
   verifyRouterOSPatchMarkers({ readFileSync: fs.readFileSync });
@@ -359,6 +360,9 @@ function buildSession(routerCfg, routerIo) {
   // start() would not stop them. makeNullCollector stands in on the session.
   const _on    = (key, build) => eff.enabled[key] ? build() : makeNullCollector(key);
   const state  = _freshState();
+  // Assigned after all collectors are constructed. InterfaceStatus invokes
+  // the callback only after start/connected, when the session is fully built.
+  let session = null;
 
   // When TLS is enabled, pass an options object rather than a boolean so we can
   // set rejectUnauthorized. node-routeros passes this directly to tls.connect().
@@ -430,7 +434,15 @@ function buildSession(routerCfg, routerIo) {
   const wireless     = _on('wireless', () => new WirelessCollector    ({ros, io:routerIo, pollMs:eff.poll.wireless, state, dhcpLeases, arp, streamMode:eff.stream.wireless}));
   const vpn          = _on('vpn', () => new VpnCollector         ({ros, io:routerIo, pollMs:eff.poll.vpn,      state, rid:routerCfg.id, streamMode:eff.stream.vpn}));
   const firewall     = _on('firewall', () => new FirewallCollector    ({ros, io:routerIo, pollMs:eff.poll.firewall,  state, streamMode:eff.stream.firewall}));
-  const ifStatus     = _on('ifStatus', () => new InterfaceStatusCollector({ros, io:routerIo, pollMs:eff.poll.ifStatus, metaPollMs:eff.poll.ifaces, state, streamMode:eff.stream.ifStatus, alertsActive:_alertsActive, rid:routerCfg.id}));
+  const ifStatus     = _on('ifStatus', () => new InterfaceStatusCollector({
+    ros, io:routerIo, pollMs:eff.poll.ifStatus, metaPollMs:eff.poll.ifaces,
+    state, streamMode:eff.stream.ifStatus, alertsActive:_alertsActive, rid:routerCfg.id,
+    onInterfaceMetadata: (interfaces) => {
+      // This callback belongs to this buildSession closure and routerIo room;
+      // it must never mutate another router's cache or broadcast globally.
+      applySessionInterfaceMetadata(session, routerIo, interfaces);
+    },
+  }));
   const ping         = _on('ping', () => new PingCollector        ({ros, io:routerIo, pollMs:eff.poll.ping,     state, target:PING_TARGET, streamMode:eff.stream.ping, alertsActive:_alertsActive}));
   const bandwidth    = _on('bandwidth', () => new BandwidthCollector   ({ros, io:routerIo, pollMs:eff.poll.bandwidth, dhcpNetworks, dhcpLeases, arp, ifStatus, state, connTableCache, geoOrgCache}));
   const routing      = _on('routing', () => new RoutingCollector     ({ros, io:routerIo, pollMs:eff.poll.routing,  state, streamMode:eff.stream.routing}));
@@ -441,10 +453,11 @@ function buildSession(routerCfg, routerIo) {
 
   const allCollectors = [traffic, dhcpLeases, dhcpNetworks, arp, conns, talkers, logs, system, wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology];
 
-  return { ros, state, connTableCache, DEFAULT_IF, HISTORY_MINUTES, collection: eff,
+  session = { ros, state, connTableCache, DEFAULT_IF, HISTORY_MINUTES, collection: eff,
            dhcpLeases, dhcpNetworks, arp, traffic, conns, talkers, logs, system,
            wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology, allCollectors,
-           routerId: routerCfg.id, cachedInterfaces: null };
+           routerId: routerCfg.id, cachedInterfaces: null, _interfacesRevision: 0 };
+  return session;
 }
 
 // ── Session teardown ──────────────────────────────────────────────────────────
@@ -494,11 +507,18 @@ function broadcastRosStatus(connected, reason, entry) {
 
 async function refreshSessionInterfaces(session) {
   if (!session._ifacesFetch) {
+    const revision = session._interfacesRevision || 0;
     session._ifacesFetch = fetchInterfaces(session.ros).then((interfaces) => {
+      // A live InterfaceStatus snapshot may have arrived while this request was
+      // in flight. Do not overwrite that newer router-local authority.
+      if ((session._interfacesRevision || 0) !== revision) return session.cachedInterfaces || [];
       session.cachedInterfaces = interfaces || [];
       session.traffic.setAvailableInterfaces(session.cachedInterfaces);
       return session.cachedInterfaces;
     }).catch((err) => {
+      if ((session._interfacesRevision || 0) !== revision) {
+        return session.cachedInterfaces || [];
+      }
       // A failed refresh must be retryable. Do not retain either a rejected
       // promise or the pre-reconnect cache as an authoritative whitelist.
       session._ifacesFetch = null;

@@ -12,9 +12,11 @@ const { io: connectClient } = require('socket.io-client');
 const { JSDOM } = require('jsdom');
 
 const TrafficCollector = require('../src/collectors/traffic');
+const InterfaceStatusCollector = require('../src/collectors/interfaceStatus');
 const TopTalkersCollector = require('../src/collectors/talkers');
 const DhcpNetworksCollector = require('../src/collectors/dhcpNetworks');
 const { computeHealthStatus } = require('../src/health');
+const { applySessionInterfaceMetadata } = require('../src/interfaceMetadata');
 const { mayPromote } = require('../scripts/release-guard');
 
 function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -34,7 +36,8 @@ function streamRos() {
   ros.streams = [];
   ros.stream = (cmd, params) => {
     const stream = new EventEmitter();
-    stream.stop = () => {};
+    stream.stopCalls = 0;
+    stream.stop = () => { stream.stopCalls += 1; };
     ros.streams.push({ cmd, params, stream });
     return stream;
   };
@@ -80,7 +83,9 @@ test('Top Talkers unavailable has a distinct safe payload', () => {
   const ros = streamRos();
   const collector = new TopTalkersCollector({ ros, io: collectorIo(events), pollMs: 1000, state: {} });
   collector.start();
-  collector._stream.emit('error', new Error('unknown command'));
+  const stream = collector._stream;
+  stream.emit('error', new Error('unknown command'));
+  assert.equal(stream.stopCalls, 1, 'errored RouterOS stream is stopped before its reference is cleared');
   const payload = events.find(event => event.ev === 'talkers:update').data;
   assert.equal(payload.unavailable, true);
   assert.equal(payload.reason, 'Kid Control is unavailable');
@@ -147,13 +152,15 @@ test('interface picker preserves a non-disabled down interface and error is not 
   const start = app.indexOf('function _rebuildIfaceSelect');
   const end = app.indexOf("ifaceSelect.addEventListener('change'", start);
   const source = app.slice(start, end);
+  const namesStart = app.indexOf("socket.on('ifstatus:names'");
+  const namesSource = app.slice(namesStart, app.indexOf("socket.on('ifstatus:update'", namesStart));
   const dom = new JSDOM('<select id="iface"></select>');
   const handlers = {};
   const emitted = [];
   const context = {
     document: dom.window.document,
     ifaceSelect: dom.window.document.getElementById('iface'),
-    currentIf: 'wan', _ifaceSelectKey: '',
+    currentIf: 'wan', _ifaceSelectKey: '', _serverDefaultIf: '',
     socket: {
       on(name, handler) { handlers[name] = handler; },
       emit(name, payload) { emitted.push({ name, payload }); },
@@ -168,6 +175,17 @@ test('interface picker preserves a non-disabled down interface and error is not 
   assert.equal(context.ifaceSelect.value, 'wan');
   assert.match(context.ifaceSelect.options[0].textContent, /down/);
   assert.equal(emitted.length, 0, 'link-down alone is not a fallback');
+
+  // The router-wide heartbeat follows interfaces:list in real life. It must
+  // not regress the selector to active-only strings or emit a new fallback.
+  vm.runInNewContext(namesSource, context);
+  const afterList = emitted.length;
+  handlers['ifstatus:names']({
+    interfaces: [{ name: 'wan', running: false, disabled: false }, { name: 'lan', running: true, disabled: false }],
+  });
+  assert.deepEqual(Array.from(context.ifaceSelect.options, option => option.value), ['wan', 'lan']);
+  assert.match(context.ifaceSelect.options[0].textContent, /down/);
+  assert.equal(emitted.length, afterList, 'heartbeat does not create a spurious fallback');
 
   handlers['interfaces:error']({ ok: false, reason: 'unavailable' });
   assert.equal(context.ifaceSelect.options.length, 1);
@@ -208,6 +226,100 @@ test('invalid configured default keeps health at 503 with and without browser fa
     startupReady: true, rosConnected: true,
     state: { ...state, trafficConfigValid: true }, now,
   }).statusCode, 200);
+
+  const withoutTraffic = computeHealthStatus({
+    startupReady: true, rosConnected: true,
+    state: { trafficConfigValid: null, lastSystemTs: now }, now,
+    requiredCollectors: ['system'],
+  });
+  assert.equal(withoutTraffic.statusCode, 200);
+  assert.deepEqual(withoutTraffic.stale, []);
+});
+
+test('authoritative interface metadata prewarms selected and default status', () => {
+  const ros = streamRos();
+  const events = [];
+  const collector = new TrafficCollector({
+    ros, io: collectorIo(events), defaultIf: 'wan', historyMinutes: 1, state: {},
+  });
+  collector.setAvailableInterfaces([
+    { name: 'wan', running: false, disabled: false },
+    { name: 'lan', running: false, disabled: false },
+  ]);
+  assert.equal(collector.getInterfaceStatus('lan').running, false);
+  assert.equal(collector.getInterfaceStatus('lan').unavailable, false);
+  assert.equal(collector.lastWanStatus.ifName, 'wan');
+  assert.equal(collector.lastWanStatus.running, false);
+  assert.equal(events.filter(event => event.ev === 'wan:status').at(-1).data.running, false);
+
+  const socket = new EventEmitter();
+  socket.id = 'browser-1';
+  const statuses = [];
+  socket.on('traffic:status', status => statuses.push(status));
+  collector.bindSocket(socket);
+  socket.emit('traffic:select', { ifName: 'lan' });
+  assert.equal(statuses.at(-1).ifName, 'lan');
+  assert.equal(statuses.at(-1).running, false);
+  assert.equal(statuses.at(-1).unavailable, false, 'known down is not a pending status');
+
+  collector.setAvailableInterfaces([{ name: 'wan', running: true, disabled: false }]);
+  assert.equal(collector.lastWanStatus.running, true, 'default recovery replays authoritative state');
+  collector.stop();
+});
+
+test('runtime InterfaceStatus metadata reconciles one router traffic whitelist without reconnect', () => {
+  const ros = streamRos();
+  const trafficEvents = [];
+  const traffic = new TrafficCollector({
+    ros, io: collectorIo(trafficEvents), defaultIf: 'old-wan', historyMinutes: 1, state: {},
+  });
+  traffic.start();
+  const lists = [];
+  const session = { DEFAULT_IF: 'old-wan', traffic, cachedInterfaces: null, _interfacesRevision: 0 };
+  const otherCalls = [];
+  const otherSession = {
+    DEFAULT_IF: 'other-wan', cachedInterfaces: [{ name: 'other-wan' }], _interfacesRevision: 0,
+    traffic: { setAvailableInterfaces(interfaces) { otherCalls.push(interfaces); } },
+  };
+  const routerIo = { emit(event, data) { lists.push({ event, data }); } };
+  let callbackCalls = 0;
+  const status = new InterfaceStatusCollector({
+    ros, io: collectorIo([], 1), pollMs: 5000, state: {}, rid: 'router-a',
+    onInterfaceMetadata(interfaces) {
+      callbackCalls += 1;
+      applySessionInterfaceMetadata(session, routerIo, interfaces);
+    },
+  });
+
+  status._ifaces.set('old-wan', { name: 'old-wan', running: true, disabled: false });
+  status._buildAndEmit();
+  const oldStream = ros.streams.at(-1).stream;
+  assert.match(ros.streams.at(-1).params[0], /old-wan/);
+  status._buildAndEmit();
+  assert.equal(callbackCalls, 1, 'unchanged name/running/disabled metadata is deduplicated');
+
+  status._ifaces = new Map([['new-wan', { name: 'new-wan', running: false, disabled: false }]]);
+  status._buildAndEmit();
+  assert.equal(callbackCalls, 2);
+  assert.equal(oldStream.stopCalls, 1, 'old stream stops when its name leaves the authoritative set');
+  assert.deepEqual(lists.at(-1).data.interfaces.map(i => i.name), ['new-wan']);
+  assert.equal(lists.at(-1).data.defaultIf, 'old-wan');
+  assert.deepEqual(session.cachedInterfaces.map(i => i.name), ['new-wan']);
+  assert.deepEqual(otherSession.cachedInterfaces.map(i => i.name), ['other-wan']);
+  assert.equal(otherCalls.length, 0, 'router-a metadata cannot mutate router-b');
+  assert.equal(traffic._normalizeIfName('old-wan'), null, 'old name is rejected');
+  assert.equal(traffic._normalizeIfName('new-wan'), 'new-wan', 'new name is immediately selectable');
+
+  const socket = new EventEmitter();
+  socket.id = 'browser-a';
+  traffic.bindSocket(socket);
+  socket.emit('traffic:select', { ifName: 'new-wan' });
+  assert.match(ros.streams.at(-1).params[0], /new-wan/);
+  assert.doesNotMatch(ros.streams.at(-1).params[0], /old-wan/);
+  traffic.stop();
+
+  const indexSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  assert.match(indexSource, /onInterfaceMetadata:[\s\S]{0,500}applySessionInterfaceMetadata\(session, routerIo, interfaces\)/);
 });
 
 test('traffic health logging follows the combined config and stream state', () => {

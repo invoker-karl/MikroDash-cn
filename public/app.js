@@ -219,7 +219,7 @@ var dhcpSearch       = $('dhcpSearch');
 
 // ── State ──────────────────────────────────────────────────────────────────
 var autoScroll = true, logFilter = '', logLevel = '';
-var currentIf = '', windowSecs = 60, RIGHT_BUFFER_MS = 1000, _ifaceSelectKey = '';
+var currentIf = '', windowSecs = 60, RIGHT_BUFFER_MS = 1000, _ifaceSelectKey = '', _serverDefaultIf = '';
 var fwTab = 'filter', fwData = {};
 var connHistory = [], MAX_CONN_HIST = 60;
 var lastLanData = null;
@@ -1223,7 +1223,11 @@ function renderIfaceList(ifaces) {
 // page-scoped (issue #108).
 socket.on('ifstatus:names',function(data){
   var ifaces=data.interfaces||[];
-  _rebuildIfaceSelect(ifaces.filter(function(i){return i.running&&!i.disabled;}).map(function(i){return i.name;}));
+  // Keep the authoritative object shape. _rebuildIfaceSelect deliberately
+  // retains non-disabled link-down interfaces and needs running/disabled to
+  // render them accurately. The server default comes from interfaces:list;
+  // an ifstatus heartbeat must not silently replace it with a UI fallback.
+  _rebuildIfaceSelect(ifaces,_serverDefaultIf);
 });
 
 socket.on('ifstatus:update',function(data){
@@ -2377,7 +2381,8 @@ function _rebuildIfaceSelect(interfaces, defaultIf) {
 }
 socket.on('interfaces:list',function(data){
   if(data&&data.ok===false)return;
-  _rebuildIfaceSelect((data&&data.interfaces)||[],data&&data.defaultIf);
+  _serverDefaultIf=(data&&data.defaultIf)||'';
+  _rebuildIfaceSelect((data&&data.interfaces)||[],_serverDefaultIf);
 });
 // If the server failed to fetch the interface list, show a visible placeholder
 // in the dropdown rather than leaving it silently empty.
@@ -2595,6 +2600,7 @@ socket.on('connect',function(){
   document.body.classList.remove('is-disconnected');
   _sysMetaWritten=false;
   currentIf=''; allPoints=[];
+  _serverDefaultIf='';
   if(_rosCurrentlyDisconnected) {
     rosBanner.classList.add('show');
     document.body.classList.add('is-ros-disconnected');
