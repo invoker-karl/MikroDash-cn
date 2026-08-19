@@ -19,6 +19,7 @@
  */
 
 const { parseBps, bpsToMbps, clampPoll, stopStreamSafe } = require('./util');
+const { AuthoritativeSnapshotProbe, classifyRStreamPacket } = require('./rstreamSnapshot');
 
 // Cumulative counters carried by /interface/print. Which of these a row
 // actually returns depends on the interface type, so they are read defensively
@@ -124,6 +125,30 @@ class InterfaceStatusCollector {
     this._lastRatesSuccessTs = 0;
     this._lastPollErrLogTs = 0;
     this.lastPayload   = null;
+    this._metadataProbes = {
+      interfaces: new AuthoritativeSnapshotProbe({
+        cooldownMs: Math.max(1000, this.metaPollMs),
+        read: () => this.ros.write('/interface/print', [
+          `=.proplist=name,type,running,disabled,comment,mac-address,${IF_COUNTER_PROPS}`,
+        ]),
+        apply: rows => this._applyAuthoritativeMeta('interfaces', rows),
+        onError: error => { this.state.lastIfStatusErr = String(error && error.message ? error.message : error); },
+      }),
+      addresses: new AuthoritativeSnapshotProbe({
+        cooldownMs: Math.max(1000, this.metaPollMs),
+        read: () => this.ros.write('/ip/address/print', ['=.proplist=interface,address']),
+        apply: rows => this._applyAuthoritativeMeta('addresses', rows),
+        onError: error => { this.state.lastIfStatusErr = String(error && error.message ? error.message : error); },
+      }),
+      ethernet: new AuthoritativeSnapshotProbe({
+        cooldownMs: Math.max(1000, this.metaPollMs),
+        read: () => this.ros.write('/interface/ethernet/print', [
+          `=.proplist=name,${ETH_ERR_FIELDS.join(',')}`,
+        ]),
+        apply: rows => this._applyAuthoritativeMeta('ethernet', rows),
+        onError: error => { this.state.lastIfStatusErr = String(error && error.message ? error.message : error); },
+      }),
+    };
 
     this.ros.on('close', () => {
       this._stopMetaStreams();
@@ -227,6 +252,7 @@ class InterfaceStatusCollector {
   }
 
   _stopMetaStreams() {
+    for (const probe of Object.values(this._metadataProbes)) probe.invalidate();
     if (this._ifRestartTimer)   { clearTimeout(this._ifRestartTimer);   this._ifRestartTimer   = null; }
     if (this._addrRestartTimer) { clearTimeout(this._addrRestartTimer); this._addrRestartTimer = null; }
     if (this._ethRestartTimer)  { clearTimeout(this._ethRestartTimer);  this._ethRestartTimer  = null; }
@@ -258,7 +284,10 @@ class InterfaceStatusCollector {
       null
     );
     stream.on('data', (packet) => {
-      if (!packet || !packet.name || typeof packet.name !== 'string') return;
+      const classified = classifyRStreamPacket(packet);
+      if (classified.kind === 'idle') { this._metadataProbes.interfaces.onIdle(); return; }
+      if (classified.kind !== 'data' || !packet.name || typeof packet.name !== 'string') return;
+      this._metadataProbes.interfaces.noteRealRow();
       this._ifacesNext.set(packet.name, packet);
       this._scheduleMetaCommit();
     });
@@ -290,7 +319,10 @@ class InterfaceStatusCollector {
       null
     );
     stream.on('data', (packet) => {
-      if (!packet || !packet.interface || typeof packet.interface !== 'string') return;
+      const classified = classifyRStreamPacket(packet);
+      if (classified.kind === 'idle') { this._metadataProbes.addresses.onIdle(); return; }
+      if (classified.kind !== 'data' || !packet.interface || typeof packet.interface !== 'string') return;
+      this._metadataProbes.addresses.noteRealRow();
       if (!this._addrsNext.has(packet.interface)) this._addrsNext.set(packet.interface, []);
       this._addrsNext.get(packet.interface).push(packet.address || '');
       this._scheduleMetaCommit();
@@ -326,7 +358,10 @@ class InterfaceStatusCollector {
       null
     );
     stream.on('data', (packet) => {
-      if (!packet || !packet.name || typeof packet.name !== 'string') return;
+      const classified = classifyRStreamPacket(packet);
+      if (classified.kind === 'idle') { this._metadataProbes.ethernet.onIdle(); return; }
+      if (classified.kind !== 'data' || !packet.name || typeof packet.name !== 'string') return;
+      this._metadataProbes.ethernet.noteRealRow();
       this._ethNext.set(packet.name, packet);
       this._scheduleMetaCommit();
     });
@@ -349,6 +384,29 @@ class InterfaceStatusCollector {
   _scheduleMetaCommit() {
     clearTimeout(this._metaDebounce);
     this._metaDebounce = setTimeout(() => this._commitMeta(), 300);
+  }
+
+  _applyAuthoritativeMeta(kind, rows) {
+    if (kind === 'interfaces') {
+      this._ifaces = new Map((rows || []).filter(r => r && r.name).map(r => [r.name, r]));
+      this._computeDeltas();
+      for (const name of [...this._streamRates.keys()]) {
+        if (!this._ifaces.has(name)) this._streamRates.delete(name);
+      }
+      this._startMonitorStream();
+    } else if (kind === 'addresses') {
+      const addresses = new Map();
+      for (const row of rows || []) {
+        if (!row || !row.interface) continue;
+        if (!addresses.has(row.interface)) addresses.set(row.interface, []);
+        addresses.get(row.interface).push(row.address || '');
+      }
+      this._addrs = addresses;
+    } else if (kind === 'ethernet') {
+      this._eth = new Map((rows || []).filter(r => r && r.name).map(r => [r.name, r]));
+    }
+    this.state.lastIfStatusErr = null;
+    this._buildAndEmit();
   }
 
   _commitMeta() {
@@ -425,7 +483,7 @@ class InterfaceStatusCollector {
 
   _startMonitorStream() {
     const names = [...this._ifaces.keys()];
-    if (!names.length) return;
+    if (!names.length) { this._stopMonitorStream(); return; }
     if (!this.streamMode) return; // poll mode — rates fetched by _pollRatesOnce
     const key = names.slice().sort().join(',');
     if (this._monitorStream && this._monitorIfaceKey === key) return;
@@ -523,8 +581,6 @@ class InterfaceStatusCollector {
   // ── build + emit ──────────────────────────────────────────────────────────
 
   _buildAndEmit() {
-    if (!this._ifaces.size) return;
-
     const now = Date.now();
     const interfaces = [];
 

@@ -95,10 +95,8 @@ class RoutingCollector {
   }
 
   async _safeWrite(cmd, args) {
-    try {
-      const r = await this.ros.write(cmd, args || []);
-      return Array.isArray(r) ? r : [];
-    } catch (_) { return []; }
+    const r = await this.ros.write(cmd, args || []);
+    return Array.isArray(r) ? r : [];
   }
 
   _parseUptime(s) {
@@ -280,7 +278,7 @@ class RoutingCollector {
 
   // ── emit ──────────────────────────────────────────────────────────────────
 
-  _emit(peers) {
+  _emit(peers, clearError = true) {
     const now       = Date.now();
     const allRoutes = Array.from(this._routes.values());
 
@@ -312,7 +310,7 @@ class RoutingCollector {
     };
     this.lastPayload          = payload;
     this.state.lastRoutingTs  = now;
-    this.state.lastRoutingErr = null;
+    if (clearError) this.state.lastRoutingErr = null;
     this.io.to('page-routing').emit('routing:update', payload);
   }
 
@@ -320,31 +318,67 @@ class RoutingCollector {
 
   async _loadRoutes() {
     const proplist = '=.proplist=.id,dst-address,gateway,distance,comment,.flags,active,static,dynamic,connect,bgp,ospf,disabled';
-    const [v4rows, v6rows] = await Promise.all([
+    const [v4, v6] = await Promise.allSettled([
       this._safeWrite('/ip/route/print',   [proplist]),
       this._safeWrite('/ipv6/route/print', [proplist]),
     ]);
-    this._routes.clear();
-    for (const r of v4rows) {
-      if (r['.id']) this._routes.set(r['.id'], this._mapRoute(r, 'ipv4'));
+    const errors = [];
+    if (v4.status === 'fulfilled') {
+      for (const key of [...this._routes.keys()]) if (!key.startsWith('v6:')) this._routes.delete(key);
+      for (const r of v4.value) {
+        if (r['.id']) this._routes.set(r['.id'], this._mapRoute(r, 'ipv4'));
+      }
+    } else {
+      errors.push(String(v4.reason && v4.reason.message ? v4.reason.message : v4.reason));
     }
-    for (const r of v6rows) {
-      if (r['.id']) this._routes.set('v6:' + r['.id'], this._mapRoute(r, 'ipv6'));
+    if (v6.status === 'fulfilled') {
+      for (const key of [...this._routes.keys()]) if (key.startsWith('v6:')) this._routes.delete(key);
+      for (const r of v6.value) {
+        if (r['.id']) this._routes.set('v6:' + r['.id'], this._mapRoute(r, 'ipv6'));
+      }
+    } else {
+      errors.push(String(v6.reason && v6.reason.message ? v6.reason.message : v6.reason));
     }
+    if (errors.length) this.state.lastRoutingErr = errors.join('; ');
+    return errors.length === 0;
   }
 
   async _loadBgpSessions() {
     // Try v7 session endpoint first, fall back to legacy peer endpoint
-    let rows = await this._safeWrite('/routing/bgp/session/print', [
-      '=.proplist=name,remote.address,remote.as,local.role,established,uptime,' +
-      'prefix-count,updates-sent,updates-received,state,last-notification,' +
-      'inactive-reason,hold-time,keepalive-time',
-    ]);
-    if (!rows.length) {
-      rows = await this._safeWrite('/routing/bgp/peer/print', [
-        '=.proplist=name,remote-address,remote-as,state,uptime,' +
-        'prefix-count,updates-sent,updates-received,last-error',
+    let rows;
+    try {
+      rows = await this._safeWrite('/routing/bgp/session/print', [
+        '=.proplist=name,remote.address,remote.as,local.role,established,uptime,' +
+        'prefix-count,updates-sent,updates-received,state,last-notification,' +
+        'inactive-reason,hold-time,keepalive-time',
       ]);
+      if (!rows.length) {
+        try {
+          rows = await this._safeWrite('/routing/bgp/peer/print', [
+            '=.proplist=name,remote-address,remote-as,state,uptime,' +
+            'prefix-count,updates-sent,updates-received,last-error',
+          ]);
+        } catch (_) {
+          // The v7 endpoint succeeded authoritatively with no sessions. A
+          // failed optional legacy probe cannot turn that success into stale.
+          rows = [];
+        }
+      }
+    } catch (error) {
+      const msg = String(error && error.message ? error.message : error);
+      if (!/unknown command|no such command|no such item/i.test(msg)) {
+        this.state.lastRoutingErr = msg;
+        return false;
+      }
+      try {
+        rows = await this._safeWrite('/routing/bgp/peer/print', [
+          '=.proplist=name,remote-address,remote-as,state,uptime,' +
+          'prefix-count,updates-sent,updates-received,last-error',
+        ]);
+      } catch (fallbackError) {
+        this.state.lastRoutingErr = String(fallbackError && fallbackError.message ? fallbackError.message : fallbackError);
+        return false;
+      }
     }
     this._sessions.clear();
     this._sessionsFp = '';
@@ -352,17 +386,89 @@ class RoutingCollector {
       const key = this._peerKey(r);
       if (key && key !== '?') this._sessions.set(key, r);
     }
+    return true;
   }
 
   async _loadPeerCfg() {
-    const rows = await this._safeWrite('/routing/bgp/peer/print', [
-      '=.proplist=name,remote.address,remote-address,remote.as,remote-as,comment',
-    ]);
+    let rows;
+    try {
+      rows = await this._safeWrite('/routing/bgp/peer/print', [
+        '=.proplist=name,remote.address,remote-address,remote.as,remote-as,comment',
+      ]);
+    } catch (error) {
+      this.state.lastRoutingErr = String(error && error.message ? error.message : error);
+      return false;
+    }
     this._peerCfg.clear();
     for (const p of rows) {
       const addr = p['remote.address'] || p['remote-address'] || '';
       if (addr) this._peerCfg.set(addr, p);
     }
+    return true;
+  }
+
+  async _reloadIPv6Routes() {
+    try {
+      const rows = await this._safeWrite('/ipv6/route/print', [
+        '=.proplist=.id,dst-address,gateway,distance,comment,.flags,active,static,dynamic,connect,bgp,ospf,disabled',
+      ]);
+      const next = new Map();
+      for (const r of rows) {
+        if (r['.id']) next.set('v6:' + r['.id'], this._mapRoute(r, 'ipv6'));
+      }
+      for (const key of [...this._routes.keys()]) {
+        if (key.startsWith('v6:')) this._routes.delete(key);
+      }
+      for (const [key, route] of next) this._routes.set(key, route);
+      return true;
+    } catch (error) {
+      this.state.lastRoutingErr = String(error && error.message ? error.message : error);
+      return false;
+    }
+  }
+
+  _scheduleRouteRestart() {
+    if (!this.ros.connected || this._routeRestartTimer) return;
+    this._routeRestarting = true;
+    this._routeRestartTimer = setTimeout(async () => {
+      this._routeRestartTimer = null;
+      if (!this.ros.connected) { this._routeRestarting = false; return; }
+      const ok = await this._loadRoutes();
+      this._emit(null, ok);
+      this._routeRestarting = false;
+      if (ok) this._startRouteStream();
+      else this._scheduleRouteRestart();
+    }, this._restartDelayMs);
+  }
+
+  _scheduleIPv6Restart() {
+    if (!this.ros.connected || this._ipv6RestartTimer) return;
+    this._ipv6Restarting = true;
+    this._ipv6RestartTimer = setTimeout(async () => {
+      this._ipv6RestartTimer = null;
+      if (!this.ros.connected) { this._ipv6Restarting = false; return; }
+      const ok = await this._reloadIPv6Routes();
+      this._emit(null, ok);
+      this._ipv6Restarting = false;
+      if (ok) this._startIPv6Stream();
+      else this._scheduleIPv6Restart();
+    }, this._restartDelayMs);
+  }
+
+  _scheduleBgpRestart() {
+    if (!this.ros.connected || this._bgpRestartTimer) return;
+    this._bgpRestarting = true;
+    this._bgpRestartTimer = setTimeout(async () => {
+      this._bgpRestartTimer = null;
+      if (!this.ros.connected) { this._bgpRestarting = false; return; }
+      const sessionsOk = await this._loadBgpSessions();
+      const cfgOk = await this._loadPeerCfg();
+      const ok = sessionsOk && cfgOk;
+      this._emit(this._buildPeers(), ok);
+      this._bgpRestarting = false;
+      if (ok) this._startBgpStream();
+      else this._scheduleBgpRestart();
+    }, this._restartDelayMs);
   }
 
   // ── stream management ─────────────────────────────────────────────────────
@@ -376,20 +482,10 @@ class RoutingCollector {
           console.error('%s', this._lbl + ' route stream error:', msg);
           this.state.lastRoutingErr = msg;
           this._stopRouteStream();
-          if (this.ros.connected && !this._routeRestarting) {
-            this._routeRestarting = true;
-            this._routeRestartTimer = setTimeout(async () => {
-              this._routeRestarting    = false;
-              this._routeRestartTimer  = null;
-              if (!this.ros.connected) return;
-              await this._loadRoutes();
-              this._emit(null);
-              this._startRouteStream();
-            }, this._restartDelayMs);
-          }
+          this._scheduleRouteRestart();
           return;
         }
-        if (data) {
+        if (data && !Array.isArray(data)) {
           this._applyRouteDelta(data);
           if (!this._routeEmitTimer) {
             this._routeEmitTimer = setTimeout(() => {
@@ -420,27 +516,10 @@ class RoutingCollector {
           const msg = err && err.message ? err.message : String(err);
           console.error('%s', this._lbl + ' IPv6 route stream error:', msg);
           this._stopIPv6Stream();
-          if (this.ros.connected && !this._ipv6Restarting) {
-            this._ipv6Restarting = true;
-            this._ipv6RestartTimer = setTimeout(async () => {
-              this._ipv6Restarting   = false;
-              this._ipv6RestartTimer = null;
-              if (!this.ros.connected) return;
-              const rows = await this._safeWrite('/ipv6/route/print', [
-                '=.proplist=.id,dst-address,gateway,distance,comment,.flags,active,static,dynamic,connect,bgp,ospf,disabled',
-              ]);
-              // Remove stale v6 entries then repopulate
-              for (const k of this._routes.keys()) { if (k.startsWith('v6:')) this._routes.delete(k); }
-              for (const r of rows) {
-                if (r['.id']) this._routes.set('v6:' + r['.id'], this._mapRoute(r, 'ipv6'));
-              }
-              this._emit(null);
-              this._startIPv6Stream();
-            }, this._restartDelayMs);
-          }
+          this._scheduleIPv6Restart();
           return;
         }
-        if (data) {
+        if (data && !Array.isArray(data)) {
           this._applyRouteDelta(data, 'ipv6');
           if (!this._ipv6EmitTimer) {
             this._ipv6EmitTimer = setTimeout(() => {
@@ -472,26 +551,15 @@ class RoutingCollector {
           console.error('%s', this._lbl + ' BGP session stream error:', msg);
           this.state.lastRoutingErr = msg;
           this._stopBgpStream();
-          if (this.ros.connected && !this._bgpRestarting) {
-            this._bgpRestarting = true;
-            this._bgpRestartTimer = setTimeout(async () => {
-              this._bgpRestarting    = false;
-              this._bgpRestartTimer  = null;
-              if (!this.ros.connected) return;
-              await this._loadBgpSessions();
-              await this._loadPeerCfg();
-              this._emit(this._buildPeers());
-              this._startBgpStream();
-            }, this._restartDelayMs);
-          }
+          this._scheduleBgpRestart();
           return;
         }
-        if (data) {
+        if (data && !Array.isArray(data)) {
           const changed = this._applySessionDelta(data);
           if (changed) {
             // Reload peer config on state changes so new peers get their descriptions
-            await this._loadPeerCfg();
-            this._emit(this._buildPeers());
+            const cfgOk = await this._loadPeerCfg();
+            this._emit(this._buildPeers(), cfgOk);
           }
         }
       });
@@ -541,10 +609,10 @@ class RoutingCollector {
     // Routing page becomes visible (_updateRoutingStreams() calls resume()).
     if (!this.ros.connected) return;
     try {
-      await this._loadRoutes();
-      await this._loadBgpSessions();
-      await this._loadPeerCfg();
-      this._emit(this._buildPeers());
+      const routesOk = await this._loadRoutes();
+      const sessionsOk = await this._loadBgpSessions();
+      const cfgOk = await this._loadPeerCfg();
+      this._emit(this._buildPeers(), routesOk && sessionsOk && cfgOk);
     } catch (e) {
       // Non-fatal — lastPayload stays null; resume() retries when page opens.
     }
@@ -555,20 +623,18 @@ class RoutingCollector {
     this._poll.stop();
     this._stopAllStreams();
     this._stopHeartbeat();
-    this._routes.clear();
-    this._sessions.clear();
-    this._sessionsFp = '';
-    this._peerCfg.clear();
+    // Preserve last-good snapshots while idle or across a transient resume
+    // failure. Successful ordinary /print results, including [], replace them.
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 
   async _pollOnce() {
     if (!this.ros.connected) return;
     try {
-      await this._loadRoutes();
-      await this._loadBgpSessions();
-      await this._loadPeerCfg();
-      this._emit(this._buildPeers());
+      const routesOk = await this._loadRoutes();
+      const sessionsOk = await this._loadBgpSessions();
+      const cfgOk = await this._loadPeerCfg();
+      this._emit(this._buildPeers(), routesOk && sessionsOk && cfgOk);
     } catch (e) {
       console.error('%s', this._lbl + ' poll error:', e && e.message ? e.message : e);
     }
@@ -581,11 +647,11 @@ class RoutingCollector {
     if (!this.ros.connected) return;
     this._resuming = true;
     try {
-      await this._loadRoutes();
-      await this._loadBgpSessions();
-      await this._loadPeerCfg();
+      const routesOk = await this._loadRoutes();
+      const sessionsOk = await this._loadBgpSessions();
+      const cfgOk = await this._loadPeerCfg();
       if (!this._resuming) return; // suspend() was called during the load
-      this._emit(this._buildPeers());
+      this._emit(this._buildPeers(), routesOk && sessionsOk && cfgOk);
       if (this.streamMode) {
         this._startRouteStream();
         this._startIPv6Stream();

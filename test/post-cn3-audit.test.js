@@ -34,6 +34,7 @@ function streamRos() {
   const ros = new EventEmitter();
   ros.connected = true;
   ros.streams = [];
+  ros.write = async () => [];
   ros.stream = (cmd, params) => {
     const stream = new EventEmitter();
     stream.stopCalls = 0;
@@ -55,7 +56,7 @@ test('Top Talkers commits non-empty to empty transitions in stream and poll mode
   stream.emit('data', { name: 'phone', 'mac-address': 'AA', 'rate-up': '1000', 'rate-down': '2000' });
   await wait(330);
   stream.emit('data', []);
-  await wait(330);
+  await wait(30);
   const updates = events.filter(event => event.ev === 'talkers:update');
   assert.equal(updates.length, 2);
   assert.equal(updates[0].data.devices.length, 1);

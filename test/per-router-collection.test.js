@@ -850,8 +850,8 @@ test('a wifi command error does still fall back to the legacy API', async () => 
 });
 
 test('a router mis-latched onto the legacy API heals itself', async () => {
-  // Existing installs are already stuck on mode "wireless" from the empty-table
-  // bug. Without a reverse fallback they stay broken until the process restarts.
+  // A session currently using legacy mode must still recover when RouterOS
+  // explicitly rejects that command tree.
   const cmds = [];
   const c = wlCollector(async (cmd) => {
     cmds.push(cmd);

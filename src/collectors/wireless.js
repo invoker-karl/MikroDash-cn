@@ -1,6 +1,7 @@
 'use strict';
 const dns = require('dns').promises;
 const { clampPoll, stopStreamSafe, createPollLoop } = require('./util');
+const { AuthoritativeSnapshotProbe, classifyRStreamPacket, classifySnapshotError } = require('./rstreamSnapshot');
 
 /**
  * Wireless collector — streams /interface/wifi/registration-table/print (wifi
@@ -83,6 +84,20 @@ class WirelessCollector {
     this._debounces  = { wifi: null, wireless: null, capsman: null };
     this._restarting = { wifi: false, wireless: false, capsman: false };
     this._restartTimers = { wifi: null, wireless: null, capsman: null };
+    this._capsmanProbeTimer = null;
+    this._unsupportedStacks = new Set();
+    this._snapshotProbes = {};
+    for (const type of Object.keys(WL_ENDPOINTS)) {
+      this._snapshotProbes[type] = new AuthoritativeSnapshotProbe({
+        cooldownMs: Math.max(1000, this.pollMs),
+        read: () => this.ros.write(WL_ENDPOINTS[type]),
+        apply: rows => {
+          this.state.lastWirelessErr = null;
+          this._onBatch(type, rows);
+        },
+        onError: (error, classification) => this._handleSnapshotError(type, error, classification),
+      });
+    }
   }
 
   resolveName(mac, ip) {
@@ -306,8 +321,11 @@ class WirelessCollector {
   async _refreshSsids() {
     if (this._ssidEndpoint === null) return;          // no stack answered; stop asking
     const order = this._ssidEndpoint
-      ? [this._ssidEndpoint]
+      ? [this._ssidEndpoint, ...Object.values(SSID_ENDPOINTS).filter(e => e !== this._ssidEndpoint)]
       : [SSID_ENDPOINTS.wifi, SSID_ENDPOINTS.wireless];
+
+    let unsupported = 0;
+    let transientError = null;
 
     for (const endpoint of order) {
       try {
@@ -318,13 +336,18 @@ class WirelessCollector {
         this._ssidsManagedElsewhere = managedElsewhere;
         return;
       } catch (e) {
-        // Try the next stack. Only when every one has failed do we give up, and
-        // only for this cycle unless nothing has ever worked.
+        const classification = classifySnapshotError(e);
+        if (classification.kind === 'unsupported') unsupported++;
+        else transientError = classification.message;
       }
     }
-    if (!this._ssidEndpoint) {
+    if (unsupported === order.length) {
       this._ssidEndpoint = null;                      // neither stack exists here
       this._ssids = [];
+    } else if (transientError) {
+      // Preserve the last good configuration and retry next cadence. A timeout
+      // is not proof that the wireless subsystem is absent.
+      this.state.lastWirelessErr = transientError;
     }
   }
 
@@ -427,25 +450,19 @@ class WirelessCollector {
 
   _onBatch(type, records) {
     if (type === 'wifi') {
-      if (this.mode === null) {
-        if (records.length > 0) {
-          this.mode = 'wifi';
-          if (this._debug) console.log('%s', this._lbl + ' mode latched: wifi');
-        } else {
-          // Empty first batch — wifi API not populated, fall through to legacy
-          this.mode = 'wireless';
-          if (this._debug) console.log('%s', this._lbl + ' mode latched: wireless (wifi returned empty)');
-          this._stopStream('wifi');
-          this._startDelivery('wireless');
-          return;
-        }
-      }
+      // A successful command proves this stack exists even when no station is
+      // associated. Only an explicit unsupported error may select a fallback.
+      this._unsupportedStacks.delete('wifi');
+      this.mode = 'wifi';
       this._lastWifiBatch = records;
       this._processMainBatch(records);
     } else if (type === 'wireless') {
+      this._unsupportedStacks.delete('wireless');
+      this.mode = 'wireless';
       this._lastWifiBatch = records;
       this._processMainBatch(records);
     } else if (type === 'capsman') {
+      this._unsupportedStacks.delete('capsman');
       this._lastCapsmanBatch = records.map(c => ({ ...c, _capsman: true }));
       this._updateCapsmanClients();
       this._emitClients();
@@ -467,24 +484,14 @@ class WirelessCollector {
         // the poll path had none, so a router pointed at a command tree it does
         // not have just error-logged every interval, forever.
         //
-        // Both directions matter. wifi->wireless mirrors the stream. The reverse
-        // rescues a board that latched legacy from an EMPTY wifi table — the
-        // deliberate heuristic in _onBatch, which is right for a RouterOS 7 box
-        // whose radios really are legacy, but wrong for a wifi-only board such as
-        // a hAP ac2 with its radios disabled, where wifi answers empty and
-        // /interface/wireless does not exist at all. That board now heals itself
-        // on the first error instead of staying blank until a restart.
+        // Both directions matter, but fallback is allowed only after RouterOS
+        // explicitly rejects the active command tree. A successful empty table
+        // means "this stack exists and currently has no clients", so it keeps
+        // the current mode. Tracking explicit rejections also prevents two
+        // absent command trees from bouncing wifi <-> wireless forever.
         if (/no such command|unknown command/i.test(msg)) {
-          const fallback = type === 'wifi' ? 'wireless' : (type === 'wireless' ? 'wifi' : null);
-          this._stopStream(type);
-          if (fallback) {
-            if (this._debug) {
-              console.log('%s', this._lbl + ` ${type} unavailable (${msg}); switching to ${fallback}`);
-            }
-            this.mode = fallback;
-            this._startDelivery(fallback);
-          }
-          continue;   // capsman simply is not on this board — stop asking.
+          this._handleSnapshotError(type, e, classifySnapshotError(e));
+          continue;
         }
         console.error('%s', this._lbl + ` ${type} poll error:`, msg);
       }
@@ -506,14 +513,10 @@ class WirelessCollector {
     const stream = this.ros.stream([endpoints[type], `=interval=${intervalSec}`], null);
     this._streams[type] = stream;
     stream.on('data', (pkt) => {
-      // RStream emits [] when the table produced no rows this interval — deliver
-      // an empty batch so departed clients age out instead of persisting forever
-      // (and so an empty wifi table can still latch legacy-wireless fallback).
-      if (Array.isArray(pkt)) {
-        if (pkt.length === 0 && !this._batches[type].length && !this._debounces[type]) this._onBatch(type, []);
-        return;
-      }
-      if (!pkt || typeof pkt !== 'object') return;
+      const classified = classifyRStreamPacket(pkt);
+      if (classified.kind === 'idle') { this._snapshotProbes[type].onIdle(); return; }
+      if (classified.kind !== 'data') return;
+      this._snapshotProbes[type].noteRealRow();
       this._batches[type].push(pkt);
       if (this._debounces[type]) return;
       this._debounces[type] = setTimeout(() => { // codeql[js/resource-exhaustion]
@@ -525,14 +528,9 @@ class WirelessCollector {
     });
     stream.on('error', (err) => {
       const msg = err && err.message ? err.message : String(err);
-      // wifi "unknown command" → router uses legacy wireless API
-      if (type === 'wifi' && (msg.includes('unknown command') || msg.includes('no such'))) {
-        this._stopStream('wifi');
-        if (this.mode === null) {
-          this.mode = 'wireless';
-          if (this._debug) console.log('%s', this._lbl + ' mode latched: wireless (wifi command unknown)');
-          this._startDelivery('wireless');
-        }
+      const classification = classifySnapshotError(err);
+      if (classification.kind === 'unsupported') {
+        this._handleSnapshotError(type, err, classification);
         return;
       }
       console.error('%s', this._lbl, `${type} stream error:`, msg);
@@ -551,6 +549,7 @@ class WirelessCollector {
   }
 
   _stopStream(type) {
+    this._snapshotProbes[type].invalidate();
     this._pollTypes.delete(type);
     if (!this._pollTypes.size) this._poll.stop();
     if (this._debounces[type])     { clearTimeout(this._debounces[type]);     this._debounces[type] = null; }
@@ -560,12 +559,34 @@ class WirelessCollector {
     this._batches[type] = [];
   }
 
+  _handleSnapshotError(type, error, classification = classifySnapshotError(error)) {
+    this.state.lastWirelessErr = classification.message;
+    if (classification.kind !== 'unsupported') return;
+    this._stopStream(type);
+    if (type === 'capsman') {
+      this._unsupportedStacks.add(type);
+      this._capsmanAvailable = false;
+      return;
+    }
+    this._unsupportedStacks.add(type);
+    const fallback = type === 'wifi' ? 'wireless' : 'wifi';
+    if (this._unsupportedStacks.has(fallback)) {
+      // Both command trees are explicitly absent. Stay stopped until reconnect
+      // instead of bouncing forever between two unsupported endpoints.
+      this.mode = null;
+      return;
+    }
+    this.mode = fallback;
+    this._startDelivery(fallback);
+  }
+
   // ── state reset ───────────────────────────────────────────────────────────
 
   _resetState() {
     this.mode              = null;
     this._lastFp           = '';
     this._capsmanAvailable = false;
+    this._unsupportedStacks.clear();
     // SSID list: configuration, refreshed on a slow cadence of its own.
     // undefined = not probed yet, null = no wireless stack answered.
     this._ssidEndpoint = undefined;
@@ -579,6 +600,7 @@ class WirelessCollector {
     this._knownClients.clear();
     this._absentTicks.clear();
     if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null; }
+    if (this._capsmanProbeTimer) { clearTimeout(this._capsmanProbeTimer); this._capsmanProbeTimer = null; }
   }
 
   async _probeCAPsMAN() {
@@ -592,14 +614,21 @@ class WirelessCollector {
         this._startDelivery('capsman');
       }
     } catch (e) {
-      const msg = String(e && e.message ? e.message : e);
-      if (msg.includes('unknown command') || msg.includes('no such')) {
+      const classification = classifySnapshotError(e);
+      const msg = classification.message;
+      if (classification.kind === 'unsupported') {
         this._capsmanAvailable = false;
         // Nothing else is reset here. This probe owns _capsmanAvailable and
         // nothing more: the SSID list comes from a different endpoint on its own
         // cadence, and clearing it from this catch blanked the card on every
         // router with no /caps-man menu.
         if (this._debug) console.log('%s', this._lbl + ' capsman probe: not available on this router');
+      } else if (!this._capsmanProbeTimer) {
+        this.state.lastWirelessErr = msg;
+        this._capsmanProbeTimer = setTimeout(() => {
+          this._capsmanProbeTimer = null;
+          if (this.ros.connected) this._probeCAPsMAN().catch(() => {});
+        }, Math.max(5000, this.pollMs));
       }
       // transient errors leave _capsmanAvailable = false and re-probe on reconnect
     }
@@ -630,6 +659,7 @@ class WirelessCollector {
     this._stopStream('capsman');
     if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null; }
     if (this._ssidTimer) { clearInterval(this._ssidTimer); this._ssidTimer = null; }
+    if (this._capsmanProbeTimer) { clearTimeout(this._capsmanProbeTimer); this._capsmanProbeTimer = null; }
   }
 
   /* SSIDs are configuration, so they get their own slow cadence rather than

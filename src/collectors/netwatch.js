@@ -85,7 +85,7 @@ class NetwatchCollector {
           }
           return;
         }
-        if (!data) return;
+        if (!data || Array.isArray(data)) return; // RStream synthetic idle
         const id = data['.id'] || data.id;
         if (!id) return;
         if (data['.dead'] === 'true' || data['.dead'] === true) {

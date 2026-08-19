@@ -15,6 +15,7 @@
  * RouterOS does no work when no clients are connected.
  */
 const { clampPoll, stopStreamSafe, createPollLoop } = require('./util');
+const { AuthoritativeSnapshotProbe, classifyRStreamPacket, classifySnapshotError } = require('./rstreamSnapshot');
 
 class VpnCollector {
   constructor({ ros, io, pollMs, state, rid, streamMode }) {
@@ -56,6 +57,14 @@ class VpnCollector {
     this._otherEmpties   = 0;
     this._pppAvailable   = true;   // false once the router says "no such command"
     this._ipsecAvailable = true;
+    this._counterSnapshotProbe = new AuthoritativeSnapshotProbe({
+      cooldownMs: Math.max(1000, this.pollMs),
+      read: () => this.ros.write('/interface/wireguard/peers/print', ['=detail=']),
+      apply: rows => this._replacePeers(rows),
+      onError: error => {
+        this.state.lastVpnErr = String(error && error.message ? error.message : error);
+      },
+    });
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
@@ -177,6 +186,7 @@ class VpnCollector {
 
   _onCounterRecord(row) {
     const key = row['public-key'] || this._peerName(row);
+    if (!key || key === '?') return;
     const existing = this._peers.get(key);
     if (existing) {
       this._peers.set(key, {
@@ -197,11 +207,23 @@ class VpnCollector {
     this._scheduleEmit();
   }
 
+  _replacePeers(rows) {
+    const next = new Map();
+    for (const row of rows || []) {
+      if (!row || typeof row !== 'object') continue;
+      const key = row['public-key'] || this._peerName(row);
+      if (key && key !== '?') next.set(key, row);
+    }
+    this._peers = next;
+    this.state.lastVpnErr = null;
+    this._emit();
+  }
+
   async _pollCountersOnce() {
     if (!this.ros.connected) return;
     try {
       const rows = (await this.ros.write('/interface/wireguard/peers/print', ['=detail='])) || [];
-      for (const r of rows) this._onCounterRecord(r);   // same per-record path
+      this._replacePeers(rows);
     } catch (e) {
       console.error('%s', this._lbl + ' counter poll error:', e && e.message ? e.message : e);
     }
@@ -218,7 +240,10 @@ class VpnCollector {
     );
     this._counterStream = stream;
     stream.on('data', (pkt) => {
-      if (!pkt || typeof pkt !== 'object' || Array.isArray(pkt)) return;
+      const classified = classifyRStreamPacket(pkt);
+      if (classified.kind === 'idle') { this._counterSnapshotProbe.onIdle(); return; }
+      if (classified.kind !== 'data') return;
+      this._counterSnapshotProbe.noteRealRow();
       this._onCounterRecord(pkt);
     });
     stream.on('error', (err) => {
@@ -238,6 +263,7 @@ class VpnCollector {
   }
 
   _stopCounterStream() {
+    this._counterSnapshotProbe.invalidate();
     this._counterPoll.stop();
     if (this._counterRestartTimer) { clearTimeout(this._counterRestartTimer); this._counterRestartTimer = null; }
     this._counterRestarting = false;
@@ -253,17 +279,12 @@ class VpnCollector {
   async _loadInitial() {
     try {
       const rows = await this.ros.write('/interface/wireguard/peers/print', ['=detail=']);
-      this._peers.clear();
-      for (const p of (rows || [])) {
-        const key = p['public-key'] || this._peerName(p);
-        this._peers.set(key, p);
-      }
+      this._replacePeers(rows || []);
       if (!this._debuggedOnce && this._peers.size > 0) {
         const ifaces = [...new Set([...this._peers.values()].map(p => p.interface).filter(Boolean))].join(', ') || '?';
         console.log('%s', this._lbl, `${this._peers.size} WireGuard peer(s) found on interfaces: ${ifaces}`);
         this._debuggedOnce = true;
       }
-      this._emit();
     } catch (e) {
       console.error('%s', this._lbl + ' initial load failed:', e && e.message ? e.message : e);
     }
@@ -321,14 +342,15 @@ class VpnCollector {
   // not re-probed on every cycle.
   async _loadOtherVpns() {
     const tryRead = async (path, flag) => {
-      if (this[flag] === false) return [];
+      if (this[flag] === false) return { ok: false, unsupported: true, rows: [] };
       try {
         const rows = await this.ros.write(path, []);
-        return (rows || []).filter(r => r && Object.keys(r).length);
+        return { ok: true, rows: (rows || []).filter(r => r && Object.keys(r).length) };
       } catch (e) {
-        const msg = String((e && e.message) || e).toLowerCase();
-        if (msg.includes('no such') || msg.includes('unknown command')) this[flag] = false;
-        return [];
+        const classification = classifySnapshotError(e);
+        if (classification.kind === 'unsupported') this[flag] = false;
+        else this.state.lastVpnErr = classification.message;
+        return { ok: false, unsupported: classification.kind === 'unsupported', rows: [] };
       }
     };
     const [ppp, peers, sas] = await Promise.all([
@@ -336,8 +358,8 @@ class VpnCollector {
       tryRead('/ip/ipsec/active-peers/print', '_ipsecAvailable'),
       tryRead('/ip/ipsec/installed-sa/print', '_ipsecAvailable'),
     ]);
-    this._ppp   = VpnCollector.parsePppSessions(ppp);
-    this._ipsec = VpnCollector.parseIpsecPeers(peers, sas);
+    if (ppp.ok) this._ppp = VpnCollector.parsePppSessions(ppp.rows);
+    if (peers.ok && sas.ok) this._ipsec = VpnCollector.parseIpsecPeers(peers.rows, sas.rows);
   }
 
   // Poll cadence for the non-WireGuard tables. Fast while something is up, slow
@@ -392,8 +414,9 @@ class VpnCollector {
           }
           return;
         }
-        if (!data) return;
+        if (!data || Array.isArray(data)) return;
         const key = data['public-key'] || this._peerName(data);
+        if (!key || key === '?') return;
         if (data['.dead'] === 'true' || data['.dead'] === true) {
           this._peers.delete(key);
           this._prev.delete(key);

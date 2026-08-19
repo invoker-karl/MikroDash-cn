@@ -66,9 +66,17 @@ class ArpCollector {
     try {
       const items = await this.ros.write('/ip/arp/print',
         ['=.proplist=address,mac-address,interface']);
-      this.byIP.clear();
-      this.byMAC.clear();
-      for (const a of (items || [])) this._applyEntry(a);
+      const oldByIP = this.byIP;
+      const oldByMAC = this.byMAC;
+      this.byIP = new Map();
+      this.byMAC = new Map();
+      try {
+        for (const a of (items || [])) this._applyEntry(a);
+      } catch (error) {
+        this.byIP = oldByIP;
+        this.byMAC = oldByMAC;
+        throw error;
+      }
       this.state.lastArpTs = Date.now();
       console.log('%s', this._lbl, `loaded ${this.byIP.size} entries`);
     } catch (e) {
@@ -98,7 +106,7 @@ class ArpCollector {
             }
             return;
           }
-          if (!data) return;
+          if (!data || Array.isArray(data)) return;
           const dead = data['.dead'] === 'true' || data['.dead'] === true;
           this._applyEntry(data, dead);
           this.state.lastArpTs = Date.now();

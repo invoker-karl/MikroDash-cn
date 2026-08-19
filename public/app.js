@@ -1010,7 +1010,7 @@ socket.on('conn:update',function(data){
 socket.on('talkers:update',function(data){
   var devices=data.devices||[];
   if(!devices.length){
-    var emptyText=data.unavailable?'Kid Control is unavailable':'No devices';
+    var emptyText=data.unavailable?(data.reason||'Kid Control is unavailable'):'No devices';
     talkersTable.innerHTML='<tr><td colspan="4" class="empty-state">'+esc(emptyText)+'</td></tr>';
     return;
   }

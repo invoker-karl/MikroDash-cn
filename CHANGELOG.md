@@ -2,6 +2,33 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.8-cn.5] — Authoritative RouterOS snapshot reconciliation
+
+- Corrected the shared RouterOS streaming contract: an array emitted by
+  `node-routeros` is a synthetic idle notification, not proof that a table is
+  empty. Streamed objects remain incremental data; only a successful ordinary
+  `/print` result is an authoritative snapshot.
+- Top Talkers now coalesces idle notifications into generation-guarded one-shot
+  confirmation. A successful empty result clears the card, a successful
+  non-empty result replaces it atomically, transient failures retain the last
+  good rows, and unsupported or permission-denied Kid Control states remain
+  distinct. Stop, reconnect, and delivery-mode changes invalidate late probes.
+- Applied the same last-good/authoritative-empty discipline to DHCP networks and
+  Detect Internet, wireless and CAPsMAN clients/SSIDs, topology neighbours and
+  WiFi attribution, connections, firewall rules, routing and BGP, WireGuard and
+  other VPN sessions, DHCP leases, ARP, and interface metadata. Successful
+  structural snapshots can now remove the final row without idle events
+  creating ghost peers, false freshness, or destructive empty states.
+- Added a shared snapshot adapter with coalescing, cooldown, real-row version,
+  and generation guards, plus tests using the installed RStream and fake timers
+  to lock down its actual idle behaviour and collector lifecycle races.
+- Dependency patch verification now fails the build unless every required
+  `node-routeros` marker and the expected empty-reply and multi-block behaviours
+  are present.
+
+API-handler starvation remains unconfirmed and is not claimed as a cause or fix
+in this release.
+
 ## [0.7.8-cn.4] — Authoritative interface recovery and release hardening
 
 - RouterOS reconnects now invalidate the session-scoped interface whitelist and
@@ -588,7 +615,10 @@ Full-codebase review remediation: 17 P1 bugs fixed across security and stability
 - **Listener/memory leak per router hot-swap** — collector handlers registered on the global Socket.IO server are now tracked and removed in `teardownSession`; each leaked handler retained the entire dead session
 - **Hot-swap orphaned all modern-auth sockets** — switching or deleting the active router now relocates every socket watching it (previously only legacy no-auth sockets moved, leaving everyone else in a dead room)
 - **VPN disconnect alerts never fired** — the alerter hook only covered `routerIo.emit()`, but `vpn:update` goes through `.to()`; room-scoped emits now feed the alerter, and the alert-session stub gained the `.to()` method whose absence made its VPN collector throw
-- **Phantom wireless clients / stale tables** — RStream's empty-array packets (table emptied) are now handled by wireless, talkers, firewall and dhcpNetworks; departed clients age out and cleared tables actually clear; an empty wifi table now latches the legacy-wireless fallback
+- **Phantom wireless clients / stale tables** — superseded by the cn.5 contract:
+  RStream arrays are synthetic idle notifications and trigger an ordinary
+  `/print` confirmation; only explicit unsupported errors select the legacy
+  wireless fallback.
 - **Restart-timer leaks defeating idle gating** — bare `setTimeout` restarts in system/connections/ping (and an uncleared overwrite in traffic) are stored and cancelled on stop/suspend; connections gained a `_suspended` flag, its watchdog now recovers a dead stream (previously bailed on exactly that state), and `resume()` no longer reopens the connection-table stream with zero viewers
 - **12 unhandled promise rejections on stream teardown** — `try/catch` around `stream.stop()` cannot catch its promise rejection; all sites use a promise-safe teardown now
 - **PDF/report exports crashed on large ranges** — `Math.max(...rows)` overflowed the call stack above ~65k rows; replaced with a reduce (ping/traffic/bandwidth/connectivity exports)
@@ -606,7 +636,7 @@ Full-codebase review remediation: 17 P1 bugs fixed across security and stability
 
 ### Tests
 
-- New `test/code-review-remediation.test.js` (13 regression tests: connectLoop listener containment, connections suspend/watchdog, traffic bind idempotency, empty-table packets, restart-timer cleanup, router validation, ciphertext preservation) — suite now 247 tests, all passing
+- New `test/code-review-remediation.test.js` (13 regression tests: connectLoop listener containment, connections suspend/watchdog, traffic bind idempotency, stream-idle handling, restart-timer cleanup, router validation, ciphertext preservation) — suite now 247 tests, all passing
 
 ---
 

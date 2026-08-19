@@ -142,7 +142,19 @@ class DhcpLeasesCollector {
       await this._loadServerMap();
       const leases = await this.ros.write('/ip/dhcp-server/lease/print',
         ['=.proplist=.id,.dead,address,active-address,mac-address,active-mac-address,status,comment,host-name,server']);
-      for (const l of (leases || [])) this._applyLease(l);
+      // Build into detached maps, then publish the complete snapshot. Reusing
+      // the old maps made a successful empty /print retain every deleted lease.
+      const oldByIP = this.byIP;
+      const oldByMAC = this.byMAC;
+      this.byIP = new Map();
+      this.byMAC = new Map();
+      try {
+        for (const l of (leases || [])) this._applyLease(l);
+      } catch (error) {
+        this.byIP = oldByIP;
+        this.byMAC = oldByMAC;
+        throw error;
+      }
       this.state.lastLeasesTs = Date.now();
       this._emitLeases();
     } catch (e) {
@@ -170,7 +182,10 @@ class DhcpLeasesCollector {
           }
           return;
         }
-        if (data) { this._applyLease(data, true); this.state.lastLeasesTs = Date.now(); }
+        if (data && !Array.isArray(data)) {
+          this._applyLease(data, true);
+          this.state.lastLeasesTs = Date.now();
+        }
       });
       console.log('%s', this._lbl + ' streaming /ip/dhcp-server/lease/listen');
     } catch (e) {

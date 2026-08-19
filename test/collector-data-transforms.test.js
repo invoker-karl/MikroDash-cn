@@ -900,7 +900,7 @@ test('vpn collector resolves peer name with fallback chain', async () => {
   assert.equal(t[1].name, 'server');
   assert.equal(t[2].name, '10.0.0.4/32');
   assert.equal(t[3].name, 'DDDDEEEEFFFFGGGG' + '\u2026');
-  assert.equal(t[4].name, '?');
+  assert.equal(t.length, 4, 'a malformed row without stable identity is ignored');
 });
 
 test('vpn collector distinguishes active, stale and never-connected peers', async () => {

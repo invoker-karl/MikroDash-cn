@@ -138,6 +138,52 @@ test('verifyRouterOSPatchMarkers throws when a patch file cannot be read', () =>
   );
 });
 
+test('all node-routeros compatibility patches are required at startup', () => {
+  const { PATCH_MARKERS, resolveDistPath, hasExactPatchMarker } = require('../src/routeros/patchVerification');
+  assert.deepEqual(PATCH_MARKERS, [
+    'MIKRODASH_PATCHED_EMPTY_REPLY',
+    'MIKRODASH_PATCHED_UNREGISTEREDTAG',
+    'MIKRODASH_PATCHED_UTF8_ENCODING',
+    'MIKRODASH_PATCHED_MULTI_BLOCK',
+    'MIKRODASH_PATCHED_MULTI_BLOCK_V2',
+  ]);
+  assert.equal(resolveDistPath('MIKRODASH_PATCHED_MULTI_BLOCK_V2'), 'Channel.js');
+  assert.equal(hasExactPatchMarker('// MIKRODASH_PATCHED_MULTI_BLOCK_V2\n',
+    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'V2 cannot satisfy the V1 marker');
+  assert.equal(hasExactPatchMarker('if (this.streaming) break; // MIKRODASH_PATCHED_MULTI_BLOCK_V2',
+    'MIKRODASH_PATCHED_MULTI_BLOCK_V2'), true, 'inline end-of-line markers are valid');
+  assert.equal(hasExactPatchMarker('xMIKRODASH_PATCHED_MULTI_BLOCK',
+    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'a lowercase identifier prefix is not a token boundary');
+  assert.equal(hasExactPatchMarker('MIKRODASH_PATCHED_MULTI_BLOCKx',
+    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'a lowercase identifier suffix is not a token boundary');
+});
+
+test('patch verification fails when only MULTI_BLOCK_V2 is present', () => {
+  const { verifyRouterOSPatchMarkers } = require('../src/routeros/patchVerification');
+  assert.throws(() => verifyRouterOSPatchMarkers({
+    patchMarkers: ['MIKRODASH_PATCHED_MULTI_BLOCK'],
+    readFileSync: () => '// MIKRODASH_PATCHED_MULTI_BLOCK_V2\n',
+    log: { error() {} },
+  }), /MULTI_BLOCK.*not found/i);
+});
+
+test('the currently installed patched node-routeros passes the runtime verifier', () => {
+  const { verifyRouterOSPatchMarkers } = require('../src/routeros/patchVerification');
+  assert.doesNotThrow(() => verifyRouterOSPatchMarkers({ readFileSync: fs.readFileSync }));
+});
+
+test('Docker copies the shared patch verifier before running the dependency patch', () => {
+  const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8');
+  const verifierCopy = dockerfile.indexOf('COPY src/routeros/patchVerification.js ./src/routeros/patchVerification.js');
+  const patchCopy = dockerfile.indexOf('COPY patch-routeros.js ./');
+  const patchRun = dockerfile.indexOf('RUN node patch-routeros.js');
+  const fullCopy = dockerfile.indexOf('COPY . .');
+  assert.ok(verifierCopy >= 0, 'the verifier is present in the cached dependency layer');
+  assert.ok(verifierCopy < patchCopy && patchCopy < patchRun,
+    'both patch files exist before the patch script runs');
+  assert.ok(patchRun < fullCopy, 'the full source tree is not copied early and dependency caching is retained');
+});
+
 test('ROS write timeout closes the active connection before rejecting', async () => {
   const ros = new ROS({});
   let closeCalls = 0;
