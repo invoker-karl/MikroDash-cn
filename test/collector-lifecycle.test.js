@@ -499,7 +499,7 @@ test('wireless collector detects wifi API mode and locks in', () => {
   assert.equal(collector.mode, 'wifi');
 });
 
-test('wireless collector falls back to legacy API when wifi returns empty batch', () => {
+test('wireless collector keeps wifi API when its successful batch is empty', () => {
   let wirelessStarted = false;
   const ros = mockROS();
   ros.stream = (words) => {
@@ -514,8 +514,8 @@ test('wireless collector falls back to legacy API when wifi returns empty batch'
   });
 
   collector._onBatch('wifi', []);
-  assert.equal(collector.mode, 'wireless');
-  assert.ok(wirelessStarted, 'wireless stream started after empty wifi batch');
+  assert.equal(collector.mode, 'wifi');
+  assert.equal(wirelessStarted, false, 'empty associations do not prove wifi is unsupported');
 });
 
 test('wireless collector resets mode on reconnect and does not auto-start streams', () => {
@@ -764,6 +764,75 @@ test('routing collector BGP session stream error triggers reload and restart aft
   await new Promise(r => setTimeout(r, 100));
   assert.equal(bgpStreamCount, 2, 'BGP stream restarted after error');
 
+  collector.stop();
+});
+
+test('routing restart loaders preserve old routes, retain errors, and retry without unhandled rejection', async () => {
+  let v4Failures = 1;
+  let v6Failures = 0;
+  const unhandled = [];
+  const onUnhandled = error => unhandled.push(error);
+  process.on('unhandledRejection', onUnhandled);
+  const ros = mockROS(async cmd => {
+    if (cmd === '/ip/route/print') {
+      if (v4Failures-- > 0) throw new Error('v4 reload timeout');
+      return [{ '.id': '*new4', 'dst-address': '198.51.100.0/24', active: 'true' }];
+    }
+    if (cmd === '/ipv6/route/print') {
+      if (v6Failures-- > 0) throw new Error('v6 reload timeout');
+      return [{ '.id': '*new6', 'dst-address': '2001:db8::/32', active: 'true' }];
+    }
+    return [];
+  });
+  ros.stream = () => ({ stop() {} });
+  const state = { lastRoutingErr: 'stream dropped' };
+  const collector = new RoutingCollector({ ros, io: routingIo(), pollMs: 10000, state, _restartDelayMs: 20 });
+  collector._routes.set('*old4', collector._mapRoute({ '.id': '*old4', 'dst-address': '192.0.2.0/24', active: 'true' }, 'ipv4'));
+  collector._routes.set('v6:*old6', collector._mapRoute({ '.id': '*old6', 'dst-address': '2001:db8:1::/48', active: 'true' }, 'ipv6'));
+
+  collector._scheduleRouteRestart();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.ok(collector._routes.has('*old4'), 'failed v4 reload preserves last good family');
+  assert.match(state.lastRoutingErr, /reload timeout/);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.ok(collector._routes.has('*new4'), 'a later retry replaces the old family');
+
+  for (const key of [...collector._routes.keys()]) if (key.startsWith('v6:')) collector._routes.delete(key);
+  collector._routes.set('v6:*old6', collector._mapRoute({ '.id': '*old6', 'dst-address': '2001:db8:1::/48', active: 'true' }, 'ipv6'));
+  v6Failures = 1;
+  collector._scheduleIPv6Restart();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.ok(collector._routes.has('v6:*old6'), 'failed async v6 reload preserves its old routes');
+  assert.match(state.lastRoutingErr, /v6 reload timeout/);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.ok(collector._routes.has('v6:*new6'));
+  assert.equal(state.lastRoutingErr, null);
+  assert.deepEqual(unhandled, []);
+  process.removeListener('unhandledRejection', onUnhandled);
+  collector.stop();
+});
+
+test('routing BGP restart clears errors only after both session and config reloads succeed', async () => {
+  let sessionFailures = 1;
+  const ros = mockROS(async cmd => {
+    if (cmd === '/routing/bgp/session/print') {
+      if (sessionFailures-- > 0) throw new Error('BGP reload timeout');
+      return [{ name: 'new-peer', 'remote.address': '203.0.113.1', state: 'established' }];
+    }
+    if (cmd === '/routing/bgp/peer/print') return [];
+    return [];
+  });
+  ros.stream = () => ({ stop() {} });
+  const state = { lastRoutingErr: 'stream dropped' };
+  const collector = new RoutingCollector({ ros, io: routingIo(), pollMs: 10000, state, _restartDelayMs: 20 });
+  collector._sessions.set('old-peer', { name: 'old-peer', 'remote.address': '192.0.2.1', state: 'established' });
+  collector._scheduleBgpRestart();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.ok(collector._sessions.has('old-peer'));
+  assert.match(state.lastRoutingErr, /BGP reload timeout/);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.ok([...collector._sessions.values()].some(row => row.name === 'new-peer'));
+  assert.equal(state.lastRoutingErr, null);
   collector.stop();
 });
 
@@ -1410,8 +1479,8 @@ test('the poll batch feeds connTableCache through the shared commit path', async
   c.stop();
 });
 
-test('the poll path keeps partial-result detection', async () => {
-  // A truncated dump must not replace a good batch, exactly as in stream mode.
+test('the authoritative poll path accepts a large non-empty contraction', async () => {
+  // A successful ordinary /print is a complete snapshot, unlike a stream burst.
   const big   = Array.from({ length: 100 }, (_, i) => ({ '.id': '*' + i }));
   const small = Array.from({ length: 3 },  (_, i) => ({ '.id': '*' + i }));
   let next = big;
@@ -1425,7 +1494,7 @@ test('the poll path keeps partial-result detection', async () => {
   assert.equal(cache.rows.length, 100);
   next = small;
   await c._pollOnce(true);
-  assert.equal(cache.rows.length, 100, 'a sudden 97% drop is treated as partial, not real');
+  assert.equal(cache.rows.length, 3, 'successful ordinary /print is authoritative');
   c.stop();
 });
 

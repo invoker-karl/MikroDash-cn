@@ -147,7 +147,7 @@ class ConnectionsCollector {
       && fresh.length < this._rowsPrev.length * PARTIAL_DROP_RATIO;
 
     let rows;
-    if (authoritative && fresh.length === 0) {
+    if (authoritative) {
       this._partialStreak = 0;
       rows = fresh;
       this._rowsPrev = fresh;

@@ -93,6 +93,23 @@ test('Connections authoritative empty clears cache while a failed idle confirmat
   assert.deepEqual(deposits.at(-1), []);
 });
 
+test('Connections authoritative non-empty snapshot atomically accepts a large real contraction', () => {
+  const deposits = [];
+  const c = new ConnectionsCollector({
+    ros: rosStub(), io: ioStub(), pollMs: 5000, topN: 5, maxConns: 1000,
+    dhcpNetworks: { getLanCidrs: () => [] },
+    dhcpLeases: { getNameByIP: () => null, getNameByMAC: () => null },
+    arp: { getByIP: () => null }, state: {}, geoLookup: null,
+    connTableCache: { deposit: rows => deposits.push(rows) },
+  });
+  c._rowsPrev = Array.from({ length: 100 }, (_, i) => ({ '.id': `*${i}` }));
+  c._rowsNext = Array.from({ length: 10 }, (_, i) => ({ '.id': `*new${i}` }));
+  c._onBatchComplete(true);
+  assert.equal(c._rowsPrev.length, 10);
+  assert.equal(deposits.at(-1).length, 10);
+  assert.equal(c._partialStreak, 0);
+});
+
 test('Firewall failed confirmation preserves rules and successful empty removes them', async () => {
   let reject = true;
   const ros = rosStub(async () => {
@@ -257,6 +274,38 @@ test('Wireless synthetic idle and transient confirmation do not age clients or s
   await flush();
   assert.equal(c._knownClients.size, 1, 'one authoritative absence uses the normal absence threshold');
   assert.equal(c._absentTicks.get('AA'), 1);
+  c.stop();
+});
+
+test('Wireless first authoritative empty selects wifi and two unsupported stacks do not bounce', () => {
+  const ros = rosStub();
+  const c = new WirelessCollector({
+    ros, io: ioStub(), pollMs: 5000, state: {}, streamMode: true,
+    dhcpLeases: { getNameByMAC: () => null }, arp: { getByMAC: () => null },
+  });
+  c._onBatch('wifi', []);
+  assert.equal(c.mode, 'wifi');
+  c._handleSnapshotError('wifi', new Error('no such command'));
+  assert.equal(c.mode, 'wireless');
+  c._handleSnapshotError('wireless', new Error('unknown command'));
+  assert.equal(c.mode, null);
+  assert.equal(c._streams.wifi, null);
+  assert.equal(c._streams.wireless, null);
+  c.stop();
+});
+
+test('VPN malformed snapshot and structural objects cannot create or delete question-mark peers', () => {
+  const ros = rosStub();
+  const c = new VpnCollector({ ros, io: ioStub(), pollMs: 10000, state: {} });
+  c._replacePeers([{}, { 'public-key': 'stable', name: 'peer' }]);
+  assert.deepEqual([...c._peers.keys()], ['stable']);
+  c._startStream();
+  const stream = ros.streams.at(-1);
+  stream.callback(null, {});
+  stream.callback(null, { '.dead': 'true' });
+  assert.deepEqual([...c._peers.keys()], ['stable']);
+  stream.callback(null, { '.dead': 'true', 'public-key': 'stable' });
+  assert.equal(c._peers.size, 0);
   c.stop();
 });
 

@@ -958,6 +958,26 @@ test('a synthetic idle clears departed neighbours only after authoritative confi
   assert.equal(c.lastPayload.nodes[1].gone, true);
 });
 
+test('a CAPsMAN-only timeout preserves attribution and remains visible as stale/error', async () => {
+  const ros = mockRos(async (cmd) => {
+    if (cmd === '/interface/wifi/print') {
+      return [{ name: 'wifi1', 'radio-mac': 'AA:BB:CC:DD:EE:01' }];
+    }
+    if (cmd === '/interface/wifi/registration-table/print') return [];
+    if (cmd === '/interface/wifi/capsman/remote-cap/print') throw new Error('caps timeout');
+    return [];
+  });
+  const state = {};
+  const c = new TopologyCollector({
+    ros, io: mockIo(), state, rid: 'r1', pollMs: 30000,
+    streamMode: false, showClients: true,
+  });
+  c._capByPrefix.set('AA:BB:CC:DD:EE', { identity: 'old-cap', base: 'AA:BB:CC:DD:EE:00' });
+  await c._refreshWifi();
+  assert.equal(c._capByPrefix.get('AA:BB:CC:DD:EE').identity, 'old-cap');
+  assert.match(state.lastTopologyErr, /caps timeout/);
+});
+
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 test('stop() clears every timer and stream', async () => {

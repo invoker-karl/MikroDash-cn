@@ -370,6 +370,7 @@ class TopologyCollector {
     const reg = regResult.rows;
     const capsResult = legacy ? { ok: true, rows: [] } : await get(WIFI_CMDS.caps);
     const caps = capsResult.ok ? capsResult.rows : null;
+    const capsError = capsResult.ok ? null : capsResult.classification.message;
 
     // radio-mac per interface, following master-interface for virtual APs. A
     // multi-SSID interface carries no radio of its own, so without this chain
@@ -416,7 +417,7 @@ class TopologyCollector {
     this._ifaceRadio = ifaceRadio;
     this._capByPrefix = capByPrefix;
     this._assoc = assoc;
-    this.state.lastTopologyErr = null;
+    this.state.lastTopologyErr = capsError;
   }
 
   /** VLAN id -> name. Changes only when the operator edits the config, so this

@@ -85,6 +85,7 @@ class WirelessCollector {
     this._restarting = { wifi: false, wireless: false, capsman: false };
     this._restartTimers = { wifi: null, wireless: null, capsman: null };
     this._capsmanProbeTimer = null;
+    this._unsupportedStacks = new Set();
     this._snapshotProbes = {};
     for (const type of Object.keys(WL_ENDPOINTS)) {
       this._snapshotProbes[type] = new AuthoritativeSnapshotProbe({
@@ -449,25 +450,19 @@ class WirelessCollector {
 
   _onBatch(type, records) {
     if (type === 'wifi') {
-      if (this.mode === null) {
-        if (records.length > 0) {
-          this.mode = 'wifi';
-          if (this._debug) console.log('%s', this._lbl + ' mode latched: wifi');
-        } else {
-          // Empty first batch — wifi API not populated, fall through to legacy
-          this.mode = 'wireless';
-          if (this._debug) console.log('%s', this._lbl + ' mode latched: wireless (wifi returned empty)');
-          this._stopStream('wifi');
-          this._startDelivery('wireless');
-          return;
-        }
-      }
+      // A successful command proves this stack exists even when no station is
+      // associated. Only an explicit unsupported error may select a fallback.
+      this._unsupportedStacks.delete('wifi');
+      this.mode = 'wifi';
       this._lastWifiBatch = records;
       this._processMainBatch(records);
     } else if (type === 'wireless') {
+      this._unsupportedStacks.delete('wireless');
+      this.mode = 'wireless';
       this._lastWifiBatch = records;
       this._processMainBatch(records);
     } else if (type === 'capsman') {
+      this._unsupportedStacks.delete('capsman');
       this._lastCapsmanBatch = records.map(c => ({ ...c, _capsman: true }));
       this._updateCapsmanClients();
       this._emitClients();
@@ -497,17 +492,8 @@ class WirelessCollector {
         // /interface/wireless does not exist at all. That board now heals itself
         // on the first error instead of staying blank until a restart.
         if (/no such command|unknown command/i.test(msg)) {
-          const fallback = type === 'wifi' ? 'wireless' : (type === 'wireless' ? 'wifi' : null);
-          this._stopStream(type);
-          if (type === 'capsman') this._capsmanAvailable = false;
-          if (fallback) {
-            if (this._debug) {
-              console.log('%s', this._lbl + ` ${type} unavailable (${msg}); switching to ${fallback}`);
-            }
-            this.mode = fallback;
-            this._startDelivery(fallback);
-          }
-          continue;   // capsman simply is not on this board — stop asking.
+          this._handleSnapshotError(type, e, classifySnapshotError(e));
+          continue;
         }
         console.error('%s', this._lbl + ` ${type} poll error:`, msg);
       }
@@ -580,10 +566,18 @@ class WirelessCollector {
     if (classification.kind !== 'unsupported') return;
     this._stopStream(type);
     if (type === 'capsman') {
+      this._unsupportedStacks.add(type);
       this._capsmanAvailable = false;
       return;
     }
+    this._unsupportedStacks.add(type);
     const fallback = type === 'wifi' ? 'wireless' : 'wifi';
+    if (this._unsupportedStacks.has(fallback)) {
+      // Both command trees are explicitly absent. Stay stopped until reconnect
+      // instead of bouncing forever between two unsupported endpoints.
+      this.mode = null;
+      return;
+    }
     this.mode = fallback;
     this._startDelivery(fallback);
   }
@@ -594,6 +588,7 @@ class WirelessCollector {
     this.mode              = null;
     this._lastFp           = '';
     this._capsmanAvailable = false;
+    this._unsupportedStacks.clear();
     // SSID list: configuration, refreshed on a slow cadence of its own.
     // undefined = not probed yet, null = no wireless stack answered.
     this._ssidEndpoint = undefined;

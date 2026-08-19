@@ -463,7 +463,7 @@ test('talkers confirms synthetic idle before clearing the device list', async ()
   tk._stopStream();
 });
 
-test('wireless latches legacy fallback only after an authoritative empty snapshot', async () => {
+test('wireless keeps wifi mode after an authoritative empty snapshot', async () => {
   const ros = mockStreamRos();
   const w   = new WirelessCollector({
     ros, io: stubIo(1), pollMs: 30000, state: {},
@@ -474,8 +474,8 @@ test('wireless latches legacy fallback only after an authoritative empty snapsho
   assert.ok(wifiStream);
   wifiStream.emit('data', []); // synthetic idle triggers ordinary /print confirmation
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(w.mode, 'wireless', 'empty wifi table latched legacy mode');
-  assert.ok(ros.streamsByCmd['/interface/wireless/registration-table/print'], 'legacy stream opened');
+  assert.equal(w.mode, 'wifi', 'a successful empty table still proves the wifi stack exists');
+  assert.equal(ros.streamsByCmd['/interface/wireless/registration-table/print'], undefined);
   w.stop();
 });
 

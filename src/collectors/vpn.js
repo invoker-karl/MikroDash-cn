@@ -186,6 +186,7 @@ class VpnCollector {
 
   _onCounterRecord(row) {
     const key = row['public-key'] || this._peerName(row);
+    if (!key || key === '?') return;
     const existing = this._peers.get(key);
     if (existing) {
       this._peers.set(key, {
@@ -211,7 +212,7 @@ class VpnCollector {
     for (const row of rows || []) {
       if (!row || typeof row !== 'object') continue;
       const key = row['public-key'] || this._peerName(row);
-      if (key) next.set(key, row);
+      if (key && key !== '?') next.set(key, row);
     }
     this._peers = next;
     this.state.lastVpnErr = null;
@@ -415,6 +416,7 @@ class VpnCollector {
         }
         if (!data || Array.isArray(data)) return;
         const key = data['public-key'] || this._peerName(data);
+        if (!key || key === '?') return;
         if (data['.dead'] === 'true' || data['.dead'] === true) {
           this._peers.delete(key);
           this._prev.delete(key);
