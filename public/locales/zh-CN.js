@@ -21,6 +21,16 @@
       'MikroDash — Reports': 'MikroDash — 报表',
       'MikroDash — Routers': 'MikroDash — 路由器',
       'MikroDash — Settings': 'MikroDash — 设置',
+      'MikroDash — VLANs': 'MikroDash — VLAN',
+      'MikroDash — PPP': 'MikroDash — PPP',
+      'MikroDash — Bridges': 'MikroDash — 网桥',
+      'MikroDash — DNS': 'MikroDash — DNS',
+      'MikroDash — CAPsMAN': 'MikroDash — CAPsMAN',
+      'MikroDash — Packages': 'MikroDash — 软件包',
+      'MikroDash — Queues': 'MikroDash — 队列',
+      'MikroDash — Router Users': 'MikroDash — 路由器用户',
+      'MikroDash — WAN': 'MikroDash — WAN',
+      'MikroDash — Audit': 'MikroDash — 审计',
       'Real-time MikroTik Router Dashboard': 'MikroTik 路由器实时仪表盘',
       'Dashboard': '仪表盘',
       'Routers': '路由器',
@@ -745,5 +755,78 @@
     ,'Release the DHCP lease on "dashboard"? The uplink goes down until the client rebinds — usually seconds, but it is a real outage.': '要释放“dashboard”上的 DHCP 租约吗？在客户端重新绑定前，出口会中断——通常只需数秒，但这是真实的网络中断。'
     ,'Renew the DHCP lease on "dashboard"? The uplink blips briefly while the lease is renewed.': '要续租“dashboard”上的 DHCP 租约吗？续租期间出口会短暂中断。'
     ,'RouterOS decides which interfaces reach the internet, and it is not looking. This page shows what it reports, so it has nothing to show until detection is on. Enable it with': 'RouterOS 负责判断哪些接口可访问互联网，但当前未启用检测。此页面只显示 RouterOS 报告的结果，因此启用检测前没有内容。可使用以下命令启用：'
+    ,'This applies all scheduled package changes and REBOOTS the router.': '这会应用所有已安排的软件包更改，并重启路由器。'
+    ,'Type the router name to confirm:': '请输入路由器名称进行确认：'
+    ,'Release the DHCP lease on': '释放以下接口的 DHCP 租约：'
+    ,'Renew the DHCP lease on': '续租以下接口的 DHCP 租约：'
+    ,'The uplink goes down until the client rebinds — usually seconds, but it is a real outage.': '在客户端重新绑定前，出口会中断——通常只需数秒，但这是真实的网络中断。'
+    ,'The uplink blips briefly while the lease is renewed.': '续租期间出口会短暂中断。'
+    ,'Released the lease on': '已释放租约：', 'Requested a renewal on': '已请求续租：'
+    ,'Remove the queue': '删除队列', 'Traffic it was limiting will no longer be shaped.': '该队列原先限制的流量将不再被整形。'
+    ,'Remove the router user': '删除路由器用户', 'They will no longer be able to log in to this router.': '该用户将无法再登录此路由器。'
+    ,'Remove the group': '删除组', 'RouterOS refuses this if any user is still in it.': '如果仍有用户属于该组，RouterOS 会拒绝此操作。'
+    ,'End the session for': '结束会话：', 'They will be disconnected from the router immediately.': '该用户会立即与路由器断开连接。'
+    ,'Created': '已创建', 'Updated': '已更新', 'Removed': '已删除', 'Enabled': '已启用',
+    'Reset counters for': '已重置计数器：', 'Reordered': '已重新排序', 'Done:': '已完成：',
+    'Created group': '已创建组', 'Updated group': '已更新组', 'Removed group': '已删除组',
+    'Ended the session for': '已结束会话：',
+    'Package': '软件包', 'Built': '构建时间', 'Size': '大小', 'State': '状态',
+    'Board': '硬件', 'Channel': '更新通道', 'Firmware': '固件', 'Minimum firmware': '最低固件版本',
+    'Undo': '撤销', 'Install': '安装', 'Uninstall': '卸载', 'Disable': '禁用',
+    'Applying changes — the router is rebooting': '正在应用更改——路由器正在重启',
+    'Update check finished': '更新检查已完成', 'Checking for updates…': '正在检查更新…',
+    'You do not have write access to this router': '您没有此路由器的写入权限',
+    'Package collection is not running for this router': '此路由器的软件包采集未运行',
+    'Invalid request': '无效请求', 'That package is no longer listed': '该软件包已不在路由器列表中',
+    'The RouterOS user needs write permission for this': 'RouterOS 用户需要 write 权限才能执行此操作',
+    'This router does not support that command': '此路由器不支持该命令',
+    'The router name did not match — nothing was applied': '路由器名称不匹配——未应用任何更改',
+    'There are no scheduled changes to apply': '没有等待应用的更改', 'Action failed': '操作失败',
+    'Interface Rates collection is off for this router': '此路由器已关闭接口速率采集',
+    'no DHCP client': '没有 DHCP 客户端', 'expires in': '剩余租期', 'invalid': '无效',
+    'public': '公网', 'private': '私网', 'standby': '备用', 'distance': '距离',
+    'No default route via this uplink': '没有经过此出口的默认路由',
+    'This router\'s MikroDash account cannot read the internet-detection state.': '此路由器的 MikroDash 账户无法读取互联网检测状态。',
+    'Internet detection is not enabled on this router.': '此路由器未启用互联网检测。',
+    'No uplink currently reports an internet connection.': '当前没有出口报告互联网连接。',
+    'none active': '无活动出口',
+    'Releasing the lease takes the uplink down until the client rebinds.': '释放租约会使出口中断，直到客户端重新绑定。',
+    'Renewing blips the uplink briefly.': '续租会使出口短暂中断。',
+    'WAN collection is not running for this router': '此路由器的 WAN 采集未运行',
+    'That uplink changed on the router — the page has been refreshed': '该出口已在路由器上发生变化——页面已刷新',
+    'No measurement yet': '暂无测量数据',
+    'The router reported no rate for this queue': '路由器未报告此队列的速率',
+    'Router-reported average (bytes/sec), shown until a window is measured': '路由器报告的平均值（字节/秒），在获得测量窗口前显示',
+    'unlimited': '不限速', 'bypassed': '已绕过',
+    'Move earlier — the first matching queue wins': '向前移动——首个匹配队列优先',
+    'Move later': '向后移动', 'Reset': '重置', 'Remove': '删除', 'End Session': '结束会话',
+    'No packages match that search.': '没有符合搜索条件的软件包。',
+    'No queues match that search.': '没有符合搜索条件的队列。',
+    'No simple queues on this router. A simple queue caps the bandwidth of one target &mdash; an address, a subnet, or an interface.': '此路由器没有简单队列。简单队列可限制一个目标的带宽——地址、子网或接口。',
+    'No queue trees on this router. A tree shapes traffic that firewall mangle rules have marked, which makes it the tool for shaping by protocol or application rather than by address.': '此路由器没有队列树。队列树对防火墙 Mangle 规则标记的流量进行整形，适合按协议或应用而非地址整形。',
+    'This router\'s MikroDash account cannot read queues.': '此路由器的 MikroDash 账户无法读取队列。',
+    'A queue name is required': '必须填写队列名称',
+    'A target is required — an address, a subnet, or an interface': '必须填写目标——地址、子网或接口',
+    'A parent is required — "global", or an interface name': '必须填写父级——“global”或接口名称',
+    'Queue collection is not running for this router': '此路由器的队列采集未运行',
+    'That queue changed on the router — the page has been refreshed': '该队列已在路由器上发生变化——页面已刷新',
+    'That queue is created automatically by another RouterOS feature (Kid Control, a DHCP lease, or a PPP profile) and cannot be edited here': '该队列由其他 RouterOS 功能（Kid Control、DHCP 租约或 PPP 配置文件）自动创建，无法在此编辑',
+    'Max Limit must be at least as large as Limit At — the router refuses otherwise': '最大速率必须不低于保证速率，否则路由器会拒绝保存',
+    'No users match that search.': '没有符合搜索条件的用户。',
+    'No groups match that search.': '没有符合搜索条件的组。',
+    'No sessions match that search.': '没有符合搜索条件的会话。',
+    'Nobody is logged in.': '当前没有用户登录。', 'no permissions': '没有权限',
+    'A username is required': '必须填写用户名', 'Pick a group': '请选择组',
+    'A group name is required': '必须填写组名称',
+    'Router user collection is not running for this router': '此路由器的用户采集未运行',
+    'That row changed on the router — the page has been refreshed': '该条目已在路由器上发生变化——页面已刷新',
+    'That group no longer exists on the router': '该组已不存在于路由器上',
+    'That group still has users in it — move them first': '该组仍包含用户——请先移动这些用户',
+    'That is the account MikroDash signs in with — manage it in WinBox': '这是 MikroDash 登录所用账户——请在 WinBox 中管理',
+    'That is the group MikroDash signs in with — manage it in WinBox': '这是 MikroDash 登录账户所属组——请在 WinBox 中管理',
+    'That name belongs to the account MikroDash signs in with': '该名称属于 MikroDash 登录所用账户',
+    'Users cannot be placed in the group MikroDash signs in with': '不能将用户放入 MikroDash 登录账户所属组',
+    'MikroDash cannot identify its own account on this router, so changes are refused': 'MikroDash 无法识别其在此路由器上的登录账户，因此拒绝更改',
+    'The RouterOS user needs the "policy" permission for this': 'RouterOS 用户需要 policy 权限才能执行此操作'
   });
 })(window);

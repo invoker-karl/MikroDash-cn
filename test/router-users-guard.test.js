@@ -411,7 +411,7 @@ test('writes are serialised per router and target the captured router', () => {
 test('a plaintext password never reaches the audit trail', () => {
   const src = stripComments(SRC('index.js'));
   const body = handlerBody(src, 'rosuser:save');
-  const auditCall = body.slice(body.indexOf('audit.fromSocket(socket).record'), 
+  const auditCall = body.slice(body.indexOf('audit.fromSocket(socket).record'),
                                body.indexOf('audit.fromSocket(socket).record') + 800);
   // The plaintext variable is not mentioned in the audit call at ALL, rather
   // than mentioned in a position argued to be safe. A flag computed earlier is

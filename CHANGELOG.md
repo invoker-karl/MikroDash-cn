@@ -10,6 +10,16 @@ All notable changes to MikroDash will be documented in this file.
 - Preserved the Chinese edition's RouterOS snapshot reconciliation, interface
   recovery, Top Talkers compatibility, multi-router isolation, translation
   boundaries, and monotonic two-platform release gates.
+- Added complete Chinese coverage for the new navigation, pages, dynamic action
+  results, destructive-operation confirmations, permission refusals, and page
+  titles while keeping router, queue, and account names as user data.
+- Fixed missing per-page status handlers in the upstream WAN, Queues, and Router
+  Users UI, which otherwise raised a browser error after successful actions.
+- Required and behavior-verified the new stream-safe `!empty` patch during a
+  clean dependency install; Docker now fails closed if that patch is absent.
+- Added an in-place v0.7.8 database migration regression proving dashboard and
+  topology layouts survive while v0.7.25 navigation preferences and Audit are
+  created successfully.
 
 ## [0.7.8-cn.7] — Connection-derived Top Talkers
 

@@ -98,6 +98,9 @@ if (sessionStorage.getItem('justLoggedIn')) {
 // ── Utilities ──────────────────────────────────────────────────────────────
 var DOT = '\u00b7';
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');}
+function tr(s, context){
+  return window.MikroDashI18n ? window.MikroDashI18n.t(s, context || 'app.js') : s;
+}
 function fmtMbps(v){var n=+v||0;if(n>=1000)return(n/1000).toFixed(2)+' Gbps';if(n>=1)return n.toFixed(2)+' Mbps';return(n*1000).toFixed(1)+' Kbps';}
 // TB tier added for interface lifetime counters, which pass 1 TB on any
 // long-running WAN port and would otherwise render as a four-digit GB figure.
@@ -12518,8 +12521,8 @@ function _renderRoutersMap(rows) {
     // router, and the name is what makes "the wrong router" a hard mistake to
     // make rather than an easy one.
     var typed = window.prompt(
-      'This applies all scheduled package changes and REBOOTS the router.\n\n' +
-      'Type the router name to confirm: ' + name);
+      tr('This applies all scheduled package changes and REBOOTS the router.') + '\n\n' +
+      tr('Type the router name to confirm:') + ' ' + name);
     if (typed === null) return;
     socket.emit('packages:apply', { confirm: typed });
   });
@@ -12687,8 +12690,10 @@ function _renderRoutersMap(rows) {
     if (!b) return;
     var verb = b.getAttribute('data-wanact'), id = b.getAttribute('data-id'), name = b.getAttribute('data-name');
     var msg = verb === 'release'
-      ? 'Release the DHCP lease on "' + name + '"?\n\nThe uplink goes down until the client rebinds — usually seconds, but it is a real outage.'
-      : 'Renew the DHCP lease on "' + name + '"?\n\nThe uplink blips briefly while the lease is renewed.';
+      ? tr('Release the DHCP lease on') + ' "' + name + '"?\n\n' +
+        tr('The uplink goes down until the client rebinds — usually seconds, but it is a real outage.')
+      : tr('Renew the DHCP lease on') + ' "' + name + '"?\n\n' +
+        tr('The uplink blips briefly while the lease is renewed.');
     if (!window.confirm(msg)) return;
     send(verb, id, name);
   });
@@ -12713,7 +12718,7 @@ function _renderRoutersMap(rows) {
     _busy = '';
     // "Requested", not "renewed": the lease settles over the next second or two
     // and the next tick is what reports the outcome.
-    setStatus((d && d.action === 'release' ? 'Released the lease on ' : 'Requested a renewal on ') + ((d && d.name) || ''));
+    setStatus(tr(d && d.action === 'release' ? 'Released the lease on' : 'Requested a renewal on') + ' ' + ((d && d.name) || ''));
   });
   socket.on('wan:error', function (d) {
     _busy = '';
@@ -13153,7 +13158,8 @@ function _renderRoutersMap(rows) {
       return socket.emit('queue:resetCounters', { id: id, expectedName: name, menu: menu });
     }
     if (act === 'remove') {
-      if (!window.confirm('Remove the queue "' + name + '"?\n\nTraffic it was limiting will no longer be shaped.')) return;
+      if (!window.confirm(tr('Remove the queue') + ' "' + name + '"?\n\n' +
+        tr('Traffic it was limiting will no longer be shaped.'))) return;
       _busy = id; render();
       return socket.emit('queue:remove', { id: id, expectedName: name, menu: menu });
     }
@@ -13185,7 +13191,7 @@ function _renderRoutersMap(rows) {
     $('qFormWrap').classList.remove('open');
     var what = { create:'Created ', update:'Updated ', 'delete':'Removed ', enable:'Enabled ',
                  disable:'Disabled ', reset:'Reset counters for ', move:'Reordered ' }[d && d.action] || 'Done: ';
-    setStatus(what + ((d && d.name) || ''));
+    setStatus(tr(what.trim()) + ' ' + ((d && d.name) || ''));
   });
   socket.on('queues:error', function (d) {
     _busy = '';
@@ -13537,9 +13543,9 @@ function _renderRoutersMap(rows) {
                                            address: u.address, comment: u.comment, disabled: !u.disabled });
     }
     var prompts = {
-      'user-remove':    'Remove the router user "' + name + '"?\n\nThey will no longer be able to log in to this router.',
-      'group-remove':   'Remove the group "' + name + '"?\n\nRouterOS refuses this if any user is still in it.',
-      'session-remove': 'End "' + name + '"’s session?\n\nThey will be disconnected from the router immediately.',
+      'user-remove':    tr('Remove the router user') + ' "' + name + '"?\n\n' + tr('They will no longer be able to log in to this router.'),
+      'group-remove':   tr('Remove the group') + ' "' + name + '"?\n\n' + tr('RouterOS refuses this if any user is still in it.'),
+      'session-remove': tr('End the session for') + ' "' + name + '"?\n\n' + tr('They will be disconnected from the router immediately.'),
     };
     if (!prompts[act]) return;
     if (!window.confirm(prompts[act])) return;
@@ -13605,7 +13611,7 @@ function _renderRoutersMap(rows) {
       'group-create': 'Created group ', 'group-update': 'Updated group ', 'group-delete': 'Removed group ',
       'session-remove': 'Ended the session for ',
     }[d && d.action] || 'Done: ';
-    setStatus(what + ((d && d.name) || ''));
+    setStatus(tr(what.trim()) + ' ' + ((d && d.name) || ''));
   });
   socket.on('rosusers:error', function (d) {
     _busy = '';

@@ -289,8 +289,12 @@ for (const [file, marker] of required) {
 }
 const channelSource = fs.existsSync(path.join(BASE, 'Channel.js'))
   ? fs.readFileSync(path.join(BASE, 'Channel.js'), 'utf8') : '';
-if (!channelSource.includes("if (reply === '!empty') { this.emit('done', []); return; }") ||
-    !channelSource.includes('if (this.streaming) break;')) {
+const emptyReplySafe = channelSource.includes(
+  "if (reply === '!empty') { if (this.streaming) return; this.emit('done', []); return; }"
+);
+const emptyDefaultSafe = /if \(reply === '!empty'\) \{\s*if \(this\.streaming\) break;\s*this\.emit\('done', this\.data\);\s*this\.close\(\);\s*break;/m
+  .test(channelSource);
+if (!emptyReplySafe || !emptyDefaultSafe || !channelSource.includes('if (this.streaming) break;')) {
   console.error('[patch] REQUIRED patched behavior verification failed');
   patchFailed = true;
 }
