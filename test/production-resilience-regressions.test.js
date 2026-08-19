@@ -152,6 +152,10 @@ test('all node-routeros compatibility patches are required at startup', () => {
     'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'V2 cannot satisfy the V1 marker');
   assert.equal(hasExactPatchMarker('if (this.streaming) break; // MIKRODASH_PATCHED_MULTI_BLOCK_V2',
     'MIKRODASH_PATCHED_MULTI_BLOCK_V2'), true, 'inline end-of-line markers are valid');
+  assert.equal(hasExactPatchMarker('xMIKRODASH_PATCHED_MULTI_BLOCK',
+    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'a lowercase identifier prefix is not a token boundary');
+  assert.equal(hasExactPatchMarker('MIKRODASH_PATCHED_MULTI_BLOCKx',
+    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'a lowercase identifier suffix is not a token boundary');
 });
 
 test('patch verification fails when only MULTI_BLOCK_V2 is present', () => {
