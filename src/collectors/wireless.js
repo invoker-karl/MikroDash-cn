@@ -42,6 +42,11 @@ const SSID_ENDPOINTS = {
   wireless: '/interface/wireless/print',
 };
 
+// How often to repeat the "no ARP entry for any client" warning (#93). This is
+// usually a permanent property of the deployment rather than a fault to watch,
+// so it is a reminder for whoever reads the log later, not a live signal.
+const NO_ARP_LOG_MS = 15 * 60_000;
+
 class WirelessCollector {
   constructor({ ros, io, pollMs, state, dhcpLeases, arp, streamMode }) {
     // Delivery per router (#105). Poll re-reads the same registration table the
@@ -66,12 +71,16 @@ class WirelessCollector {
     this._nameCache    = new Map();
     this._ptrCache     = new Map(); // ip → { name: string, ts: number }
     this._retryTimer   = null;
+    // When the "no ARP entry for anyone" warning was last logged (#93). Zero
+    // means not currently in that state, so recovery re-arms it.
+    this._noArpSince   = 0;
     this._capsmanAvailable = false;
     // SSID list: configuration, refreshed on a slow cadence of its own.
     // undefined = not probed yet, null = no wireless stack answered.
     this._ssidEndpoint = undefined;
     this._ssids = [];
     this._ssidsManagedElsewhere = 0;
+    this._scanIfaces = [];   // radios a frequency scan may target (src/wifiScan.js)
     this._ssidTimer = null;
     this._lbl = ros.routerLabel ? `[${ros.routerLabel}][wireless]` : '[wireless]';
 
@@ -334,6 +343,7 @@ class WirelessCollector {
         const { ssids, managedElsewhere } = this._parseSsids(rows);
         this._ssids = ssids;
         this._ssidsManagedElsewhere = managedElsewhere;
+        this._scanIfaces = this._parseScanIfaces(rows, endpoint);
         return;
       } catch (e) {
         const classification = classifySnapshotError(e);
@@ -344,6 +354,7 @@ class WirelessCollector {
     if (unsupported === order.length) {
       this._ssidEndpoint = null;                      // neither stack exists here
       this._ssids = [];
+      this._scanIfaces = [];
     } else if (transientError) {
       // Preserve the last good configuration and retry next cadence. A timeout
       // is not proof that the wireless subsystem is absent.
@@ -351,9 +362,115 @@ class WirelessCollector {
     }
   }
 
+  /**
+   * The radios a frequency scan may be run against.
+   *
+   * Built from rows _refreshSsids has ALREADY fetched, so it costs no extra
+   * RouterOS traffic — which is the point. Validating a scan request with a
+   * fresh write() would put the scan path behind the 30s write timeout, and
+   * losing that race closes the connection shared by every collector on this
+   * router (routeros/client.js:174-180).
+   *
+   * `master` is what separates a radio from a virtual AP: the live fleet reports
+   * twelve /interface/wifi rows of which only four have a radio of their own.
+   * Offering the other eight would be offering scans that cannot happen.
+   *
+   * Only five fields are copied, by name. These rows also carry
+   * security.passphrase in clear text, and this list reaches a browser.
+   */
+  _parseScanIfaces(rows, endpoint) {
+    // Legacy /interface/wireless is out of scope: its scan command differs and
+    // there is no device here to verify it against. Report none rather than
+    // offering a picker that cannot work.
+    if (endpoint !== SSID_ENDPOINTS.wifi) return [];
+    return (rows || [])
+      .filter(r => r && String(r.name || '').trim())
+      .map(r => ({
+        name:           String(r.name).trim(),
+        // The scan command is addressed by RouterOS .id, not by name.
+        id:             r['.id'] || null,
+        master:         r.master === 'true' || r.master === true,
+        // Which radio a virtual AP rides on. Needed because taking a radio off
+        // the air takes every SSID on it down too, and the clients are almost
+        // never on the radio's own interface.
+        masterInterface: r['master-interface'] || null,
+        capsmanManaged: !!r['configuration.manager'],
+        disabled:       r.disabled === 'true' || r.disabled === true,
+        running:        r.running === 'true' || r.running === true,
+      }));
+  }
+
+  /**
+   * The scan-eligible subset, for the picker and for server-side validation,
+   * each carrying the number of clients a scan would actually disconnect.
+   *
+   * That count is the whole radio's, not the interface's. Measured on the live
+   * fleet: scanning a radio dropped all 15 clients within 2 seconds and they
+   * took over 15 seconds to start returning — and not one of them was
+   * associated to the radio's own interface. They were all on its virtual APs.
+   * Showing the interface's own count would have read "0 clients" right before
+   * knocking fifteen devices off the network.
+   */
+  listScannableInterfaces() {
+    const all = this._scanIfaces || [];
+    const perIface = new Map();
+    for (const c of this._knownClients.values()) {
+      if (!c || !c.iface) continue;
+      perIface.set(c.iface, (perIface.get(c.iface) || 0) + 1);
+    }
+    return all.filter(i => i.master && !i.capsmanManaged && !i.disabled).map((radio) => {
+      let clients = perIface.get(radio.name) || 0;
+      for (const v of all) {
+        if (v.masterInterface === radio.name) clients += perIface.get(v.name) || 0;
+      }
+      return { ...radio, clients };
+    });
+  }
+
+  /**
+   * Say so when hostname resolution cannot work here (#93, from #88).
+   *
+   * Names come from the DHCP lease table (by MAC) or from a reverse lookup of
+   * the client's IP, and that IP comes only from the router's ARP table. A
+   * router that bridges wireless clients at layer 2 — a CAP whose gateway and
+   * DHCP live on another device — never holds an ARP entry for them, so no IP
+   * is known and resolveName() returns before attempting anything.
+   *
+   * That is correct behaviour with no error to report, which is exactly why it
+   * needs saying out loud. The reporter in #88 had working reverse DNS the
+   * whole time and no lookup was ever tried; the page showed bare MACs, and
+   * nothing distinguished "your DNS is misconfigured" from "this router cannot
+   * know". One line, not one per client, and throttled: a layer 2 AP is
+   * permanently in this state, so repeating it every poll would bury the log
+   * this exists to make readable.
+   */
+  _checkArpAvailability(clients) {
+    const total = clients.length;
+    const noIp  = clients.filter(c => !c.ip).length;
+    // Only when it is every client. A handful without an ARP entry is ordinary
+    // — one that just associated has not spoken IP yet — and warning on that
+    // would cry wolf on every healthy router.
+    if (!(total > 0 && noIp === total)) {
+      this._noArpSince = 0;   // reset, so a recurrence is reported promptly
+      return;
+    }
+    const now = Date.now();
+    if (this._noArpSince && now - this._noArpSince < NO_ARP_LOG_MS) return;
+    this._noArpSince = now;
+
+    const named = clients.filter(c => c.name).length;
+    console.log('%s', this._lbl +
+      ` hostname resolution unavailable: ${noIp}/${total} clients have no ARP entry` +
+      (named ? ` (${named} still named from DHCP leases)` : '') +
+      '. This router needs an IP interface on the client subnet, or to be their' +
+      ' DHCP server, before wireless clients can be named.');
+  }
+
   _emitClients() {
     const parsed = Array.from(this._knownClients.values())
       .sort((a, b) => b.signal - a.signal);
+
+    this._checkArpAvailability(parsed);
 
     // Bands and counts are recomputed here rather than read off the cached
     // list, because that list is only rebuilt every five minutes while this
@@ -592,6 +709,7 @@ class WirelessCollector {
     this._ssidEndpoint = undefined;
     this._ssids = [];
     this._ssidsManagedElsewhere = 0;
+    this._scanIfaces = [];   // radios a frequency scan may target (src/wifiScan.js)
     this._ssidTimer = null;
     this._lastWifiBatch    = [];
     this._lastCapsmanBatch = [];

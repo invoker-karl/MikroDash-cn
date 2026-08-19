@@ -26,6 +26,7 @@ require('dotenv').config();
 
 const Settings = require('./settings');
 const Routers  = require('./routers');
+const audit    = require('./audit');
 
 const fs   = require('fs');
 const path = require('path');
@@ -39,6 +40,9 @@ const { buildHelmetOptions } = require('./security/helmetOptions');
 const { computeHealthStatus } = require('./health');
 const { verifyRouterOSPatchMarkers } = require('./routeros/patchVerification');
 const { classifyRosError } = require('./routeros/classifyError');
+const selfGuard            = require('./routeros/selfGuard');
+const queueGuard           = require('./routeros/queueGuard');
+const wanGuard             = require('./routeros/wanGuard');
 const { scheduleForcedShutdownTimer } = require('./shutdown');
 const { isPublicI18nPath } = require('./i18nAssets');
 const { applySessionInterfaceMetadata } = require('./interfaceMetadata');
@@ -67,7 +71,7 @@ const TopTalkersCollector  = require('./collectors/talkers');
 const LogsCollector        = require('./collectors/logs');
 const SystemCollector      = require('./collectors/system');
 const { resolveCollection, collectionFingerprint, planMigration,
-        LEGACY_STREAM_KEYS } = require('./collection');
+        LEGACY_STREAM_KEYS, COLLECTORS: _COLLECTOR_DEFS } = require('./collection');
 const { makeNullCollector } = require('./collectors/nullCollector');
 const WirelessCollector    = require('./collectors/wireless');
 const VpnCollector         = require('./collectors/vpn');
@@ -78,9 +82,19 @@ const BandwidthCollector    = require('./collectors/bandwidth');
 const RoutingCollector      = require('./collectors/routing');
 const NetwatchCollector     = require('./collectors/netwatch');
 const TopologyCollector     = require('./collectors/topology');
+const VlansCollector        = require('./collectors/vlans');
+const PppCollector          = require('./collectors/ppp');
+const BridgesCollector      = require('./collectors/bridges');
+const DnsCollector          = require('./collectors/dns');
+const CapsmanCollector      = require('./collectors/capsman');
+const PackagesCollector     = require('./collectors/packages');
+const RosUsersCollector     = require('./collectors/rosusers');
+const QueuesCollector       = require('./collectors/queues');
+const WanCollector          = require('./collectors/wan');
 const alerter               = require('./alerter');
 const notifier              = require('./notifier');
 const alertSessions         = require('./alertSessions');
+const wifiScanLib           = require('./wifiScan');
 const overviewSessions      = require('./overviewSessions');
 const SessionStore          = require('./auth/sessionStore');
 const Users                 = require('./users');
@@ -134,6 +148,11 @@ function buildRouterIo(routerId) {
     if (event === 'ping:update' && data && typeof data.loss === 'number') {
       dbWriter.recordPing(routerId, data.target, data.rtt != null ? data.rtt : null, data.loss, data.ts);
     }
+    // A frequency scan takes the radio off the air, so the client list collapses
+    // to zero for its duration. That is the operator's own doing, not an
+    // outage — evaluating alerts on it would page somebody about a button they
+    // just pressed. The emit still goes out, so the page shows the truth.
+    if (event === 'wireless:update' && wifiScans.isScanning(routerId)) return;
     alerter.evaluateForRouter(routerId, event, data);
   };
   return {
@@ -346,6 +365,15 @@ function _freshState() {
     lastBandwidthTs:0, lastBandwidthErr:null,
     lastNetwatchTs:0, lastNetwatchErr:null,
     lastTopologyTs:0, lastTopologyErr:null,
+    lastVlansTs:0, lastVlansErr:null,
+    lastPppTs:0, lastPppErr:null,
+    lastBridgesTs:0, lastBridgesErr:null,
+    lastDnsTs:0, lastDnsErr:null,
+    lastCapsmanTs:0, lastCapsmanErr:null,
+    lastPackagesTs:0, lastPackagesErr:null,
+    lastRosusersTs:0, lastRosusersErr:null,
+    lastQueuesTs:0, lastQueuesErr:null,
+    lastWanTs:0, lastWanErr:null,
   };
 }
 
@@ -467,11 +495,37 @@ function buildSession(routerCfg, routerIo) {
   // re-fetching what they already hold, so it must come after all three.
   const topology     = _on('topology', () => new TopologyCollector    ({ros, io:routerIo, pollMs:eff.poll.topology,  state, streamMode:eff.stream.topology, rid:routerCfg.id, arp, ifStatus, system, dhcpLeases}));
 
-  const allCollectors = [traffic, dhcpLeases, dhcpNetworks, arp, conns, talkers, logs, system, wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology];
+  // vlans is constructed after ifStatus and dhcpLeases: it reads their
+  // lastPayload by reference, so they must exist first. Both are DISABLEABLE,
+  // so it guards for a null-collector stub rather than assuming a payload.
+  const vlans        = _on('vlans',    () => new VlansCollector       ({ros, io:routerIo, pollMs:eff.poll.vlans, state, ifStatus, dhcpLeases, streamMode:eff.stream.vlans}));
+  const ppp          = _on('ppp',      () => new PppCollector         ({ros, io:routerIo, pollMs:eff.poll.ppp,   state, streamMode:eff.stream.ppp}));
+  // bridges borrows rates from ifStatus by reference, so it is constructed after
+  // it for the same reason vlans is.
+  const bridges      = _on('bridges',  () => new BridgesCollector     ({ros, io:routerIo, pollMs:eff.poll.bridges,  state, ifStatus, streamMode:eff.stream.bridges}));
+  const dns          = _on('dns',      () => new DnsCollector         ({ros, io:routerIo, pollMs:eff.poll.dns,      state}));
+  const capsman      = _on('capsman',  () => new CapsmanCollector     ({ros, io:routerIo, pollMs:eff.poll.capsman,  state, streamMode:eff.stream.capsman}));
+  const packages     = _on('packages', () => new PackagesCollector    ({ros, io:routerIo, pollMs:eff.poll.packages, state}));
+  // Both usernames, deliberately: the fingerprint in collection.js does not
+  // cover credentials, so a username edit does not rebuild the session and the
+  // live login can differ from routers.json indefinitely. selfGuard protects
+  // whichever is which. See src/routeros/selfGuard.js.
+  const rosusers     = _on('rosusers', () => new RosUsersCollector    ({ros, io:routerIo, pollMs:eff.poll.rosusers, state,
+                                                                        usernames:[(ros.cfg||{}).username, routerCfg.username]}));
+  // queues borrows the firewall collector BY REFERENCE for its FastTrack
+  // summary, so it is constructed after it — the same ordering reason vlans and
+  // bridges are constructed after ifStatus. Only a summary leaves the queues
+  // payload; see the collector header.
+  const queues       = _on('queues',   () => new QueuesCollector      ({ros, io:routerIo, pollMs:eff.poll.queues,   state, streamMode:eff.stream.queues, firewall}));
+  // wan borrows rates from ifStatus by reference, so it is constructed after it
+  // for the same reason vlans and bridges are.
+  const wan          = _on('wan',      () => new WanCollector         ({ros, io:routerIo, pollMs:eff.poll.wan,      state, streamMode:eff.stream.wan, ifStatus}));
+  const allCollectors = [traffic, dhcpLeases, dhcpNetworks, arp, conns, talkers, logs, system, wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology, vlans, ppp, bridges, dns, capsman, packages, rosusers, queues, wan];
 
   session = { ros, state, connTableCache, DEFAULT_IF, HISTORY_MINUTES, collection: eff,
            dhcpLeases, dhcpNetworks, arp, traffic, conns, talkers, logs, system,
-           wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology, allCollectors,
+           wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology,
+           vlans, ppp, bridges, dns, capsman, packages, rosusers, queues, wan, allCollectors,
            routerId: routerCfg.id, cachedInterfaces: null, _interfacesRevision: 0 };
   return session;
 }
@@ -480,6 +534,10 @@ function buildSession(routerCfg, routerIo) {
 // Stop all collectors and the ROS connection. `entry` is the _routerSessions entry.
 async function teardownSession(session, entry) {
   if (!session) return;
+  // The scan holds a reference to this session's ros. Letting the registry entry
+  // outlive the session means finish() would later dereference a dead
+  // connection, and the router would keep scanning with nothing tracking it.
+  if (session.routerId) wifiScans.abortAllForRouter(session.routerId, 'session-restart');
   const _tearLabel = (session.ros && session.ros.routerLabel) || 'router';
   console.log('%s', `[${_tearLabel}] ── session torn down`);
   if (entry) { entry.startupReady = false; entry.collectorsStarted = false; }
@@ -724,6 +782,8 @@ async function startCollectors(session, entry) {
       const router = Routers.getById(session.routerId);
       if (router && (router.label === 'My Router' || router.label === router.host)) {
         Routers.updateLabel(session.routerId, boardName);
+        audit.system().record({ action: 'router.autoname', targetType: 'router',
+          targetId: session.routerId, targetName: boardName, routerId: session.routerId });
         // Broadcast updated router list to all clients
         _broadcastRoutersList();
       }
@@ -744,6 +804,24 @@ async function startCollectors(session, entry) {
     await session.netwatch.start();
     await _delay(300);
     await session.topology.start();
+    await _delay(300);
+    await session.vlans.start();
+    await _delay(300);
+    await session.ppp.start();
+    await _delay(300);
+    await session.bridges.start();
+    await _delay(300);
+    await session.dns.start();
+    await _delay(300);
+    await session.capsman.start();
+    await _delay(300);
+    await session.packages.start();
+    await _delay(300);
+    await session.rosusers.start();
+    await _delay(300);
+    await session.queues.start();
+    await _delay(300);
+    await session.wan.start();
 
     entry.startupReady = true;
     console.log('[MikroDash] All collectors running');
@@ -1056,7 +1134,11 @@ function _routersForSocket(socket) {
 function _persistRouterIdentity(routerId, identity) {
   if (!routerId) return;
   try {
-    if (Routers.updateIdentity(routerId, identity)) _broadcastRoutersList();
+    if (Routers.updateIdentity(routerId, identity)) {
+      audit.system().record({ action: 'router.identity', targetType: 'router',
+        targetId: routerId, routerId, after: identity });
+      _broadcastRoutersList();
+    }
   } catch (e) {
     console.warn('[MikroDash] could not persist router identity:', sanitizeErr(e));
   }
@@ -1282,12 +1364,17 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const ok = await Users.verifyPassword(user, password);
     if (!ok) {
       console.warn('%s', `[auth] login failed — user="${_logSafe(username)}" ip=${_clientIp(req)}`);
+      // The claimed name, not a resolved one: a failed login may name a user
+      // that does not exist, and that is worth seeing.
+      audit.forLogin(req, username).denied({ action: 'auth.login', targetType: 'user', targetName: username });
       return res.status(401).json({ ok: false, error: 'Invalid username or password' });
     }
     const timeoutMs   = _sessionTimeoutMs();
     const { token, expiresAt } = SessionStore.createSession(user.id, user.username, user.role, timeoutMs, user.allowedRouterIds);
     res.setHeader('Set-Cookie', SessionStore.buildCookieHeader(token, expiresAt));
     console.log('%s', `[auth] login — user="${user.username}" role=${user.role} ip=${_clientIp(req)}`);
+    audit.forLogin(req, user.username).record({ action: 'auth.login', targetType: 'user',
+      targetId: user.id, targetName: user.username });
     res.json({ ok: true, role: user.role, username: user.username });
   } catch (e) {
     res.status(500).json({ ok: false, error: sanitizeErr(e) });
@@ -1300,7 +1387,11 @@ app.get('/api/auth/logout', (req, res) => {
   const session = token ? SessionStore.getSession(token) : null;
   if (token) SessionStore.deleteSession(token);
   res.setHeader('Set-Cookie', SessionStore.clearCookieHeader());
-  if (session) console.log('%s', `[auth] logout — user="${session.username}" ip=${_clientIp(req)}`);
+  if (session) {
+    console.log('%s', `[auth] logout — user="${session.username}" ip=${_clientIp(req)}`);
+    audit.forLogin(req, session.username).record({ action: 'auth.logout', targetType: 'user',
+      targetId: session.userId, targetName: session.username });
+  }
   res.json({ ok: true });
 });
 
@@ -1318,6 +1409,8 @@ app.put('/api/auth/me/active-router', (req, res) => {
     return res.status(403).json({ ok: false, error: 'Not permitted' });
   }
   SessionStore.updateSession(token, { activeRouterId: routerId });
+  audit.fromReq(req).record({ action: 'account.active-router', targetType: 'router',
+    targetId: routerId, targetName: router.label || router.host, routerId });
   res.json({ ok: true });
 });
 
@@ -1344,6 +1437,10 @@ app.post('/api/users/setup', setupLimiter, async (req, res) => {
       // grants, and every guard refuses them — locked out of their own instance
       // the moment setup completes.
       Rbac.syncUserGrants(user);
+      // A public route that mints an administrator. It is the single most
+      // consequential write in the app and had no record of any kind.
+      audit.forLogin(req, user.username).record({ action: 'auth.setup', targetType: 'user',
+        targetId: user.id, targetName: user.username, note: 'initial administrator created' });
       res.json({ ok: true, user });
     } catch (e) {
       _setupClaimed = false; // creation failed — let setup be retried
@@ -1383,6 +1480,8 @@ app.post('/api/users', Rbac.requireGlobalAdmin, async (req, res) => {
     // new user starts with none and is granted explicitly — projecting a
     // default 'viewer' here would hand every new account read of every router.
     if (role !== undefined || allowedRouterIds !== undefined) Rbac.syncUserGrants(user);
+    audit.fromReq(req).record({ action: 'user.create', targetType: 'user',
+      targetId: user.id, targetName: user.username });
     res.json({ ok: true, user });
   } catch (e) {
     res.status(500).json({ ok: false, error: sanitizeErr(e) });
@@ -1407,8 +1506,12 @@ app.put('/api/users/:id', Rbac.requireGlobalAdmin, async (req, res) => {
     if (updates.role !== undefined && !Users.ROLES.includes(updates.role)) {
       return res.status(400).json({ ok: false, error: 'Invalid role' });
     }
+    const _before = Users.getUserSync(id);
     const updated = await Users.updateUser(id, updates);
     if (!updated) return res.status(404).json({ ok: false, error: 'User not found' });
+    // `updates` may carry a password; audit.js redacts it by field name.
+    audit.fromReq(req).record({ action: 'user.update', targetType: 'user', targetId: id,
+      targetName: updated.username || id, before: _before, after: updates });
     // Re-project onto grants ONLY if this request actually carried the legacy
     // fields. syncUserGrants() deletes every grant the principal holds and
     // rebuilds them from role + allowedRouterIds — so running it
@@ -1452,8 +1555,12 @@ app.delete('/api/users/:id', Rbac.requireGlobalAdmin, async (req, res) => {
     if (Rbac.wouldOrphanGlobalAdmin(() => db.deleteGrantsForPrincipal('user', id))) {
       return res.status(400).json({ ok: false, error: 'That would leave nobody with administrator access' });
     }
+    const _before = Users.getUserSync(id);
     const deleted = await Users.deleteUser(id);
     if (!deleted) return res.status(404).json({ ok: false, error: 'User not found' });
+    audit.fromReq(req).record({ action: 'user.delete', targetType: 'user', targetId: id,
+      targetName: _before && _before.username ? _before.username : id,
+      note: 'grants, layouts and notification config removed with the account' });
     // Users live in JSON, so their grants and memberships have no foreign key to
     // cascade through — clear them here rather than leaving rows pointing at an
     // id that could later be reused.
@@ -1546,6 +1653,9 @@ app.post('/api/account/password', _accountPasswordLimiter, _requireAccount, asyn
     const revoked = SessionStore.deleteSessionsForUser(req.authSession.userId, token);
     console.log('%s', `[account] password changed — user="${_logSafe(req.authSession.username)}" ` +
                       `ip=${_clientIp(req)} othersRevoked=${revoked.length}`);
+    audit.fromReq(req).record({ action: 'account.password', targetType: 'user',
+      targetId: req.authSession.userId, targetName: req.authSession.username,
+      extra: { otherSessionsRevoked: revoked.length } });
     res.json({ ok: true, revokedOtherSessions: revoked.length });
   } catch (e) {
     console.error('[account] password change failed:', e.message);
@@ -1557,6 +1667,9 @@ app.post('/api/account/sessions/revoke-others', _accountSessionLimiter, _require
   const token   = SessionStore.parseCookieHeader(req.headers.cookie || '')['mikrodash_sid'];
   const revoked = SessionStore.deleteSessionsForUser(req.authSession.userId, token);
   console.log('%s', `[account] sessions revoked — user="${_logSafe(req.authSession.username)}" count=${revoked.length}`);
+  audit.fromReq(req).record({ action: 'account.sessions.revoke', targetType: 'user',
+    targetId: req.authSession.userId, targetName: req.authSession.username,
+    extra: { revoked: revoked.length } });
   res.json({ ok: true, revoked: revoked.length });
 });
 
@@ -1595,9 +1708,50 @@ app.post('/api/dashboard-layout', layoutLimiter, _requireDashboard, (req, res) =
     const body = req.body || {};
     if (!Array.isArray(body.cards)) return res.status(400).json({ ok: false });
     db.setLayout(_layoutUser(req), 'dashboard', { cards: body.cards });
+    audit.fromReq(req).record({ action: 'layout.update', targetType: 'layout',
+      targetName: 'dashboard' });
     res.json({ ok: true });
   } catch (e) {
     console.error('[dashboard-layout] save failed:', sanitizeErr(e));
+    res.status(500).json({ ok: false });
+  }
+});
+
+// ── Nav preferences API ───────────────────────────────────────────────────────
+// Whether the sidebar is grouped into categories, and which categories are open.
+// Same storage as the layouts above — one opaque blob per user, keyed by kind —
+// so the '_shared' identity for authMode 'none' and the delete-user cascade come
+// for free.
+//
+// RATE LIMIT ONLY, NO PERMISSION CHECK, and that is deliberate rather than an
+// omission. _modernAuthMiddleware has already 401'd anyone unauthenticated, and
+// this preference discloses nothing: not a router, not page data, not even which
+// pages exist. Copying _requireDashboard's canPageAnywhere here would lock a
+// Read Only user out of their own sidebar — the one thing every signed-in user
+// has, whatever their role.
+app.get('/api/nav-prefs', layoutLimiter, (req, res) => {
+  try { res.json(db.getLayout(_layoutUser(req), 'nav')); } catch (_) { res.json(null); }
+});
+
+app.post('/api/nav-prefs', layoutLimiter, (req, res) => {
+  try {
+    const body = req.body || {};
+    if (typeof body.grouped !== 'boolean') return res.status(400).json({ ok: false });
+    if (!Array.isArray(body.expanded))     return res.status(400).json({ ok: false });
+    // Filtered through the registry rather than stored as sent. An unbounded
+    // list of arbitrary strings inside a blob that later gets rendered is how a
+    // preference becomes a stored-XSS vector; there are only ever a handful of
+    // category keys, and they are all known here.
+    const expanded = [...new Set(body.expanded.map(String))]
+      .filter(k => Pages.CATEGORY_KEYS.includes(k))
+      .sort();
+    db.setLayout(_layoutUser(req), 'nav', { grouped: body.grouped, expanded });
+    // No audit row, unlike the dashboard layout above. Expanding a nav category
+    // is up to 60 events a minute per user, and a trail that records sidebar
+    // clicks is one nobody will read the important rows in.
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[nav-prefs] save failed:', sanitizeErr(e));
     res.status(500).json({ ok: false });
   }
 });
@@ -1643,6 +1797,8 @@ app.post('/api/topology-layout', layoutLimiter,
     if (Object.keys(positions).length) all[rid] = positions;
     else delete all[rid];                       // Re-layout posts {} to reset
     db.setLayout(_layoutUser(req), 'topology', all);
+    audit.fromReq(req).record({ action: 'layout.update', targetType: 'layout',
+      targetName: 'topology', routerId: body.routerId || null });
     res.json({ ok: true });
   } catch (e) {
     console.error('[topology-layout] save failed:', sanitizeErr(e));
@@ -1699,6 +1855,11 @@ app.post('/api/settings', Rbac.requireGlobalAdmin, (req, res) => {
     const body = req.body || {};
     if (body._reset) {
       const { DEFAULTS } = require('./settings');
+      // Recorded here, not after the normal save below: this branch returns
+      // early, so a single hook at the end of the handler would miss the one
+      // settings write that replaces the entire file.
+      audit.fromReq(req).record({ action: 'settings.reset', targetType: 'settings',
+        note: 'all settings restored to defaults' });
       Settings.save(DEFAULTS);
       io.emit('settings:pages', _pageSettings(DEFAULTS));
       return res.json({ ok:true, requiresRestart:false });
@@ -1716,6 +1877,9 @@ app.post('/api/settings', Rbac.requireGlobalAdmin, (req, res) => {
       updateCheckHours:[1,168],
       smtpPort:[1,65535],
       dbRetentionDays:[1,3650], dbAlertRetentionDays:[1,3650],
+      pollTopology:[5000,600000], pollVlans:[1000,60000], pollPpp:[1000,60000],
+      pollBridges:[1000,60000], pollDns:[1000,60000], pollCapsman:[1000,60000],
+      pollPackages:[5000,600000], pollRosusers:[5000,300000], pollQueues:[2000,60000], pollWan:[1000,60000],
     };
     const strFields  = ['pingTarget', 'telegramChatId', 'notifTitle', 'smtpHost', 'smtpFrom', 'smtpTo', 'ntfyUrl'];
     // authMode: whitelist only valid values
@@ -1751,7 +1915,11 @@ app.post('/api/settings', Rbac.requireGlobalAdmin, (req, res) => {
       else { try { new Intl.DateTimeFormat(undefined, { timeZone: tz }); updates.displayTimezone = tz; } catch (_) {} }
     }
 
-    const saved = Settings.save(updates);
+    // Captured before the write, or "before" is just "after" again.
+    const _prev  = Settings.load();
+    const saved  = Settings.save(updates);
+    audit.fromReq(req).record({ action: 'settings.update', targetType: 'settings',
+      before: _prev, after: updates });
     alerter.updateSettings(saved);
 
     // Apply poll interval changes live to the global-default session
@@ -1765,10 +1933,19 @@ app.post('/api/settings', Rbac.requireGlobalAdmin, (req, res) => {
     const _ovr    = (s.collection && s.collection.overrides) || {};
     const _pinned = (key) => _ovr[key] !== undefined;
 
-    const collectorMap = { conns:s.conns, talkers:s.talkers, system:s.system, wireless:s.wireless, vpn:s.vpn, firewall:s.firewall, ifStatus:s.ifStatus, ping:s.ping, arp:s.arp, dhcpNetworks:s.dhcpNetworks, bandwidth:s.bandwidth, routing:s.routing };
+    const collectorMap = { conns:s.conns, talkers:s.talkers, system:s.system, wireless:s.wireless, vpn:s.vpn, firewall:s.firewall, ifStatus:s.ifStatus, ping:s.ping, arp:s.arp, dhcpNetworks:s.dhcpNetworks, bandwidth:s.bandwidth, routing:s.routing, vlans:s.vlans, ppp:s.ppp,
+      topology:s.topology, bridges:s.bridges, dns:s.dns, capsman:s.capsman, packages:s.packages, rosusers:s.rosusers, queues:s.queues, wan:s.wan };
     const pollMap = { pollConns:'conns', pollTalkers:'talkers', pollSystem:'system', pollWireless:'wireless',
       pollVpn:'vpn', pollFirewall:'firewall', pollIfstatus:'ifStatus', pollBandwidth:'bandwidth',
-      pollPing:'ping', pollArp:'arp', pollDhcp:'dhcpNetworks', pollRouting:'routing' };
+      pollPing:'ping', pollArp:'arp', pollDhcp:'dhcpNetworks', pollRouting:'routing',
+      // These five were missing, and pollTopology/pollVlans/pollPpp with them:
+      // the sliders existed and the bounds existed, but with no entry here (and
+      // none in intFields below) the value was dropped on save and never
+      // reached the collector. Adding four more poll keys to that hole would
+      // have made it four times worse.
+      pollTopology:'topology', pollVlans:'vlans', pollPpp:'ppp',
+      pollBridges:'bridges', pollDns:'dns', pollCapsman:'capsman', pollPackages:'packages',
+      pollRosusers:'rosusers', pollQueues:'queues', pollWan:'wan' };
     for (const [key, name] of Object.entries(pollMap)) {
       if (key in updates && !_pinned(key)) {
         const col = collectorMap[name];
@@ -1958,7 +2135,13 @@ app.get('/api/user-notify', _userNotifyLimiter, _requireUserNotify, (req, res) =
 
 app.post('/api/user-notify', _userNotifyLimiter, _requireUserNotify, (req, res) => {
   try {
-    res.json({ ok: true, config: userNotify.save(req.authSession.userId, req.body || {}) });
+    const _cfg = userNotify.save(req.authSession.userId, req.body || {});
+    // The body carries channel credentials; audit.js redacts them by field name,
+    // so only the fact that a destination changed is recorded.
+    audit.fromReq(req).record({ action: 'account.notify', targetType: 'user',
+      targetId: req.authSession.userId, targetName: req.authSession.username,
+      note: 'personal notification channels updated' });
+    res.json({ ok: true, config: _cfg });
   } catch (e) {
     // save() rejects a malformed address. That is the caller's mistake to fix,
     // not a server fault, so it must not read as one.
@@ -2042,6 +2225,8 @@ app.post('/api/routers', Rbac.requireGlobalAdmin, (req, res) => {
       return res.status(400).json({ ok:false, error:'host is required' });
     }
     const router = Routers.add(body);
+    audit.fromReq(req).record({ action: 'router.create', targetType: 'router',
+      targetId: router.id, targetName: router.label || router.host, routerId: router.id });
     Rbac.bump(); _broadcastPermsChanged();
     _broadcastRoutersList();
     _syncAlertSessions();
@@ -2082,7 +2267,11 @@ app.put('/api/routers/:id', Rbac.requirePerm('router:manage', Rbac.fromParam('id
 
     // A siteId change alters who can reach this router, so every cached
     // authorization view is stale. Easy to miss: it reads as router config.
+    const _before = Routers.getById(req.params.id);
     const router = Routers.update(req.params.id, body);
+    audit.fromReq(req).record({ action: 'router.update', targetType: 'router',
+      targetId: req.params.id, targetName: router ? (router.label || router.host) : req.params.id,
+      routerId: req.params.id, before: _before, after: body });
     Rbac.bump(); _broadcastPermsChanged();
     if (!router) return res.status(404).json({ ok:false, error:'Router not found' });
     _broadcastRoutersList();
@@ -2129,7 +2318,12 @@ app.delete('/api/routers/:id', Rbac.requirePerm('router:manage', Rbac.fromParam(
     const _cfg       = Settings.load();
     const wasActive  = deletedId === _cfg.activeRouterId;
 
+    const _before = Routers.getById(deletedId);
     const deleted = Routers.remove(deletedId);
+    audit.fromReq(req).record({ action: 'router.delete', targetType: 'router',
+      targetId: deletedId, targetName: _before ? (_before.label || _before.host) : deletedId,
+      routerId: deletedId,
+      note: 'router-scoped grants and all stored history for this router were deleted with it' });
     if (!deleted) return res.status(404).json({ ok:false, error:'Router not found' });
     db.deleteGrantsForScope('router', deletedId);
     Rbac.bump(); _broadcastPermsChanged();
@@ -2193,6 +2387,8 @@ app.post('/api/routers/:id/activate', Rbac.requireGlobalAdmin, async (req, res) 
   }
   res.json({ ok:true, switching:true }); // respond before the async switch
   const result = await switchRouter(req.params.id);
+  audit.fromReq(req).record({ action: 'router.activate', targetType: 'router',
+    targetId: req.params.id, routerId: req.params.id });
   if (!result.ok) {
     console.error('[MikroDash] Router switch failed:', result.error);
     io.emit('router:switch-error', { error: result.error });
@@ -2422,6 +2618,8 @@ app.post('/api/groups', Rbac.requireGlobalAdmin, (req, res) => {
     const parsed = _parseName(req.body, { partial: false });
     if (parsed.error) return res.status(400).json({ ok: false, error: parsed.error });
     const group = db.createGroup(parsed.value);
+    audit.fromReq(req).record({ action: 'group.create', targetType: 'group',
+      targetId: group.id, targetName: group.name });
     if (Array.isArray(req.body.memberUserIds)) db.setGroupMembers(group.id, req.body.memberUserIds);
     Rbac.bump(); _broadcastPermsChanged();
     res.json({ ok: true, group });
@@ -2446,7 +2644,11 @@ app.put('/api/groups/:id', Rbac.requireGlobalAdmin, (req, res) => {
         Rbac.wouldOrphanGlobalAdmin(() => db.setGroupMembers(req.params.id, req.body.memberUserIds))) {
       return res.status(400).json({ ok: false, error: 'That would leave nobody with administrator access' });
     }
+    const _before = db.getGroup(req.params.id);
     const group = db.updateGroup(req.params.id, parsed.value);
+    audit.fromReq(req).record({ action: 'group.update', targetType: 'group',
+      targetId: req.params.id, targetName: group ? group.name : req.params.id,
+      before: _before, after: parsed.value });
     if (Array.isArray(req.body.memberUserIds)) db.setGroupMembers(req.params.id, req.body.memberUserIds);
     Rbac.bump(); _broadcastPermsChanged();
     res.json({ ok: true, group });
@@ -2465,7 +2667,10 @@ app.delete('/api/groups/:id', Rbac.requireGlobalAdmin, (req, res) => {
     if (Rbac.wouldOrphanGlobalAdmin(() => db.deleteGroup(req.params.id))) {
       return res.status(400).json({ ok: false, error: 'That would leave nobody with administrator access' });
     }
+    const _before = db.getGroup(req.params.id);
     db.deleteGroup(req.params.id);
+    audit.fromReq(req).record({ action: 'group.delete', targetType: 'group',
+      targetId: req.params.id, targetName: _before ? _before.name : req.params.id });
     Rbac.bump(); _broadcastPermsChanged();
     res.json({ ok: true });
   } catch (e) {
@@ -2503,6 +2708,11 @@ app.post('/api/grants', Rbac.requireGlobalAdmin, (req, res) => {
       createdBy: req.authSession ? req.authSession.userId : null,
     });
     Rbac.bump(); _broadcastPermsChanged();
+    audit.fromReq(req).record({ action: 'grant.create', targetType: 'grant', targetId: grant.id,
+      targetName: `${b.principalType}:${b.principalId} → ${roleId} @ ${b.scopeType}${scopeId ? ':' + scopeId : ''}`,
+      // Router-scoped grants are recorded against that router, so whoever
+      // administers it can see access to it being handed out.
+      routerId: b.scopeType === 'router' ? scopeId : null });
     res.json({ ok: true, grant });
   } catch (e) {
     console.error('[grants] create failed:', sanitizeErr(e));
@@ -2516,6 +2726,7 @@ app.delete('/api/grants/:id', Rbac.requireGlobalAdmin, (req, res) => {
       return res.status(400).json({ ok: false, error: 'That would leave nobody with administrator access' });
     }
     if (!db.deleteGrant(req.params.id)) return res.status(404).json({ ok: false, error: 'No such grant' });
+    audit.fromReq(req).record({ action: 'grant.delete', targetType: 'grant', targetId: req.params.id });
     Rbac.bump(); _broadcastPermsChanged();
     res.json({ ok: true });
   } catch (e) {
@@ -2574,6 +2785,8 @@ app.post('/api/roles', Rbac.requireGlobalAdmin, (req, res) => {
     if (pages.error) return res.status(400).json({ ok: false, error: pages.error });
 
     const role = db.createRole(parsed.value);
+    audit.fromReq(req).record({ action: 'role.create', targetType: 'role',
+      targetId: role.id, targetName: role.name });
     if (pages.value) db.setRolePages(role.id, pages.value);
     Rbac.bump(); _broadcastPermsChanged();
     res.json({ ok: true, role: _roleView(role) });
@@ -2600,7 +2813,14 @@ app.put('/api/roles/:id', Rbac.requireGlobalAdmin, (req, res) => {
     const pages = _parseRolePages(req.body);
     if (pages.error) return res.status(400).json({ ok: false, error: pages.error });
 
+    const _before = db.getRole(req.params.id);
+    const _beforePages = db.rolePages(req.params.id);
     const role = db.updateRole(req.params.id, parsed.value);
+    audit.fromReq(req).record({ action: 'role.update', targetType: 'role',
+      targetId: req.params.id, targetName: role ? role.name : req.params.id,
+      before: { name: _before && _before.name, pages: _beforePages },
+      after:  { name: parsed.value.name, pages: parsed.value.pages },
+      note: 'a role edit changes the answer for every principal holding it' });
     if (pages.value) db.setRolePages(req.params.id, pages.value);
     // Editing a role changes the answer for every principal holding it, at any
     // scope — the easiest bump to forget, and silent when missed.
@@ -2631,7 +2851,10 @@ app.delete('/api/roles/:id', Rbac.requireGlobalAdmin, (req, res) => {
         error: `That role is still assigned by ${used} grant${used === 1 ? '' : 's'}`,
       });
     }
+    const _before = db.getRole(req.params.id);
     db.deleteRole(req.params.id);
+    audit.fromReq(req).record({ action: 'role.delete', targetType: 'role',
+      targetId: req.params.id, targetName: _before ? _before.name : req.params.id });
     Rbac.bump(); _broadcastPermsChanged();
     res.json({ ok: true });
   } catch (e) {
@@ -2663,6 +2886,8 @@ app.post('/api/sites', Rbac.requireGlobalAdmin, (req, res) => {
     const parsed = _parseSiteBody(req.body, { partial: false });
     if (parsed.error) return res.status(400).json({ ok: false, error: parsed.error });
     const site = db.createSite(parsed.value);
+    audit.fromReq(req).record({ action: 'site.create', targetType: 'site',
+      targetId: site.id, targetName: site.name });
     io.emit('sites:update', db.listSites());
     res.json({ ok: true, site });
   } catch (e) {
@@ -2682,7 +2907,11 @@ app.put('/api/sites/:id', Rbac.requireGlobalAdmin, (req, res) => {
     if (!db.getSite(req.params.id)) return res.status(404).json({ ok: false, error: 'No such site' });
     const parsed = _parseSiteBody(req.body, { partial: true });
     if (parsed.error) return res.status(400).json({ ok: false, error: parsed.error });
+    const _before = db.getSite(req.params.id);
     const site = db.updateSite(req.params.id, parsed.value);
+    audit.fromReq(req).record({ action: 'site.update', targetType: 'site',
+      targetId: req.params.id, targetName: site ? site.name : req.params.id,
+      before: _before, after: parsed.value });
     io.emit('sites:update', db.listSites());
     res.json({ ok: true, site });
   } catch (e) {
@@ -2713,8 +2942,17 @@ app.put('/api/sites/:id/routers', Rbac.requireGlobalAdmin, (req, res) => {
     for (const r of all) {
       const shouldBeHere = wanted.includes(r.id);
       const isHere       = r.siteId === req.params.id;
-      if (shouldBeHere && !isHere)      { Routers.update(r.id, { siteId: req.params.id }); changed++; }
-      else if (!shouldBeHere && isHere) { Routers.update(r.id, { siteId: '' });            changed++; }
+      if (shouldBeHere && !isHere) {
+        Routers.update(r.id, { siteId: req.params.id }); changed++;
+        audit.fromReq(req).record({ action: 'router.site', targetType: 'router', targetId: r.id,
+          targetName: r.label || r.host, routerId: r.id,
+          before: { siteId: r.siteId || '' }, after: { siteId: req.params.id } });
+      } else if (!shouldBeHere && isHere) {
+        Routers.update(r.id, { siteId: '' }); changed++;
+        audit.fromReq(req).record({ action: 'router.site', targetType: 'router', targetId: r.id,
+          targetName: r.label || r.host, routerId: r.id,
+          before: { siteId: r.siteId || '' }, after: { siteId: '' } });
+      }
     }
     if (changed) {
       // A router's site determines who can reach it through a site-scoped grant.
@@ -2735,7 +2973,11 @@ app.delete('/api/sites/:id', Rbac.requireGlobalAdmin, (req, res) => {
     // first: a router pointing at a site that no longer exists would render a
     // blank chip and, once Phase 3 lands, be unreachable to a site-scoped grant.
     const detached = Routers.clearSite(req.params.id);
+    const _before = db.getSite(req.params.id);
     db.deleteSite(req.params.id);
+    audit.fromReq(req).record({ action: 'site.delete', targetType: 'site',
+      targetId: req.params.id, targetName: _before ? _before.name : req.params.id,
+      note: 'routers detached and site-scoped grants removed' });
     // Site-scoped grants would otherwise outlive the site they name.
     db.deleteGrantsForScope('site', req.params.id);
     // Detaching routers changes who can reach them, so every cached view is stale.
@@ -2800,6 +3042,15 @@ app.get('/healthz', (req, res) => {
       ping:     { ts:st.lastPingTs,     err:sanitizeErr(st.lastPingErr)     },
       netwatch: { ts:st.lastNetwatchTs, err:sanitizeErr(st.lastNetwatchErr) },
       topology: { ts:st.lastTopologyTs, err:sanitizeErr(st.lastTopologyErr) },
+      vlans: { ts:st.lastVlansTs, err:sanitizeErr(st.lastVlansErr) },
+      ppp: { ts:st.lastPppTs, err:sanitizeErr(st.lastPppErr) },
+      bridges: { ts:st.lastBridgesTs, err:sanitizeErr(st.lastBridgesErr) },
+      dns: { ts:st.lastDnsTs, err:sanitizeErr(st.lastDnsErr) },
+      capsman: { ts:st.lastCapsmanTs, err:sanitizeErr(st.lastCapsmanErr) },
+      packages: { ts:st.lastPackagesTs, err:sanitizeErr(st.lastPackagesErr) },
+      rosusers: { ts:st.lastRosusersTs, err:sanitizeErr(st.lastRosusersErr) },
+      queues: { ts:st.lastQueuesTs, err:sanitizeErr(st.lastQueuesErr) },
+      wan: { ts:st.lastWanTs, err:sanitizeErr(st.lastWanErr) },
     },
   };
   res.status(statusCode).json(body);
@@ -3324,6 +3575,11 @@ function _alertRow(r, names) {
   };
 }
 
+// Frequency-scan registry. Not a collector: src/collection.js models long-lived
+// things with a poll interval and a session property, and this is a one-off
+// action that takes a radio off the air for at most 35 seconds.
+const wifiScans = wifiScanLib.createRegistry({ sanitize: sanitizeErr });
+
 app.post('/api/alerts/:id/ack', ackLimiter, (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -3342,6 +3598,8 @@ app.post('/api/alerts/:id/ack', ackLimiter, (req, res) => {
     }
     const who = req.authSession?.username || null;
     const row = db.acknowledgeAlert(id, who);
+    audit.fromReq(req).record({ action: 'alert.ack', targetType: 'alert', targetId: String(id),
+      routerId: owner });
     if (!row) return res.status(404).json({ ok: false });
     // Tell every browser on that router, so two people looking at the same
     // alert do not each have to acknowledge it.
@@ -3370,6 +3628,8 @@ app.post('/api/alerts/clear-all', ackLimiter, (req, res) => {
     }
     const who = req.authSession?.username || null;
     const ids = db.resolveAllAlerts(rid, who);
+    audit.fromReq(req).record({ action: 'alert.clear', targetType: 'alert', routerId: rid,
+      extra: { cleared: ids.length } });
     if (ids.length) {
       io.to('router-' + rid).emit('alerts:cleared-all', {
         routerId: rid, ids, clearedAt: Date.now(), clearedBy: who,
@@ -3512,6 +3772,84 @@ function _purgeOpts(req) {
   return { routerId: scope.routerId, types, olderThanMs: days * 86400000 };
 }
 
+// ── Audit trail ───────────────────────────────────────────────────────────────
+//
+// Deliberately not under /api/reports/*. Those are all
+// requirePerm('router:history', fromQuery('routerId')) and answer 400 without a
+// router; half the audit rows have no router at all. The gate here is per-ROW
+// instead of per-request:
+//
+//   scope='app'     a user, role, grant or settings change — system:principals
+//   scope='router'  filtered to the routers this session may see
+//
+// Both halves are resolved from the session and passed to the query, which
+// returns nothing when neither applies. /api/db/stats mixes a global gate with a
+// per-router filter the same way.
+function _auditScope(req) {
+  // Auth disabled means one local operator with full reach; matching what
+  // Rbac.can() already does rather than inventing a second answer.
+  if (!_isModern()) return { includeApp: true, routerIds: Routers.loadAll().map(r => r.id) };
+  return {
+    includeApp: Rbac.can(req.authSession, 'system:principals'),
+    routerIds:  Rbac.effectiveRouterIds(req.authSession, 'router:history'),
+  };
+}
+
+function _auditQuery(req) {
+  const q = req.query || {};
+  const scope = _auditScope(req);
+  return {
+    includeApp: scope.includeApp,
+    // A routerId filter narrows the permitted set; it can never widen it.
+    routerIds:  q.routerId && scope.routerIds.includes(String(q.routerId))
+                  ? [String(q.routerId)] : scope.routerIds,
+    from:    parseInt(q.from, 10) || 0,
+    to:      parseInt(q.to, 10)   || Date.now(),
+    actor:   q.actor   ? String(q.actor).slice(0, 100)   : '',
+    action:  q.action  ? String(q.action).slice(0, 60)   : '',
+    outcome: ['ok', 'denied', 'failed'].includes(q.outcome) ? q.outcome : '',
+    search:  q.search  ? String(q.search).slice(0, 100)  : '',
+    limit:   q.limit, offset: q.offset,
+  };
+}
+
+// Any signed-in user may reach the page; what they SEE is decided per row, and a
+// session with neither global administration nor router history gets an empty
+// list rather than a 403 — the page is legitimately empty for them.
+app.get('/api/audit', (req, res) => {
+  try {
+    const out = db.queryAuditEvents(_auditQuery(req));
+    res.json({ ok: true, ...out, facets: db.auditFacets() });
+  } catch (e) {
+    console.error('[audit] query failed:', sanitizeErr(e));
+    res.status(500).json({ ok: false });
+  }
+});
+
+app.get('/api/audit/export', (req, res) => {
+  try {
+    const q = _auditQuery(req);
+    // Export is a snapshot of the filtered view, not the page — but still
+    // bounded, because a PDF has no row cap of its own.
+    const { rows } = db.queryAuditEvents({ ...q, limit: 1000, offset: 0 });
+    const flat = rows.map(r => ({
+      ts: _tsFmt(r.ts), actor: r.actor_name, ip: r.actor_ip || '', action: r.action,
+      target: r.target_name || r.target_id || '', router: r.router_id || '',
+      outcome: r.outcome, detail: r.detail || '',
+    }));
+    const cols = ['ts', 'actor', 'ip', 'action', 'target', 'router', 'outcome', 'detail'];
+    if (String(req.query.format) === 'pdf') {
+      return _toPdf('Audit Trail', cols, flat, res, { meta: `${flat.length} events` });
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="mikrodash-audit.csv"');
+    res.send(_toCsv(flat, cols));
+  } catch (e) {
+    console.error('[audit] export failed:', sanitizeErr(e));
+    res.status(500).json({ ok: false });
+  }
+});
+
 app.get('/api/db/stats', Rbac.requireGlobalAdmin, (req, res) => {
   try {
     const s = db.stats();
@@ -3537,6 +3875,12 @@ app.post('/api/db/purge', Rbac.requireGlobalAdmin, (req, res) => {
     }
     const before = db.stats().bytes;
     const result = db.purge(opts);
+    // audit_events is absent from PURGE_TABLES, so this row survives the very
+    // purge it describes — which is the point of keeping it out.
+    audit.fromReq(req).record({ action: 'db.purge', targetType: 'database',
+      routerId: opts.routerId || null,
+      extra: { deleted: result.deleted, types: opts.types || 'all',
+               olderThanDays: req.body && req.body.olderThanDays } });
     // Without this the rows go but the file on disk never shrinks, which reads
     // as the cleanup having done nothing.
     const vac    = result.deleted > 0 ? db.vacuum() : { before, after: before };
@@ -3603,8 +3947,16 @@ function _refreshAutoGeo(router, wanIp) {
   // Survives a restart, so a reboot costs one lookup per router, not one write.
   if (router.geo && router.geo.auto && router.geo.auto.ip === wanIp) return false;
 
-  if (decision.action === 'clear') return !!Routers.updateGeoAuto(router.id, null);
-  return !!Routers.updateGeoAuto(router.id, decision.auto);
+  if (decision.action === 'clear') {
+    const done = !!Routers.updateGeoAuto(router.id, null);
+    if (done) audit.system().record({ action: 'router.geo', targetType: 'router',
+      targetId: router.id, routerId: router.id, note: 'auto location cleared' });
+    return done;
+  }
+  const done = !!Routers.updateGeoAuto(router.id, decision.auto);
+  if (done) audit.system().record({ action: 'router.geo', targetType: 'router',
+    targetId: router.id, routerId: router.id, after: decision.auto });
+  return done;
 }
 
 // ── Socket.IO ─────────────────────────────────────────────────────────────────
@@ -3866,6 +4218,15 @@ async function sendInitialState(socket, entry) {
     console.warn('[alerts] initial state failed:', sanitizeErr(e));
   }
   if (s.topology.lastPayload && _mayReplay(socket, 'topology')) socket.emit('topology:update', s.topology.lastPayload);
+  if (s.vlans.lastPayload && _mayReplay(socket, 'vlans')) socket.emit('vlans:update', s.vlans.lastPayload);
+  if (s.ppp.lastPayload   && _mayReplay(socket, 'ppp'))   socket.emit('ppp:update',   s.ppp.lastPayload);
+  if (s.bridges.lastPayload  && _mayReplay(socket, 'bridges'))  socket.emit('bridges:update',  s.bridges.lastPayload);
+  if (s.dns.lastPayload      && _mayReplay(socket, 'dns'))      socket.emit('dns:update',      s.dns.lastPayload);
+  if (s.capsman.lastPayload  && _mayReplay(socket, 'capsman'))  socket.emit('capsman:update',  s.capsman.lastPayload);
+  if (s.packages.lastPayload && _mayReplay(socket, 'packages')) socket.emit('packages:update', s.packages.lastPayload);
+  if (s.rosusers.lastPayload && _mayReplay(socket, 'rosusers')) socket.emit('rosusers:update', s.rosusers.lastPayload);
+  if (s.queues.lastPayload   && _mayReplay(socket, 'queues'))   socket.emit('queues:update',   s.queues.lastPayload);
+  if (s.wan.lastPayload      && _mayReplay(socket, 'wan'))      socket.emit('wan:update',      s.wan.lastPayload);
 
   socket.emit('settings:pages', _pageSettings(_ps));
 
@@ -3893,6 +4254,15 @@ function _idleSuspend(session, entry) {
   session.firewall.suspend();
   session.routing.suspend();
   session.topology.suspend();
+  session.vlans.suspend();
+  session.ppp.suspend();
+  session.bridges.suspend();
+  session.dns.suspend();
+  session.capsman.suspend();
+  session.packages.suspend();
+  session.rosusers.suspend();
+  session.queues.suspend();
+  session.wan.suspend();
   session.ping.suspend();
   session.talkers.suspend();
   session.dhcpNetworks.suspend();
@@ -3903,7 +4273,15 @@ function _idleResume(session, entry) {
   session.conns.resume();
   session.ifStatus.resume();
   session.system.resume();
+  // Every page-scoped collector is resumed HERE and only here, from room
+  // occupancy — so a collector whose page nobody is looking at stays suspended
+  // even though a browser is connected. Resuming vlans/ppp/bridges/dns/capsman/
+  // packages/rosusers/queues/wan by name used to happen below this line, which
+  // is exactly what kept them polling the router from the Dashboard.
   _updateAllPageStreams(session, entry);
+  // These three genuinely have no page of their own: ping feeds the dashboard
+  // gauge and the alerter, talkers and dhcpNetworks feed dashboard cards. They
+  // are suspended by name above and must be resumed by name.
   session.ping.resume();
   session.talkers.resume();
   session.dhcpNetworks.resume();
@@ -3913,6 +4291,49 @@ function _idleResume(session, entry) {
 // streaming only while at least one socket is in one of its rooms. The keys
 // double as the session property and page name (session.firewall ↔ 'firewall').
 const _PAGE_STREAM_ROOMS = Pages.STREAM_ROOMS;
+
+// Pages whose collector holds no stream, so page:focus has to replay the last
+// payload explicitly. Derived from the registry — a page belongs here precisely
+// when it has a collector but no stream rooms — rather than listed by hand,
+// because the hand-written version was already two pages out of date once.
+// logs is excluded deliberately: its replay is a DIFFERENT event
+// (logs:history, from a ring buffer), and emitting logs:update at the page
+// would append the last batch a second time on every visit.
+/**
+ * Serialise router writes per router.
+ *
+ * Every write feature here reads the router's tables, checks them, and then
+ * writes — and RouterOS offers no compare-and-swap, so two operators acting at
+ * once could otherwise interleave an edit between another request's read and its
+ * write, letting a write land on a row the check cleared under different values.
+ * A promise chain per router makes the fresh read mean something.
+ *
+ * Shared by Router Users and Queues. One chain per router is strictly safer than
+ * one per feature, since the hazard is concurrent writes to the same device.
+ *
+ * Keyed by router id rather than by socket, because the hazard is two people on
+ * one router, not one person twice. Entries are dropped when the chain drains,
+ * so a removed router leaves nothing behind.
+ */
+const _routerWriteChains = new Map();
+function _routerWriteQueue(rid, fn) {
+  if (!rid) return Promise.resolve();
+  const prev = _routerWriteChains.get(rid) || Promise.resolve();
+  // Errors are already handled inside the handlers; catch here so one rejection
+  // cannot poison the chain for every later request on this router.
+  const next = prev.then(() => fn(rid)).catch((e) => {
+    console.error('%s', '[router-write] action failed:', (e && e.message) || e);
+  });
+  _routerWriteChains.set(rid, next);
+  next.finally(() => { if (_routerWriteChains.get(rid) === next) _routerWriteChains.delete(rid); });
+  return next;
+}
+
+const _NO_FOCUS_REPLAY = new Set(['logs']);
+const _REPLAY_ON_FOCUS = new Set(
+  Pages.KEYS.filter(k => !_NO_FOCUS_REPLAY.has(k)
+                      && !(_PAGE_STREAM_ROOMS[k] && _PAGE_STREAM_ROOMS[k].length)
+                      && _COLLECTOR_DEFS.some(c => c.page === k && c.sessionProp === k)));
 
 function _updatePageStream(session, entry, which) {
   if (!session || !entry.startupReady) return;
@@ -3944,6 +4365,21 @@ function _emitDiagnostics(session, rid, socket) {
     { name: 'ifStatus',     streams: (s.ifStatus._ifStream?1:0)+(s.ifStatus._addrStream?1:0)+(s.ifStatus._monitorStream?1:0) },
     { name: 'routing',      streams: (s.routing._routeStream?1:0)+(s.routing._ipv6Stream?1:0)+(s.routing._bgpStream?1:0) },
     { name: 'topology',     streams: s.topology._stream      ? 1 : 0 },
+    // These four hold one /listen channel each in stream mode and none in poll
+    // mode, so the count has to be read rather than assumed — a hardcoded 0 was
+    // exactly what made the old poll-only shape invisible here.
+    { name: 'vlans',        streams: s.vlans._listen   && s.vlans._listen.open   ? 1 : 0 },
+    { name: 'ppp',          streams: s.ppp._listen     && s.ppp._listen.open     ? 1 : 0 },
+    { name: 'bridges',      streams: s.bridges._listen && s.bridges._listen.open ? 1 : 0 },
+    { name: 'capsman',      streams: s.capsman._listen && s.capsman._listen.open ? 1 : 0 },
+    // dns, packages and rosusers hold no channel by design — see src/collection.js.
+    { name: 'dns',          streams: 0 },
+    { name: 'packages',     streams: 0 },
+    { name: 'rosusers',     streams: 0 },
+    // Two channels when streaming: one per queue menu. Neither carries data —
+    // they mark the tables stale and the tick reads them.
+    { name: 'queues',       streams: (s.queues._listens || []).filter(l => l && l.open).length },
+    { name: 'wan',          streams: s.wan._listen && s.wan._listen.open ? 1 : 0 },
   ];
   const total = collectors.reduce((sum, c) => sum + c.streams, 0);
   // Geo availability rides along here so a failed geoip-lite load is visible in
@@ -3966,6 +4402,14 @@ function _emitDiagnostics(session, rid, socket) {
 const _routersPageSockets = new Set();
 
 io.on('connection', (socket) => {
+  // `trust proxy` is Express middleware and a socket's request never passes
+  // through it, so req.ip is not available here. Resolve the address once at
+  // connect for the audit trail: behind a trusted proxy the forwarded header is
+  // the real client, otherwise the socket's own address is.
+  {
+    const fwd = TRUSTED_PROXY ? String(socket.handshake.headers['x-forwarded-for'] || '').split(',')[0].trim() : '';
+    socket._clientIp = (fwd || socket.handshake.address || '').replace(/^::ffff:/, '') || null;
+  }
   if (io.engine.clientsCount > MAX_SOCKETS) {
     console.warn('[MikroDash] connection rejected — max sockets reached:', MAX_SOCKETS);
     socket.disconnect(true);
@@ -4007,6 +4451,10 @@ io.on('connection', (socket) => {
   let _routersTimer = null;
 
   socket.on('disconnect', () => {
+    // Before any early return: the person who started the scan is gone, so stop
+    // disrupting the radio. The registry's own wall-clock stop is the backstop,
+    // never the only guard.
+    wifiScans.abortByOwner(socket.id);
     if (_routersTimer) { clearInterval(_routersTimer); _routersTimer = null; }
     if (_routersPageSockets.delete(socket.id) && _routersPageSockets.size === 0) overviewSessions.suspend();
     const rid = socket.routerId;
@@ -4050,10 +4498,16 @@ io.on('connection', (socket) => {
       if (s[name] && s[name].lastPayload)
         socket.emit(name + ':update', { ...s[name].lastPayload, ts: Date.now() });
     }
-    if (name === 'bandwidth' && s.bandwidth && s.bandwidth.lastPayload)
-      socket.emit('bandwidth:update', { ...s.bandwidth.lastPayload, ts: Date.now() });
     if (name === 'logs' && s.logs)
       socket.emit('logs:history', { entries: s.logs.getHistory() });
+    // Poll-only pages have no streamRooms, so the generic replay above — gated
+    // on _PAGE_STREAM_ROOMS[name] — never fires for them, and each would sit
+    // blank for a whole poll interval on every visit. Derived from the registry
+    // rather than listed by hand: the hand-written version was two pages out of
+    // date within one release. This also covers bandwidth, whose identical
+    // hand-written replay it replaced.
+    if (_REPLAY_ON_FOCUS.has(name) && s[name] && s[name].lastPayload)
+      socket.emit(name + ':update', { ...s[name].lastPayload, ts: Date.now() });
     // Interfaces and Topology both render the full interface payload, and
     // neither has a suspendable stream to replay through _PAGE_STREAM_ROOMS —
     // so without this, opening either shows nothing until the next tick now
@@ -4145,6 +4599,1072 @@ io.on('connection', (socket) => {
     if (!_pageAllowed(socket, 'firewall', 'write')) return;
     const e = rid ? _routerSessions.get(rid) : null;
     if (e && e.session && e.session.firewall) e.session.firewall.setActiveTable(table);
+  });
+
+  // ── Packages ──────────────────────────────────────────────────────────────
+  //
+  // The first router-CONFIG writes in the app. router:write has sat in the
+  // permission vocabulary since #108 with no call sites; these are them.
+  //
+  // enable/disable/uninstall DO NOT ACT — they schedule, `unschedule` reverses
+  // them, and nothing happens until apply-changes reboots the router. Verified
+  // on the live fleet. So the per-package verbs are cheap and reversible, and
+  // the reboot is the single dangerous button, gated separately below.
+
+  const _PKG_SCHEDULE = Object.freeze({
+    enable:     '/system/package/enable',
+    disable:    '/system/package/disable',
+    uninstall:  '/system/package/uninstall',
+    unschedule: '/system/package/unschedule',
+  });
+
+  const _pkgSession = () => {
+    const rid = socket.routerId;
+    const e   = rid ? _routerSessions.get(rid) : null;
+    const session = e && e.session;
+    // A collector switched off for this router (#105) has no inventory, so there
+    // is nothing to target and nothing to show afterwards. The writes go through
+    // session.ros rather than the collector precisely because the collector may
+    // be a null stub — but without its payload the actions have no subject.
+    const off = !session || !session.packages || session.packages.disabled;
+    return { rid, entry: e, session, off };
+  };
+  const _pkgErr = (code, extra) =>
+    socket.emit('packages:error', Object.assign({ code }, extra || {}));
+
+  // A permission trap on a write reads nothing like a missing menu, and the
+  // difference matters to whoever is looking at the button: one is "you cannot",
+  // the other is "the RouterOS user cannot". system.js:229 draws the same line
+  // for the update check.
+  const _rosWriteFail = (e) => {
+    const msg = String((e && e.message) || e).toLowerCase();
+    if (msg.includes('not enough permissions') || msg.includes('permission denied') ||
+        msg.includes('no permissions')) return 'router-write-policy';
+    if (msg.includes('no such') || msg.includes('unknown command')) return 'unsupported';
+    return 'failed';
+  };
+
+  // The page draws its action buttons from this, not from the payload: whether
+  // somebody may act is a property of the socket, and the collector payload is
+  // shared by every viewer of the router.
+  socket.on('packages:caps', () => {
+    const { rid, session, off } = _pkgSession();
+    if (!rid || !session || off) return _pkgErr('unavailable');
+    if (!_pageAllowed(socket, 'packages', 'read')) return _pkgErr('denied');
+    socket.emit('packages:caps', {
+      permitted: _socketCan(socket, 'router:write', rid) && _pageAllowed(socket, 'packages', 'write'),
+      routerName: (Routers.getById(rid) || {}).label || '',
+    });
+  });
+
+  socket.on('packages:schedule', async (req) => {
+    const { rid, session, off } = _pkgSession();
+    if (!rid || !session || off) return _pkgErr('unavailable');
+    // Both gates, the way wifiscan does it: _pageAllowed carries the install-wide
+    // page toggle, and _socketCan keeps router:write the named, greppable one.
+    if (!_pageAllowed(socket, 'packages', 'write') || !_socketCan(socket, 'router:write', rid)) {
+      audit.fromSocket(socket).denied({ action: 'package.schedule', targetType: 'package',
+        routerId: rid, targetName: req && req.name ? String(req.name) : null });
+      return _pkgErr('denied');
+    }
+
+    const action = req && typeof req.action === 'string' ? req.action : '';
+    const name   = req && typeof req.name === 'string' ? req.name : '';
+    const cmd    = _PKG_SCHEDULE[action];
+    if (!cmd || !name) return _pkgErr('bad-request');
+
+    // Resolved against what the collector last read rather than trusting the id
+    // the browser sent, so a stale or crafted page cannot address a row that was
+    // never on screen.
+    const pkg = ((session.packages.lastPayload || {}).packages || [])
+      .find(x => x.name === name);
+    if (!pkg || !pkg.id) return _pkgErr('no-such-package', { name });
+
+    try {
+      await session.ros.write(cmd, ['=.id=' + pkg.id]);
+      audit.fromSocket(socket).record({ action: 'package.' + action, targetType: 'package',
+        targetId: pkg.id, targetName: pkg.name, routerId: rid,
+        note: action === 'unschedule' ? 'scheduled change cancelled'
+                                      : 'scheduled; inert until apply-changes reboots the router' });
+      // Re-read rather than assuming: the banner must show what the router did,
+      // not what the browser hoped it did.
+      await session.packages.refreshNow();
+      socket.emit('packages:ok', { action, name });
+    } catch (e) {
+      _pkgErr(_rosWriteFail(e), { name, message: sanitizeErr(e) });
+    }
+  });
+
+  socket.on('packages:check', async () => {
+    const { rid, session, off } = _pkgSession();
+    if (!rid || !session || off) return _pkgErr('unavailable');
+    if (!_pageAllowed(socket, 'packages', 'write') || !_socketCan(socket, 'router:write', rid)) {
+      audit.fromSocket(socket).denied({ action: 'package.check', routerId: rid });
+      return _pkgErr('denied');
+    }
+    try {
+      // Reaches MikroTik's servers, so it is a button rather than a poll. The
+      // 12-hourly background check in system.js is unaffected.
+      await session.ros.write('/system/package/update/check-for-updates', []);
+      audit.fromSocket(socket).record({ action: 'package.check', targetType: 'package',
+        routerId: rid, note: 'contacted MikroTik update servers' });
+      await session.packages.refreshNow();
+      socket.emit('packages:ok', { action: 'check' });
+    } catch (e) {
+      _pkgErr(_rosWriteFail(e), { message: sanitizeErr(e) });
+    }
+  });
+
+  socket.on('packages:apply', async (req) => {
+    const { rid, session, off } = _pkgSession();
+    if (!rid || !session || off) return _pkgErr('unavailable');
+    if (!_pageAllowed(socket, 'packages', 'write') || !_socketCan(socket, 'router:write', rid)) {
+      audit.fromSocket(socket).denied({ action: 'package.apply', routerId: rid });
+      return _pkgErr('denied');
+    }
+
+    // Second gate, and the only one of its kind in the app: this reboots a
+    // production router. The browser must send back the router's own name, so a
+    // misclick — or a click on the wrong router — cannot reach it.
+    const routerName = (Routers.getById(rid) || {}).label || '';
+    const confirm    = req && typeof req.confirm === 'string' ? req.confirm.trim() : '';
+    if (!routerName || confirm.toLowerCase() !== routerName.toLowerCase())
+      return _pkgErr('confirm-mismatch', { routerName });
+
+    const pending = ((session.packages.lastPayload || {}).packages || [])
+      .filter(x => x.scheduled);
+    if (!pending.length) return _pkgErr('nothing-scheduled');
+
+    console.log('%s', `[packages] apply-changes on ${routerName} — ${pending.length} scheduled change(s), router will reboot`);
+    socket.emit('packages:applying', { routerName, count: pending.length });
+    try {
+      // The router reboots as it answers, so a lost connection here is the
+      // expected outcome, not a failure. Anything the write throws after the
+      // command is away would be reported as an error the user should ignore.
+      // Recorded BEFORE the call: this reboots the router, so the connection is
+      // expected to drop while the command is in flight. Writing the row
+      // afterwards would lose the record of the most consequential action here.
+      audit.fromSocket(socket).record({ action: 'package.apply', targetType: 'router',
+        targetId: rid, targetName: routerName, routerId: rid,
+        extra: { scheduled: pending.map(p => p.name + ':' + (p.scheduledAction || 'change')) },
+        note: 'applied scheduled package changes and rebooted the router' });
+      await session.ros.write('/system/package/apply-changes', []);
+      socket.emit('packages:ok', { action: 'apply', routerName });
+    } catch (e) {
+      const code = _rosWriteFail(e);
+      if (code === 'failed') socket.emit('packages:ok', { action: 'apply', routerName, rebooting: true });
+      else _pkgErr(code, { message: sanitizeErr(e) });
+    }
+  });
+
+
+  // ── Router Users (RouterOS /user) ─────────────────────────────────────────
+  //
+  // The only write surface in this app that can lock MikroDash out of the
+  // router it manages, and unrecoverably: once the login is broken the fix is
+  // WinBox, not this page. src/routeros/selfGuard.js holds every refusal and
+  // explains each one; the rules below are about how it is CALLED.
+  //
+  // Three properties every handler here has, and the Packages handlers above do
+  // not need:
+  //
+  //  1. IT RE-READS FROM THE ROUTER. Packages resolves its target from the
+  //     collector's last payload, which is safer than trusting the browser.
+  //     Here the payload is the thing that goes stale in the dangerous
+  //     direction — a row renamed to `MikroDash` after the last tick would read
+  //     as unprotected — so the guard runs against a read taken in the same
+  //     tick as the write. `lastPayload` appears in none of these handlers, and
+  //     a test asserts it.
+  //
+  //  2. IT ROUND-TRIPS THE NAME. The browser sends the `.id` AND the name it
+  //     displayed. A `.id` is stable across renames, which makes it the right
+  //     key to address a row with and the wrong one to identify it by. If the
+  //     freshly-read row no longer carries the name the operator was looking
+  //     at, the action is refused as `stale-row` rather than applied to
+  //     whatever is there now.
+  //
+  //  3. IT IS SERIALISED PER ROUTER. read → check → write runs under a
+  //     per-router promise chain, so two operators cannot interleave a rename
+  //     with an edit. RouterOS has no compare-and-swap, so this is what makes
+  //     the fresh read mean anything.
+
+  // Takes the router id rather than reading socket.routerId, because these
+  // handlers run from a queue: by the time one executes, a router:switch may
+  // have moved the socket, and the write must land on the router the operator
+  // was looking at when they pressed the button.
+  const _ruSession = (rid) => {
+    const e   = rid ? _routerSessions.get(rid) : null;
+    const session = e && e.session;
+    // Writes go through session.ros, not the collector, so they work even for a
+    // null-collector stub (#105) — but without the collector there is nothing to
+    // refresh afterwards and no page to show it on.
+    const off = !session || !session.rosusers || session.rosusers.disabled;
+    return { rid, session, off };
+  };
+  const _ruErr = (code, extra) =>
+    socket.emit('rosusers:error', Object.assign({ code }, extra || {}));
+
+  /** Both gates. _pageAllowed is the install toggle AND the role; router:write is conferred by write on any page, so the page gate is what scopes this feature. */
+  const _ruMayWrite = (rid) =>
+    _pageAllowed(socket, 'rosusers', 'write') && _socketCan(socket, 'router:write', rid);
+
+  /**
+   * Read the three tables and resolve who we are, in one place.
+   *
+   * Deliberately not proplist-filtered the way the collector is: the guard
+   * compares names and groups, and a field the guard does not read cannot
+   * change its answer, but a field the ROUTER renamed could. Cheapest possible
+   * correctness on a table of single-digit length.
+   */
+  const _ruRead = async (session, rid) => {
+    const [users, groups, active] = await Promise.all([
+      session.ros.write('/user/print', []),
+      session.ros.write('/user/group/print', []),
+      session.ros.write('/user/active/print', []),
+    ]);
+    const clean = (rows) => (rows || []).filter(r => r && r.name);
+    const cfg   = Routers.getById(rid) || {};
+    const self  = selfGuard.resolveSelf(clean(users), clean(active),
+                                        [(session.ros.cfg || {}).username, cfg.username]);
+    return { users: clean(users), groups: clean(groups), active: clean(active), self };
+  };
+
+  /**
+   * Find a row by id and confirm it still carries the name the operator saw.
+   *
+   * Returns null for both "gone" and "renamed underneath you", which the caller
+   * reports as `stale-row`: from the operator's side those are the same event —
+   * the screen they acted on no longer describes the router.
+   */
+  const _ruRow = (rows, id, expectedName) => {
+    const row = (rows || []).find(r => r['.id'] === id);
+    if (!row) return null;
+    if (expectedName && String(row.name) !== String(expectedName)) return null;
+    return row;
+  };
+
+  socket.on('rosusers:caps', () => {
+    const rid = socket.routerId;
+    const { session, off } = _ruSession(rid);
+    if (!rid || !session || off) return _ruErr('unavailable');
+    if (!_pageAllowed(socket, 'rosusers', 'read')) return _ruErr('denied');
+    socket.emit('rosusers:caps', {
+      permitted: _ruMayWrite(rid),
+      routerName: (Routers.getById(rid) || {}).label || '',
+    });
+  });
+
+  /**
+   * Create or edit a user.
+   *
+   * `id` present means edit. A password is accepted on create and on an
+   * explicit reset, is never echoed back, and never reaches the audit trail:
+   * audit.js redacts by field name and a test asserts it for this action.
+   */
+  socket.on('rosuser:save', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _ruSession(rid);
+    if (!rid || !session || off) return _ruErr('unavailable');
+    const r = req || {};
+    const editing = !!r.id;
+    if (!_ruMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: editing ? 'rosuser.update' : 'rosuser.create',
+        targetType: 'rosuser', routerId: rid, targetName: r.name ? String(r.name) : null });
+      return _ruErr('denied');
+    }
+
+    const name  = typeof r.name  === 'string' ? r.name.trim()  : '';
+    const group = typeof r.group === 'string' ? r.group.trim() : '';
+    if (!name || !group) return _ruErr('bad-request');
+
+    try {
+      const { users, groups, self } = await _ruRead(session, rid);
+      if (!groups.some(g => String(g.name) === group)) return _ruErr('no-such-group', { name: group });
+
+      const target = editing ? _ruRow(users, r.id, r.expectedName) : null;
+      if (editing && !target) return _ruErr('stale-row', { name });
+
+      const verdict = selfGuard.checkUser(self, {
+        verb: editing ? 'set' : 'add',
+        target: target ? { name: target.name, group: target.group } : null,
+        values: { name, group },
+      });
+      if (!verdict.ok) {
+        audit.fromSocket(socket).denied({ action: editing ? 'rosuser.update' : 'rosuser.create',
+          targetType: 'rosuser', routerId: rid, targetName: name, note: verdict.code });
+        return _ruErr(verdict.code, { name: verdict.detail || name });
+      }
+
+      // The router enforces its own minimum, but it answers with a bare
+      // failure. Checking here is what turns that into a sentence the operator
+      // can act on — the router stays the authority either way.
+      const pw = typeof r.password === 'string' ? r.password : '';
+      // The plaintext is never mentioned again below this line — the audit call
+      // reads this flag instead, so there is no expression anywhere in it that
+      // could serialise the password even by accident.
+      const passwordSet = !!pw;
+      const minLen = ((session.rosusers.lastPayload || {}).passwordPolicy || {}).minLength || 0;
+      if (pw && minLen && pw.length < minLen) return _ruErr('weak-password', { minLength: minLen });
+      if (!editing && !pw && minLen) return _ruErr('weak-password', { minLength: minLen });
+
+      const args = ['=name=' + name, '=group=' + group,
+                    '=address=' + (typeof r.address === 'string' ? r.address.trim() : ''),
+                    '=comment=' + (typeof r.comment === 'string' ? r.comment.trim() : ''),
+                    '=disabled=' + (r.disabled ? 'yes' : 'no')];
+      if (pw) args.push('=password=' + pw);
+
+      const before = target ? { name: target.name, group: target.group, address: target.address || '',
+                                comment: target.comment || '', disabled: target.disabled === 'true' } : {};
+      const after  = { name, group, address: (r.address || '').trim(),
+                       comment: (r.comment || '').trim(), disabled: !!r.disabled };
+
+      if (editing) await session.ros.write('/user/set', ['=.id=' + r.id].concat(args));
+      else         await session.ros.write('/user/add', args);
+
+      audit.fromSocket(socket).record({ action: editing ? 'rosuser.update' : 'rosuser.create',
+        targetType: 'rosuser', targetId: editing ? r.id : null, targetName: name,
+        routerId: rid, before, after,
+        // A flag, not a diff field. /user/print never returns a password, so
+        // `before` cannot know whether one was set — recording «unset» →
+        // «changed» would be a claim the trail cannot support. This says only
+        // what is actually known, and keeps the plaintext out of audit.js
+        // entirely rather than relying on its redaction.
+        extra: passwordSet ? { passwordSet: true } : undefined });
+      await session.rosusers.refreshNow();
+      socket.emit('rosusers:ok', { action: editing ? 'update' : 'create', name });
+    } catch (e) {
+      _ruErr(_rosWriteFail(e), { name, message: sanitizeErr(e) });
+    }
+  }));
+
+  socket.on('rosuser:remove', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _ruSession(rid);
+    if (!rid || !session || off) return _ruErr('unavailable');
+    const r = req || {};
+    if (!_ruMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'rosuser.delete', targetType: 'rosuser',
+        routerId: rid, targetName: r.expectedName ? String(r.expectedName) : null });
+      return _ruErr('denied');
+    }
+    if (!r.id) return _ruErr('bad-request');
+
+    try {
+      const { users, self } = await _ruRead(session, rid);
+      const target = _ruRow(users, r.id, r.expectedName);
+      if (!target) return _ruErr('stale-row');
+
+      const verdict = selfGuard.checkUser(self, { verb: 'remove', target: { name: target.name, group: target.group } });
+      if (!verdict.ok) {
+        audit.fromSocket(socket).denied({ action: 'rosuser.delete', targetType: 'rosuser',
+          routerId: rid, targetId: r.id, targetName: target.name, note: verdict.code });
+        return _ruErr(verdict.code, { name: verdict.detail || target.name });
+      }
+
+      await session.ros.write('/user/remove', ['=.id=' + r.id]);
+      audit.fromSocket(socket).record({ action: 'rosuser.delete', targetType: 'rosuser',
+        targetId: r.id, targetName: target.name, routerId: rid,
+        extra: { group: target.group || '' } });
+      await session.rosusers.refreshNow();
+      socket.emit('rosusers:ok', { action: 'delete', name: target.name });
+    } catch (e) {
+      _ruErr(_rosWriteFail(e), { message: sanitizeErr(e) });
+    }
+  }));
+
+  /**
+   * Create or edit a group.
+   *
+   * `policy` arrives as the list of GRANTED names. RouterOS normalises whatever
+   * it is sent — send `read,api` and it stores all 17 with the rest negated —
+   * so there is no point sending negations, and buildPolicy filters to the
+   * vocabulary the UI actually showed rather than passing strings through.
+   */
+  socket.on('rosgroup:save', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _ruSession(rid);
+    if (!rid || !session || off) return _ruErr('unavailable');
+    const r = req || {};
+    const editing = !!r.id;
+    if (!_ruMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: editing ? 'rosgroup.update' : 'rosgroup.create',
+        targetType: 'rosgroup', routerId: rid, targetName: r.name ? String(r.name) : null });
+      return _ruErr('denied');
+    }
+
+    const name = typeof r.name === 'string' ? r.name.trim() : '';
+    if (!name || !Array.isArray(r.policy)) return _ruErr('bad-request');
+    const policy = RosUsersCollector.buildPolicy(r.policy);
+
+    try {
+      const { groups, self } = await _ruRead(session, rid);
+      const target = editing ? _ruRow(groups, r.id, r.expectedName) : null;
+      if (editing && !target) return _ruErr('stale-row', { name });
+
+      const verdict = selfGuard.checkGroup(self, {
+        verb: editing ? 'set' : 'add',
+        target: target ? { name: target.name } : null,
+        values: { name },
+      });
+      if (!verdict.ok) {
+        audit.fromSocket(socket).denied({ action: editing ? 'rosgroup.update' : 'rosgroup.create',
+          targetType: 'rosgroup', routerId: rid, targetName: name, note: verdict.code });
+        return _ruErr(verdict.code, { name: verdict.detail || name });
+      }
+
+      const args = ['=name=' + name, '=policy=' + policy,
+                    '=comment=' + (typeof r.comment === 'string' ? r.comment.trim() : '')];
+      if (editing) await session.ros.write('/user/group/set', ['=.id=' + r.id].concat(args));
+      else         await session.ros.write('/user/group/add', args);
+
+      audit.fromSocket(socket).record({ action: editing ? 'rosgroup.update' : 'rosgroup.create',
+        targetType: 'rosgroup', targetId: editing ? r.id : null, targetName: name, routerId: rid,
+        before: target ? { name: target.name, policy: target.policy || '' } : {},
+        after:  { name, policy } });
+      await session.rosusers.refreshNow();
+      socket.emit('rosusers:ok', { action: editing ? 'group-update' : 'group-create', name });
+    } catch (e) {
+      _ruErr(_rosWriteFail(e), { name, message: sanitizeErr(e) });
+    }
+  }));
+
+  socket.on('rosgroup:remove', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _ruSession(rid);
+    if (!rid || !session || off) return _ruErr('unavailable');
+    const r = req || {};
+    if (!_ruMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'rosgroup.delete', targetType: 'rosgroup',
+        routerId: rid, targetName: r.expectedName ? String(r.expectedName) : null });
+      return _ruErr('denied');
+    }
+    if (!r.id) return _ruErr('bad-request');
+
+    try {
+      const { groups, self } = await _ruRead(session, rid);
+      const target = _ruRow(groups, r.id, r.expectedName);
+      if (!target) return _ruErr('stale-row');
+
+      const verdict = selfGuard.checkGroup(self, { verb: 'remove', target: { name: target.name } });
+      if (!verdict.ok) {
+        audit.fromSocket(socket).denied({ action: 'rosgroup.delete', targetType: 'rosgroup',
+          routerId: rid, targetId: r.id, targetName: target.name, note: verdict.code });
+        return _ruErr(verdict.code, { name: verdict.detail || target.name });
+      }
+
+      // Not pre-checked against the member count. The router refuses with
+      // "group has some users" and it is the authority — a count read a moment
+      // earlier could be wrong in either direction.
+      await session.ros.write('/user/group/remove', ['=.id=' + r.id]);
+      audit.fromSocket(socket).record({ action: 'rosgroup.delete', targetType: 'rosgroup',
+        targetId: r.id, targetName: target.name, routerId: rid,
+        extra: { policy: target.policy || '' } });
+      await session.rosusers.refreshNow();
+      socket.emit('rosusers:ok', { action: 'group-delete', name: target.name });
+    } catch (e) {
+      const msg = String((e && e.message) || e).toLowerCase();
+      if (msg.includes('has some users')) return _ruErr('group-in-use');
+      _ruErr(_rosWriteFail(e), { message: sanitizeErr(e) });
+    }
+  }));
+
+  socket.on('rossession:remove', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _ruSession(rid);
+    if (!rid || !session || off) return _ruErr('unavailable');
+    const r = req || {};
+    if (!_ruMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'rossession.remove', targetType: 'rossession',
+        routerId: rid, targetName: r.expectedName ? String(r.expectedName) : null });
+      return _ruErr('denied');
+    }
+    if (!r.id) return _ruErr('bad-request');
+
+    try {
+      const { active, self } = await _ruRead(session, rid);
+      const target = _ruRow(active, r.id, r.expectedName);
+      if (!target) return _ruErr('stale-row');
+
+      const verdict = selfGuard.checkSession(self, { target: { name: target.name } });
+      if (!verdict.ok) {
+        audit.fromSocket(socket).denied({ action: 'rossession.remove', targetType: 'rossession',
+          routerId: rid, targetId: r.id, targetName: target.name, note: verdict.code });
+        return _ruErr(verdict.code, { name: verdict.detail || target.name });
+      }
+
+      await session.ros.write('/user/active/remove', ['=.id=' + r.id]);
+      audit.fromSocket(socket).record({ action: 'rossession.remove', targetType: 'rossession',
+        targetId: r.id, targetName: target.name, routerId: rid,
+        extra: { via: target.via || '', from: target.address || '' },
+        note: 'ended an active RouterOS session' });
+      await session.rosusers.refreshNow();
+      socket.emit('rosusers:ok', { action: 'session-remove', name: target.name });
+    } catch (e) {
+      _ruErr(_rosWriteFail(e), { message: sanitizeErr(e) });
+    }
+  }));
+
+
+  // ── Queues (RouterOS traffic shaping) ─────────────────────────────────────
+  //
+  // The third router-write feature. Unlike Router Users it cannot lock MikroDash
+  // out — but a simple queue CAN throttle the dashboard's own traffic, so
+  // src/routeros/queueGuard.js warns about that. Read its header before
+  // assuming selfGuard's rules apply: it warns rather than refuses, and it fails
+  // open rather than closed. Both are deliberate.
+  //
+  // The same three properties as the Router Users handlers: a fresh read in the
+  // same tick as the write, a round-tripped name so a `.id` addresses a row
+  // without identifying it, and per-router serialisation.
+
+  const _QUEUE_MENUS = Object.freeze({ simple: '/queue/simple', tree: '/queue/tree' });
+
+  const _qSession = (rid) => {
+    const e = rid ? _routerSessions.get(rid) : null;
+    const session = e && e.session;
+    const off = !session || !session.queues || session.queues.disabled;
+    return { session, off };
+  };
+  const _qErr = (code, extra) =>
+    socket.emit('queues:error', Object.assign({ code }, extra || {}));
+
+  const _qMayWrite = (rid) =>
+    _pageAllowed(socket, 'queues', 'write') && _socketCan(socket, 'router:write', rid);
+
+  /**
+   * Read one queue menu, plus the active sessions the throttle warning needs.
+   *
+   * /user/active is read for its `address` column — the source address the
+   * ROUTER sees us from, which is what makes the warning possible at all. A
+   * router that denies it simply yields no addresses, and the guard fails open.
+   */
+  const _qRead = async (session, rid, menu) => {
+    const rows = (await session.ros.write(_QUEUE_MENUS[menu] + '/print', []) || [])
+      .filter(r => r && r['.id']);
+    let active = [];
+    try { active = (await session.ros.write('/user/active/print', []) || []).filter(r => r && r.name); }
+    catch (_) { /* denied or unsupported — the guard fails open, by design */ }
+    const cfg = Routers.getById(rid) || {};
+    const self = queueGuard.resolveSelfAddresses(active,
+      [(session.ros.cfg || {}).username, cfg.username]);
+    return { rows, self };
+  };
+
+  /** Address by id, identify by name — a `.id` survives a rename, a name does not. */
+  const _qRow = (rows, id, expectedName) => {
+    const row = (rows || []).find(r => r['.id'] === id);
+    if (!row) return null;
+    if (expectedName && String(row.name) !== String(expectedName)) return null;
+    return row;
+  };
+
+  /**
+   * RouterOS refuses max-limit below limit-at with "download-max-limit less than
+   * download-limit". Checking here turns that into a sentence naming both
+   * fields; the router stays the authority either way.
+   */
+  const _qLimitsOk = (maxLimit, limitAt) => {
+    const m = queueGuard.parsePair(maxLimit), l = queueGuard.parsePair(limitAt);
+    const bad = (mx, lo) => typeof mx === 'number' && mx > 0 && typeof lo === 'number' && lo > mx;
+    return !(bad(m.up, l.up) || bad(m.down, l.down));
+  };
+
+  socket.on('queues:caps', () => {
+    const rid = socket.routerId;
+    const { session, off } = _qSession(rid);
+    if (!rid || !session || off) return _qErr('unavailable');
+    if (!_pageAllowed(socket, 'queues', 'read')) return _qErr('denied');
+    socket.emit('queues:caps', {
+      permitted: _qMayWrite(rid),
+      routerName: (Routers.getById(rid) || {}).label || '',
+    });
+  });
+
+  socket.on('queue:save', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _qSession(rid);
+    if (!rid || !session || off) return _qErr('unavailable');
+    const r = req || {};
+    const menu = r.menu === 'tree' ? 'tree' : 'simple';
+    const editing = !!r.id;
+    const action = 'queue.' + (editing ? 'update' : 'create');
+    if (!_qMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action, targetType: 'queue', routerId: rid,
+        targetName: r.name ? String(r.name) : null, extra: { menu } });
+      return _qErr('denied');
+    }
+
+    const name = typeof r.name === 'string' ? r.name.trim() : '';
+    if (!name) return _qErr('bad-request');
+    if (menu === 'simple' && !editing && !r.target) return _qErr('bad-request');
+    if (!_qLimitsOk(r.maxLimit, r.limitAt)) return _qErr('limit-above-max');
+
+    try {
+      const { rows, self } = await _qRead(session, rid, menu);
+      const target = editing ? _qRow(rows, r.id, r.expectedName) : null;
+      if (editing && !target) return _qErr('stale-row', { name });
+      // Checked on the freshly-read row, never the browser's claim. Only simple
+      // queues can be dynamic — a tree has no such field.
+      if (target && (target.dynamic === 'true' || target.dynamic === true)) {
+        audit.fromSocket(socket).denied({ action, targetType: 'queue', routerId: rid,
+          targetId: r.id, targetName: name, note: 'dynamic-row' });
+        return _qErr('dynamic-row', { name });
+      }
+
+      // Only simple queues carry a target, so only they can be aimed at us.
+      if (menu === 'simple') {
+        const verdict = queueGuard.checkSimpleQueue({
+          selfAddresses: self,
+          values: { target: r.target, maxLimit: r.maxLimit, disabled: !!r.disabled },
+          before: target ? { target: target.target, maxLimit: target['max-limit'],
+                             disabled: target.disabled === 'true' } : null,
+        });
+        if (verdict.level === 'warn') {
+          if (!r.ack) {
+            // Nothing is written and nothing is audited — this is a prompt, not
+            // a refusal, and a denial row here would make the trail lie about
+            // what was attempted.
+            return _qErr('self-throttle', { warning: verdict.detail, fingerprint: verdict.fingerprint, name });
+          }
+          if (r.ack !== verdict.fingerprint) {
+            // An acknowledgement taken against different values, or against a
+            // different self-address. Reported separately from the first prompt
+            // so an ack cannot be carried from a mild queue to a harsher one, or
+            // replayed against another write.
+            return _qErr('stale-warning', { warning: verdict.detail, fingerprint: verdict.fingerprint, name });
+          }
+        }
+        // verdict.level === 'none' with an ack present is harmless: the warning
+        // simply no longer applies to what is being written.
+      }
+
+      const args = ['=name=' + name, '=comment=' + (typeof r.comment === 'string' ? r.comment.trim() : ''),
+                    '=disabled=' + (r.disabled ? 'yes' : 'no')];
+      const put = (k, v) => { if (v !== undefined && v !== null && v !== '') args.push('=' + k + '=' + String(v).trim()); };
+      put('max-limit', r.maxLimit);
+      put('limit-at',  r.limitAt);
+      put('priority',  r.priority);
+      if (menu === 'simple') {
+        put('target',       r.target);
+        put('packet-marks', r.packetMarks);
+      } else {
+        put('parent',      r.parent);
+        put('packet-mark', r.packetMark);
+      }
+
+      if (editing) await session.ros.write(_QUEUE_MENUS[menu] + '/set', ['=.id=' + r.id].concat(args));
+      else         await session.ros.write(_QUEUE_MENUS[menu] + '/add', args);
+
+      audit.fromSocket(socket).record({ action, targetType: 'queue',
+        targetId: editing ? r.id : null, targetName: name, routerId: rid,
+        before: target ? { name: target.name, target: target.target || '', parent: target.parent || '',
+                           maxLimit: target['max-limit'] || '', limitAt: target['limit-at'] || '',
+                           disabled: target.disabled === 'true' } : {},
+        after: { name, target: r.target || '', parent: r.parent || '',
+                 maxLimit: r.maxLimit || '', limitAt: r.limitAt || '', disabled: !!r.disabled },
+        // The acknowledgement is the interesting fact in the trail, not the queue.
+        extra: Object.assign({ menu }, r.ack ? { selfThrottleAcknowledged: true } : null) });
+      // A set can zero a counter, and the next window would otherwise be
+      // measured against a baseline the router no longer agrees with.
+      session.queues.forgetRates();
+      await session.queues.refreshNow();
+      socket.emit('queues:ok', { action: editing ? 'update' : 'create', name, menu });
+    } catch (e) {
+      const msg = String((e && e.message) || e).toLowerCase();
+      if (msg.includes('less than')) return _qErr('limit-above-max', { name });
+      _qErr(_rosWriteFail(e), { name, message: sanitizeErr(e) });
+    }
+  }));
+
+  socket.on('queue:remove', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _qSession(rid);
+    if (!rid || !session || off) return _qErr('unavailable');
+    const r = req || {};
+    const menu = r.menu === 'tree' ? 'tree' : 'simple';
+    if (!_qMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'queue.delete', targetType: 'queue', routerId: rid,
+        targetName: r.expectedName ? String(r.expectedName) : null, extra: { menu } });
+      return _qErr('denied');
+    }
+    if (!r.id) return _qErr('bad-request');
+
+    try {
+      const { rows } = await _qRead(session, rid, menu);
+      const target = _qRow(rows, r.id, r.expectedName);
+      if (!target) return _qErr('stale-row');
+      if (target.dynamic === 'true' || target.dynamic === true) {
+        audit.fromSocket(socket).denied({ action: 'queue.delete', targetType: 'queue', routerId: rid,
+          targetId: r.id, targetName: target.name, note: 'dynamic-row' });
+        return _qErr('dynamic-row', { name: target.name });
+      }
+
+      await session.ros.write(_QUEUE_MENUS[menu] + '/remove', ['=.id=' + r.id]);
+      audit.fromSocket(socket).record({ action: 'queue.delete', targetType: 'queue',
+        targetId: r.id, targetName: target.name, routerId: rid,
+        extra: { menu, target: target.target || target.parent || '', maxLimit: target['max-limit'] || '' } });
+      session.queues.forgetRates();
+      await session.queues.refreshNow();
+      socket.emit('queues:ok', { action: 'delete', name: target.name, menu });
+    } catch (e) {
+      _qErr(_rosWriteFail(e), { message: sanitizeErr(e) });
+    }
+  }));
+
+  socket.on('queue:toggle', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _qSession(rid);
+    if (!rid || !session || off) return _qErr('unavailable');
+    const r = req || {};
+    const menu = r.menu === 'tree' ? 'tree' : 'simple';
+    if (!_qMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'queue.toggle', targetType: 'queue', routerId: rid,
+        targetName: r.expectedName ? String(r.expectedName) : null, extra: { menu } });
+      return _qErr('denied');
+    }
+    if (!r.id) return _qErr('bad-request');
+
+    try {
+      const { rows, self } = await _qRead(session, rid, menu);
+      const target = _qRow(rows, r.id, r.expectedName);
+      if (!target) return _qErr('stale-row');
+      if (target.dynamic === 'true' || target.dynamic === true) {
+        audit.fromSocket(socket).denied({ action: 'queue.toggle', targetType: 'queue', routerId: rid,
+          targetId: r.id, targetName: target.name, note: 'dynamic-row' });
+        return _qErr('dynamic-row', { name: target.name });
+      }
+
+      const wasDisabled = target.disabled === 'true';
+      // Enabling is the moment a throttle takes effect, and the easy one to
+      // miss: the values were checked when the queue was created, but it may
+      // have sat disabled ever since.
+      if (menu === 'simple' && wasDisabled) {
+        const verdict = queueGuard.checkSimpleQueue({
+          selfAddresses: self,
+          values: { target: target.target, maxLimit: target['max-limit'], disabled: false },
+          before: null,
+        });
+        if (verdict.level === 'warn' && r.ack !== verdict.fingerprint) {
+          return _qErr('self-throttle', { warning: verdict.detail, fingerprint: verdict.fingerprint,
+                                          name: target.name });
+        }
+      }
+
+      await session.ros.write(_QUEUE_MENUS[menu] + '/set',
+        ['=.id=' + r.id, '=disabled=' + (wasDisabled ? 'no' : 'yes')]);
+      audit.fromSocket(socket).record({ action: 'queue.toggle', targetType: 'queue',
+        targetId: r.id, targetName: target.name, routerId: rid,
+        before: { disabled: wasDisabled }, after: { disabled: !wasDisabled },
+        extra: Object.assign({ menu }, r.ack ? { selfThrottleAcknowledged: true } : null) });
+      await session.queues.refreshNow();
+      socket.emit('queues:ok', { action: wasDisabled ? 'enable' : 'disable', name: target.name, menu });
+    } catch (e) {
+      _qErr(_rosWriteFail(e), { message: sanitizeErr(e) });
+    }
+  }));
+
+  socket.on('queue:resetCounters', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _qSession(rid);
+    if (!rid || !session || off) return _qErr('unavailable');
+    const r = req || {};
+    const menu = r.menu === 'tree' ? 'tree' : 'simple';
+    if (!_qMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'queue.reset', targetType: 'queue', routerId: rid,
+        targetName: r.expectedName ? String(r.expectedName) : null, extra: { menu } });
+      return _qErr('denied');
+    }
+    if (!r.id) return _qErr('bad-request');
+
+    try {
+      const { rows } = await _qRead(session, rid, menu);
+      const target = _qRow(rows, r.id, r.expectedName);
+      if (!target) return _qErr('stale-row');
+
+      await session.ros.write(_QUEUE_MENUS[menu] + '/reset-counters', ['=.id=' + r.id]);
+      audit.fromSocket(socket).record({ action: 'queue.reset', targetType: 'queue',
+        targetId: r.id, targetName: target.name, routerId: rid, extra: { menu },
+        note: 'zeroed the queue statistics' });
+      // Mandatory here, not merely tidy: the counter just went to zero and the
+      // next delta would be measured against the pre-reset baseline.
+      session.queues.forgetRates();
+      await session.queues.refreshNow();
+      socket.emit('queues:ok', { action: 'reset', name: target.name, menu });
+    } catch (e) {
+      _qErr(_rosWriteFail(e), { message: sanitizeErr(e) });
+    }
+  }));
+
+  /**
+   * Reorder a simple queue.
+   *
+   * Only simple queues have meaningful order — each packet walks the list until
+   * one matches, so position changes behaviour. Trees are unordered and offer no
+   * move.
+   */
+  socket.on('queue:move', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const { session, off } = _qSession(rid);
+    if (!rid || !session || off) return _qErr('unavailable');
+    const r = req || {};
+    if (!_qMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'queue.move', targetType: 'queue', routerId: rid,
+        targetName: r.expectedName ? String(r.expectedName) : null });
+      return _qErr('denied');
+    }
+    if (!r.id || (r.direction !== 'up' && r.direction !== 'down')) return _qErr('bad-request');
+
+    try {
+      const { rows } = await _qRead(session, rid, 'simple');
+      const idx = rows.findIndex(x => x['.id'] === r.id);
+      if (idx < 0) return _qErr('stale-row');
+      const target = _qRow(rows, r.id, r.expectedName);
+      if (!target) return _qErr('stale-row');
+
+      // RouterOS moves a row to sit BEFORE `destination`. Moving down therefore
+      // means "before the row after the next one", and moving the last row down
+      // or the first row up is a no-op rather than an error.
+      const destIdx = r.direction === 'up' ? idx - 1 : idx + 2;
+      if (destIdx < 0 || idx === rows.length - 1 && r.direction === 'down') {
+        return socket.emit('queues:ok', { action: 'move', name: target.name, menu: 'simple' });
+      }
+      const args = ['=.id=' + r.id];
+      if (destIdx < rows.length) args.push('=destination=' + rows[destIdx]['.id']);
+      await session.ros.write('/queue/simple/move', args);
+
+      audit.fromSocket(socket).record({ action: 'queue.move', targetType: 'queue',
+        targetId: r.id, targetName: target.name, routerId: rid,
+        before: { position: idx }, after: { position: r.direction === 'up' ? idx - 1 : idx + 1 },
+        extra: { menu: 'simple' },
+        note: 'simple queue order decides which queue a packet matches first' });
+      await session.queues.refreshNow();
+      socket.emit('queues:ok', { action: 'move', name: target.name, menu: 'simple' });
+    } catch (e) {
+      _qErr(_rosWriteFail(e), { message: sanitizeErr(e) });
+    }
+  }));
+
+
+  // ── WAN (DHCP lease actions) ──────────────────────────────────────────────
+  //
+  // Renew and release both drop the uplink for a few seconds. On a router
+  // managed over its LAN that is harmless; on one managed THROUGH the WAN it
+  // drops the dashboard, and unlike a bad queue you cannot undo it from the row
+  // that caused it. src/routeros/wanGuard.js decides which case applies and
+  // warns — it never refuses, and it fails open. Read its header before
+  // assuming otherwise.
+  //
+  // Renew and release are treated identically: both interrupt the uplink, so
+  // there is no quieter path to the riskier one.
+
+  const _wanSession = (rid) => {
+    const e = rid ? _routerSessions.get(rid) : null;
+    const session = e && e.session;
+    const off = !session || !session.wan || session.wan.disabled;
+    return { session, off };
+  };
+  const _wanErr = (code, extra) =>
+    socket.emit('wan:error', Object.assign({ code }, extra || {}));
+
+  const _wanMayWrite = (rid) =>
+    _pageAllowed(socket, 'wan', 'write') && _socketCan(socket, 'router:write', rid);
+
+  /**
+   * Read what the guard and the write both need, in one tick.
+   *
+   * The connected subnets come from /ip/address rather than from the collector
+   * payload: this is the input that decides whether we are about to cut our own
+   * management path, and it must not be a cached answer.
+   */
+  const _wanRead = async (session, rid) => {
+    const [clients, addrs, active, routes] = await Promise.all([
+      session.ros.write('/ip/dhcp-client/print', []),
+      session.ros.write('/ip/address/print', ['=.proplist=address,interface,disabled']),
+      session.ros.write('/user/active/print', []).catch(() => []),
+      session.ros.write('/ip/route/print', ['=.proplist=dst-address,gateway,distance,active']),
+    ]);
+    const rows = (clients || []).filter(r => r && r['.id']);
+    const connectedCidrs = (addrs || [])
+      .filter(a => a && a.address && a.disabled !== 'true').map(a => a.address);
+    const cfg  = Routers.getById(rid) || {};
+    const self = queueGuard.resolveSelfAddresses((active || []).filter(r => r && r.name),
+      [(session.ros.cfg || {}).username, cfg.username]);
+    const path = wanGuard.resolveManagementPath({ selfAddresses: self, connectedCidrs });
+    // Which uplink is carrying our return traffic.
+    //
+    // ONLY WHEN THERE IS EXACTLY ONE. Verified on a live router: four default
+    // routes can be active at distance 1 at the same time, and picking the first
+    // would name an uplink our packets may not use — warning about the wrong one
+    // while staying silent on the right one. Ambiguity is reported as unknown,
+    // which makes the guard warn for any WAN rather than guess.
+    const activeDefaults = (routes || []).filter(r => r && r['dst-address'] === '0.0.0.0/0' && r.active === 'true');
+    let activeDefaultWan = '';
+    if (activeDefaults.length === 1 && activeDefaults[0].gateway) {
+      const gw = activeDefaults[0].gateway;
+      const byName  = rows.find(c => c.interface === gw);
+      const byLease = rows.find(c => c.gateway === gw);
+      activeDefaultWan = (byName && byName.interface) || (byLease && byLease.interface) || gw;
+    }
+    return { rows, path, activeDefaultWan };
+  };
+
+  /** Address by id, identify by interface name — an id survives a rename. */
+  const _wanRow = (rows, id, expectedName) => {
+    const row = (rows || []).find(r => r['.id'] === id);
+    if (!row) return null;
+    if (expectedName && String(row.interface) !== String(expectedName)) return null;
+    return row;
+  };
+
+  socket.on('wan:caps', () => {
+    const rid = socket.routerId;
+    const { session, off } = _wanSession(rid);
+    if (!rid || !session || off) return _wanErr('unavailable');
+    if (!_pageAllowed(socket, 'wan', 'read')) return _wanErr('denied');
+    socket.emit('wan:caps', {
+      permitted: _wanMayWrite(rid),
+      routerName: (Routers.getById(rid) || {}).label || '',
+    });
+  });
+
+  const _WAN_VERBS = Object.freeze({ renew: '/ip/dhcp-client/renew', release: '/ip/dhcp-client/release' });
+
+  /**
+   * Renew or release one lease.
+   *
+   * One body, two registrations below rather than a loop: every drift test in
+   * this repo greps for a literal `socket.on('wan:renew'`, and so will the next
+   * person looking for where this is handled.
+   */
+  const _wanLeaseAction = async (verb, req, rid) => {
+    const { session, off } = _wanSession(rid);
+    if (!rid || !session || off) return _wanErr('unavailable');
+    const r = req || {};
+    const action = 'wan.' + verb;
+    if (!_wanMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action, targetType: 'wan', routerId: rid,
+        targetName: r.expectedName ? String(r.expectedName) : null });
+      return _wanErr('denied');
+    }
+    if (!r.id) return _wanErr('bad-request');
+
+    try {
+      const { rows, path, activeDefaultWan } = await _wanRead(session, rid);
+      const target = _wanRow(rows, r.id, r.expectedName);
+      if (!target) return _wanErr('stale-row');
+
+      const verdict = wanGuard.checkLeaseAction({ path, targetWan: target.interface, activeDefaultWan });
+      if (verdict.level === 'warn') {
+        if (!r.ack) {
+          // Nothing written, nothing audited — a prompt is not a refusal, and a
+          // denied row here would misrepresent what was attempted.
+          return _wanErr('self-cutoff', { warning: verdict.detail, fingerprint: verdict.fingerprint,
+                                          name: target.interface, verb });
+        }
+        if (r.ack !== verdict.fingerprint) {
+          // Acknowledged against different values, or our own path moved between
+          // the prompt and the retry.
+          return _wanErr('stale-warning', { warning: verdict.detail, fingerprint: verdict.fingerprint,
+                                            name: target.interface, verb });
+        }
+      }
+
+      await session.ros.write(_WAN_VERBS[verb], ['=.id=' + r.id]);
+      audit.fromSocket(socket).record({ action, targetType: 'wan',
+        targetId: r.id, targetName: target.interface, routerId: rid,
+        extra: Object.assign({ status: target.status || '' },
+                             r.ack ? { selfCutoffAcknowledged: true } : null),
+        note: verb === 'release'
+          ? 'released the DHCP lease; the uplink is down until the client rebinds'
+          : 'requested a DHCP lease renewal' });
+      // The lease state settles over the next second or two, so this re-read may
+      // still show the old value. The page says "requested" rather than claiming
+      // the new state, and the next tick tells the truth.
+      await session.wan.refreshNow();
+      socket.emit('wan:ok', { action: verb, name: target.interface });
+    } catch (e) {
+      _wanErr(_rosWriteFail(e), { message: sanitizeErr(e) });
+    }
+  };
+
+  socket.on('wan:renew',   (req) => _routerWriteQueue(socket.routerId, (rid) => _wanLeaseAction('renew', req, rid)));
+  socket.on('wan:release', (req) => _routerWriteQueue(socket.routerId, (rid) => _wanLeaseAction('release', req, rid)));
+
+  // ── WiFi frequency analyzer ───────────────────────────────────────────────
+  //
+  // The only disruptive action in the app: it takes the radio off the air and
+  // drops every client on it. Gated on BOTH the page toggle and the action
+  // permission, and answers rather than going silent — unlike firewall:tab this
+  // is a button somebody pressed, and silence is a support ticket.
+
+  const _scanSession = () => {
+    const rid = socket.routerId;
+    const e   = rid ? _routerSessions.get(rid) : null;
+    return { rid, entry: e, session: e && e.session };
+  };
+
+  const _scanDenied = (code, extra) =>
+    socket.emit('wifiscan:error', Object.assign({ scanId: null, code }, extra || {}));
+
+  socket.on('wifiscan:interfaces', () => {
+    const { rid, session } = _scanSession();
+    if (!rid || !session) return _scanDenied('unavailable');
+    if (!_pageAllowed(socket, 'wireless', 'read')) return _scanDenied('denied');
+    const wl = session.wireless;
+    socket.emit('wifiscan:interfaces', {
+      // May scan at all — the button is drawn from this, not from the list.
+      permitted: _socketCan(socket, 'router:scan', rid) && _pageAllowed(socket, 'wireless', 'write'),
+      interfaces: (wl && typeof wl.listScannableInterfaces === 'function')
+        ? wl.listScannableInterfaces().map(i => ({ name: i.name, running: i.running, clients: i.clients }))
+        : [],
+      scanning: wifiScans.isScanning(rid),
+    });
+  });
+
+  socket.on('wifiscan:start', async (req) => {
+    const { rid, session } = _scanSession();
+    if (!rid || !session) return _scanDenied('unavailable');
+    // Both gates, deliberately. _pageAllowed carries the install-wide Wireless
+    // toggle — a deployment that turned the page off must not have a scan
+    // endpoint — and _socketCan keeps router:scan the named, greppable gate.
+    if (!_pageAllowed(socket, 'wireless', 'write') || !_socketCan(socket, 'router:scan', rid)) {
+      audit.fromSocket(socket).denied({ action: 'wifi.scan', routerId: rid,
+        targetName: req && req.iface ? String(req.iface) : null });
+      return _scanDenied('denied');
+    }
+
+    const iface       = req && typeof req.iface === 'string' ? req.iface : '';
+    const durationSec = req && Number(req.durationSec);
+    const wl          = session.wireless;
+    const interfaces  = (wl && typeof wl.listScannableInterfaces === 'function')
+      ? wl.listScannableInterfaces() : null;
+
+    // Read the operating channel BEFORE the scan: during one the radio is off
+    // its channel, and the interface's own channel.frequency is a configured
+    // RANGE ("5180-5730"), not where it actually is. This is a fast =once= read,
+    // unlike the scan itself which must never go through write().
+    let currentChannelMhz = null;
+    try {
+      const mon = await session.ros.write('/interface/wifi/monitor', ['=numbers=' + iface, '=once=']);
+      const raw = mon && mon[0] && mon[0].channel;
+      const n   = parseInt(String(raw || '').split('/')[0], 10);
+      if (Number.isFinite(n)) currentChannelMhz = n;
+    } catch (_) { /* advisory only — a scan without it is still useful */ }
+
+    audit.fromSocket(socket).record({ action: 'wifi.scan', targetType: 'interface',
+      targetName: iface, routerId: rid,
+      note: 'takes the radio off the air; connected clients are disconnected for the scan' });
+    const res = wifiScans.start({
+      routerId: rid, ros: session.ros, iface, durationSec,
+      socketId: socket.id, currentChannelMhz, interfaces,
+      emit: (ev, d) => socket.emit(ev, d),
+    });
+    if (!res.ok) {
+      const { code, ...rest } = res;
+      return _scanDenied(code, rest);
+    }
+    socket.emit('wifiscan:state', {
+      scanning: true, scanId: res.scanId, iface, durationSec,
+      startedAt: res.startedAt, endsAt: res.endsAt, currentChannelMhz, rows: [],
+    });
+    console.log('%s', `[${(session.ros && session.ros.routerLabel) || rid}][wifiscan] ${iface} for ${durationSec}s — clients on that radio will drop`);
+  });
+
+  socket.on('wifiscan:stop', (req) => {
+    const { rid } = _scanSession();
+    if (!rid) return;
+    if (!_socketCan(socket, 'router:scan', rid)) return _scanDenied('denied');
+    wifiScans.abort(rid, req && req.scanId);
   });
 
   // Per-user router switching (modern auth only).

@@ -105,6 +105,18 @@ const DEFAULTS = {
   pollArp:           parseInt(process.env.ARP_POLL_MS       || '30000', 10),
   pollDhcp:          parseInt(process.env.DHCP_POLL_MS      || '600000', 10),
   pollTopology:      parseInt(process.env.TOPOLOGY_POLL_MS  || '30000', 10),
+  // VLAN and PPP config is near-static; what moves is the rate/session half,
+  // and that costs no router I/O (VLAN rates are read from ifStatus in memory).
+  pollVlans:         parseInt(process.env.VLANS_POLL_MS     || '5000', 10),
+  pollPpp:           parseInt(process.env.PPP_POLL_MS       || '5000', 10),
+  pollBridges:       parseInt(process.env.BRIDGES_POLL_MS   || '5000', 10),
+  pollDns:           parseInt(process.env.DNS_POLL_MS       || '10000', 10),
+  pollCapsman:       parseInt(process.env.CAPSMAN_POLL_MS   || '10000', 10),
+  // Slow by design: a package inventory changes on a reboot, not on a tick.
+  pollPackages:      parseInt(process.env.PACKAGES_POLL_MS  || '60000', 10),
+  pollRosusers:      parseInt(process.env.ROSUSERS_POLL_MS  || '60000', 10),
+  pollQueues:        parseInt(process.env.QUEUES_POLL_MS    || '5000', 10),
+  pollWan:           parseInt(process.env.WAN_POLL_MS       || '10000', 10),
 
   // Custom poll profile — JSON string of {pollSystem:N,...} saved by user; empty = not configured
   customPollProfile: '',
@@ -196,6 +208,20 @@ const DEFAULTS = {
   pageLogs:        true,
   pageBandwidth:   true,
   pageTopology:    true,
+  pageVlans:       true,
+  pagePpp:         true,
+  pageBridges:     true,
+  pageDns:         true,
+  pageCapsman:     true,
+  pagePackages:    true,
+  pageQueues:      true,
+  pageWan:         true,
+  pageRosusers:    true,
+  // Advanced-only in the view presets, but the toggle still defaults visible:
+  // page-registry.test.js pins every page toggle to true so a fresh install
+  // shows everything, and the preset is what narrows it.
+  pageRouters:     true,
+  pageAudit:       true,
 
   // Set once by the #105 migration, then never read again.
   collectionMigrated: false,
@@ -204,6 +230,10 @@ const DEFAULTS = {
   // Database retention
   dbRetentionDays:      90,  // days to keep ping + traffic samples
   dbAlertRetentionDays: 365, // days to keep alert + connectivity events
+  // The audit trail ages out on its own setting and nothing else can remove a
+  // row — audit_events is absent from PURGE_TABLES and deleteRouterData() so
+  // that neither a purge click nor deleting a router can erase the record of it.
+  dbAuditRetentionDays: 365,
 
   // Display timezone — IANA name (e.g. 'Europe/London'). Empty = server/browser local.
   displayTimezone: '',
@@ -242,6 +272,15 @@ const ENV_MAP = {
   pollArp:           ['ARP_POLL_MS',          v => parseInt(v, 10)],
   pollDhcp:          ['DHCP_POLL_MS',         v => parseInt(v, 10)],
   pollTopology:      ['TOPOLOGY_POLL_MS',     v => parseInt(v, 10)],
+  pollVlans:         ['VLANS_POLL_MS',        v => parseInt(v, 10)],
+  pollPpp:           ['PPP_POLL_MS',          v => parseInt(v, 10)],
+  pollBridges:       ['BRIDGES_POLL_MS',      v => parseInt(v, 10)],
+  pollDns:           ['DNS_POLL_MS',          v => parseInt(v, 10)],
+  pollCapsman:       ['CAPSMAN_POLL_MS',      v => parseInt(v, 10)],
+  pollPackages:      ['PACKAGES_POLL_MS',     v => parseInt(v, 10)],
+  pollRosusers:      ['ROSUSERS_POLL_MS',     v => parseInt(v, 10)],
+  pollQueues:        ['QUEUES_POLL_MS',       v => parseInt(v, 10)],
+  pollWan:           ['WAN_POLL_MS',          v => parseInt(v, 10)],
   topN:              ['TOP_N',                v => parseInt(v, 10)],
   topTalkersN:       ['TOP_TALKERS_N',        v => parseInt(v, 10)],
   firewallTopN:      ['FIREWALL_TOP_N',       v => parseInt(v, 10)],
@@ -273,7 +312,10 @@ const POLL_BOUNDS = Object.freeze({
   pollRouting:[500,300000], pollSystem:[1000,60000], pollWireless:[10000,600000],
   pollVpn:[1000,30000], pollFirewall:[1000,30000], pollIfstatus:[1000,60000],
   pollIfaces:[10000,600000], pollPing:[1000,30000], pollArp:[5000,300000],
-  pollDhcp:[10000,600000], pollTopology:[10000,300000],
+  pollDhcp:[10000,600000], pollTopology:[10000,600000],
+  pollVlans:[1000,60000], pollPpp:[1000,60000],
+  pollBridges:[1000,60000], pollDns:[1000,60000], pollCapsman:[1000,60000],
+  pollPackages:[5000,600000], pollRosusers:[5000,300000], pollQueues:[2000,60000], pollWan:[1000,60000],
 });
 
 /**
@@ -402,6 +444,8 @@ const VIEWER_FIELDS = [
   'activeRouterId',
   'pageWireless', 'pageInterfaces', 'pageDhcp', 'pageVpn', 'pageConnections',
   'pageFirewall', 'pageLogs', 'pageBandwidth', 'pageRouting', 'pageTopology',
+  'pageVlans', 'pagePpp', 'pageBridges', 'pageDns', 'pageCapsman', 'pagePackages',
+  'pageRosusers', 'pageQueues', 'pageWan', 'pageRouters', 'pageAudit',
   'displayTimezone',
   // Whether the My Alerts tab exists at all. A non-admin is the whole audience
   // for that tab and only ever sees this subset, so leaving it out would hide
@@ -423,4 +467,5 @@ function getViewerPublic() {
 // rather than carrying a second copy of the AES-GCM logic: one DATA_SECRET, one
 // scrypt path, so backup, restore and key rotation behave the same for every
 // credential the install holds, wherever it is stored.
-module.exports = { load, save, getPublic, getViewerPublic, isMasked, readRetired, encrypt, decrypt, DEFAULTS, POLL_BOUNDS };
+module.exports = { load, save, getPublic, getViewerPublic, isMasked, readRetired, encrypt, decrypt,
+                   DEFAULTS, POLL_BOUNDS, CREDENTIAL_FIELDS };

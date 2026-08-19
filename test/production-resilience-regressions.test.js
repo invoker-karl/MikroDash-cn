@@ -142,6 +142,7 @@ test('all node-routeros compatibility patches are required at startup', () => {
   const { PATCH_MARKERS, resolveDistPath, hasExactPatchMarker } = require('../src/routeros/patchVerification');
   assert.deepEqual(PATCH_MARKERS, [
     'MIKRODASH_PATCHED_EMPTY_REPLY',
+    'MIKRODASH_PATCHED_EMPTY_NO_CLOSE',
     'MIKRODASH_PATCHED_UNREGISTEREDTAG',
     'MIKRODASH_PATCHED_UTF8_ENCODING',
     'MIKRODASH_PATCHED_MULTI_BLOCK',

@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const TrafficCollector = require('../src/collectors/traffic');
+// Stops every collector these tests construct once the file finishes; without
+// it their timers keep the test process alive. See the helper for why that
+// made the reported test count unstable.
+const { track } = require('./helpers/collector-cleanup');
+const TrafficCollector = track(require('../src/collectors/traffic'));
 
 test('traffic collector emits normalized socket and WAN payloads from a poll cycle', () => {
   const socketEmits = [];
@@ -109,7 +113,7 @@ test('traffic collector treats missing or zero traffic fields as zero Mbps', () 
 });
 
 // --- System Collector ---
-const SystemCollector = require('../src/collectors/system');
+const SystemCollector = track(require('../src/collectors/system'));
 
 test('system collector parses CPU, memory, and HDD percentages', () => {
   const emitted = [];
@@ -229,7 +233,7 @@ test('system collector includes arch, serial, and license level in payload', () 
 });
 
 // --- Connections Collector ---
-const ConnectionsCollector = require('../src/collectors/connections');
+const ConnectionsCollector = track(require('../src/collectors/connections'));
 
 test('connections collector counts protocols correctly including case-insensitive icmp', async () => {
   const emitted = [];
@@ -492,7 +496,7 @@ test('connections collector caps work honestly by excluding truncated destinatio
 });
 
 // --- Firewall Collector ---
-const FirewallCollector = require('../src/collectors/firewall');
+const FirewallCollector = track(require('../src/collectors/firewall'));
 
 test('firewall collector calculates delta packets between polls', async () => {
   const emitted = [];
@@ -672,7 +676,7 @@ test('firewall collector includes raw table in payload and counter poll', async 
 });
 
 // --- Ping Collector ---
-const PingCollector = require('../src/collectors/ping');
+const PingCollector = track(require('../src/collectors/ping'));
 
 test('ping collector processes reply packets and tracks RTT and loss', () => {
   const emitted = [];
@@ -747,7 +751,7 @@ test('ping collector maintains bounded history', () => {
 });
 
 // --- Top Talkers Collector ---
-const TopTalkersCollector = require('../src/collectors/talkers');
+const TopTalkersCollector = track(require('../src/collectors/talkers'));
 
 test('talkers collector calculates throughput rate between polls', () => {
   // The stream delivers rate-up/rate-down (bits/second) per device directly.
@@ -874,7 +878,7 @@ test('talkers poll timeout is transient — logs error and keeps scheduling', as
 });
 
 // --- VPN Collector ---
-const VpnCollector = require('../src/collectors/vpn');
+const VpnCollector = track(require('../src/collectors/vpn'));
 
 test('vpn collector resolves peer name with fallback chain', async () => {
   const emitted = [];
@@ -1037,7 +1041,7 @@ test('vpn collector: _prev.ts not advanced on handshake-only update; rates decay
 });
 
 // --- Wireless Collector ---
-const WirelessCollector = require('../src/collectors/wireless');
+const WirelessCollector = track(require('../src/collectors/wireless'));
 // Since issue #108 a wireless tick emits twice: the client list to the page and
 // dash-card rooms, and a bare count router-wide for the sidebar badge. Tests
 // that count emits mean the payload, so they count that one.
@@ -1266,7 +1270,7 @@ test('wireless collector filters out Ethernet interface rows with no wireless-sp
 });
 
 // --- Logs Collector ---
-const LogsCollector = require('../src/collectors/logs');
+const LogsCollector = track(require('../src/collectors/logs'));
 
 test('logs collector emits severity-classified entries from stream callbacks and drops empty messages', () => {
   const emitted = [];
@@ -1336,7 +1340,7 @@ test('logs collector _loadInitial() seeds ring buffer from /log/print response',
 });
 
 // --- DHCP Leases Collector ---
-const DhcpLeasesCollector = require('../src/collectors/dhcpLeases');
+const DhcpLeasesCollector = track(require('../src/collectors/dhcpLeases'));
 
 test('dhcp leases collector resolves name with comment > hostname > empty fallback', async () => {
   let streamHandler;
@@ -1389,7 +1393,7 @@ test('dhcp leases collector filters active leases after initial load and streame
 });
 
 // --- Interface Status Collector ---
-const InterfaceStatusCollector = require('../src/collectors/interfaceStatus');
+const InterfaceStatusCollector = track(require('../src/collectors/interfaceStatus'));
 
 test('interface status collector normalizes booleans and computes Mbps', () => {
   // The collector no longer uses _loadInitial(). Data flows from three persistent
@@ -1788,7 +1792,7 @@ test('interface status fingerprint reacts to error movement but not to byte tota
 });
 
 // --- ARP Collector ---
-const ArpCollector = require('../src/collectors/arp');
+const ArpCollector = track(require('../src/collectors/arp'));
 
 test('arp collector builds bidirectional lookup maps and skips incomplete entries', async () => {
   const ros = {
@@ -1952,7 +1956,7 @@ test('leases still load when the server/VLAN lookup fails', async () => {
 });
 
 // --- DHCP Networks Collector ---
-const DhcpNetworksCollector = require('../src/collectors/dhcpNetworks');
+const DhcpNetworksCollector = track(require('../src/collectors/dhcpNetworks'));
 
 test('dhcp networks collector counts leases per CIDR and extracts WAN IP', async () => {
   const emitted = [];
@@ -2027,7 +2031,7 @@ test('dhcp networks collector clears WAN IP when the configured WAN interface is
 // ═══════════════════════════════════════════════════════════════════════════
 // --- Routing Collector ---
 // ═══════════════════════════════════════════════════════════════════════════
-const RoutingCollector = require('../src/collectors/routing');
+const RoutingCollector = track(require('../src/collectors/routing'));
 function makeRoutingRos({ printRows = [], sessionRows = [], peerCfgRows = [] } = {}) {
   return {
     connected: true,
@@ -2041,6 +2045,88 @@ function makeRoutingRos({ printRows = [], sessionRows = [], peerCfgRows = [] } =
     stream: (words, cb) => ({ stop() {} }),
   };
 }
+
+// ── BGP-only mode, for the headless alert pool ───────────────────────────────
+//
+// BGP alerts used to fire only for the router whose Routing page someone had
+// open, because the alert pool (src/alertSessions.js) built System, Ping,
+// InterfaceStatus, Vpn and Netwatch but no routing collector. Every other
+// router produced no BGP alerts at all — an alert type that reads as enabled in
+// Settings and silently does nothing for most of the fleet.
+//
+// The pool only needs peers: the evaluator reads data.peers and nothing else.
+// Running the collector as configured would open /ip/route/listen and
+// /ipv6/route/listen on every alert-enabled router and pull full route tables
+// for a payload nobody renders, which is exactly the load this avoids.
+
+// Like makeRoutingRos, but records what was asked for.
+function makeRecordingRoutingRos({ printRows = [], sessionRows = [], peerCfgRows = [] } = {}) {
+  const writes = [];
+  const streams = [];
+  return {
+    writes, streams,
+    connected: true,
+    on() {},
+    write: async (cmd) => {
+      writes.push(String(cmd));
+      if (String(cmd).includes('/routing/bgp/session')) return sessionRows;
+      if (String(cmd).includes('/routing/bgp/peer'))    return peerCfgRows;
+      if (String(cmd).includes('/ip/route'))            return printRows;
+      return [];
+    },
+    stream: (words) => { streams.push(String(words)); return { stop() {} }; },
+  };
+}
+
+const _bgpOnlyRos = () => makeRecordingRoutingRos({
+  printRows:   [{ '.id': '*1', 'dst-address': '0.0.0.0/0', gateway: '10.0.0.1', distance: '1', '.flags': 'AS' }],
+  sessionRows: [{ name: 'peer1', 'remote.address': '10.0.0.1', 'remote.as': '65001',
+                  state: 'established', uptime: '1h', 'prefix-count': '100' }],
+});
+
+test('bgpOnly never reads the route table, but still reads BGP sessions', async () => {
+  const ros = _bgpOnlyRos();
+  const io  = { to() { return { emit() {} }; } };
+  const c = new RoutingCollector({ ros, io, pollMs: 10000, state: {}, streamMode: false, bgpOnly: true });
+
+  await c.resume();
+
+  assert.ok(!ros.writes.some(w => w.includes('/ip/route')),
+    'no route query: ' + JSON.stringify(ros.writes));
+  assert.ok(ros.writes.some(w => w.includes('/routing/bgp/session')),
+    'BGP sessions are still read — they are the whole point');
+  assert.strictEqual(c.lastPayload.peers.length, 1, 'peers reach the payload the evaluator reads');
+  assert.strictEqual(c.lastPayload.peers[0].state, 'established');
+  c.stop();
+});
+
+test('bgpOnly opens the BGP stream and neither route stream', async () => {
+  // Guarded independently of poll mode. The pool uses polling, but a flag that
+  // only works in one delivery mode is a trap for whoever wires the next caller.
+  const ros = _bgpOnlyRos();
+  const io  = { to() { return { emit() {} }; } };
+  const c = new RoutingCollector({ ros, io, pollMs: 10000, state: {}, bgpOnly: true });
+
+  await c.resume();
+
+  assert.ok(!ros.streams.some(s => s.includes('/ip/route/listen')),   'no IPv4 route stream');
+  assert.ok(!ros.streams.some(s => s.includes('/ipv6/route/listen')), 'no IPv6 route stream');
+  assert.ok(ros.streams.some(s => s.includes('/routing/bgp/session/listen')), 'BGP stream still opens');
+  c.stop();
+});
+
+test('without bgpOnly the route table is still loaded', async () => {
+  // The flag defaults off, and the Routing page depends on it staying that way.
+  const ros = _bgpOnlyRos();
+  const io  = { to() { return { emit() {} }; } };
+  const c = new RoutingCollector({ ros, io, pollMs: 10000, state: {}, streamMode: false });
+
+  await c.resume();
+
+  assert.ok(ros.writes.some(w => w.includes('/ip/route')), 'routes are read as normal');
+  assert.ok(c.lastPayload.routeCounts.total > 0, 'and counted');
+  c.stop();
+});
 
 // ── start() happy path ───────────────────────────────────────────────────────
 
@@ -2849,6 +2935,187 @@ test('recomputing counts does not corrupt the stored SSID list', () => {
 
   assert.strictEqual(c.lastPayload.ssids[0].clients, 1, 'still one client after two emits');
   assert.deepStrictEqual(c.lastPayload.ssids[0].bands, ['5GHz'], 'and one band, not two');
+});
+
+// ── Saying so when hostname resolution cannot work (issue #93, from #88) ─────
+//
+// Wireless names come from the DHCP lease table (by MAC) or from a reverse
+// lookup of the client's IP, and that IP comes only from the router's ARP
+// table. A router that bridges wireless clients at layer 2 — a CAP whose
+// gateway and DHCP live on another device — never holds an ARP entry for them,
+// so no IP is known and no lookup is ever attempted.
+//
+// That is correct behaviour with no error to report, which is exactly why it
+// has to be said out loud. The reporter in #88 had working reverse DNS the
+// whole time and no lookup was ever tried; the page showed bare MACs and
+// nothing distinguished "your DNS is wrong" from "this router cannot know".
+
+function _wlLogCapture(fn) {
+  const util = require('node:util');
+  const orig = console.log;
+  const lines = [];
+  console.log = (...a) => lines.push(util.format(...a));
+  try { fn(); } finally { console.log = orig; }
+  return lines.filter(l => /hostname resolution/.test(l));
+}
+
+function _wlWithClients(clients) {
+  const c = _wlCollector();
+  clients.forEach((cl, i) => c._knownClients.set('M' + i, cl));
+  return c;
+}
+
+const _noIp = (n) => Array.from({ length: n }, (_, i) => ({
+  mac: 'AA:BB:CC:00:00:0' + i, iface: 'wifi1', ssid: 'SkyNet',
+  band: '5GHz', signal: -50, ip: '', name: '',
+}));
+
+test('a router with no ARP entry for any client says so, once', () => {
+  const c = _wlWithClients(_noIp(52));
+  const lines = _wlLogCapture(() => c._emitClients());
+
+  assert.strictEqual(lines.length, 1, 'one line, not one per client');
+  assert.match(lines[0], /52\/52/, 'reports the ratio, so the scale is obvious');
+  assert.match(lines[0], /ARP/, 'names the actual cause');
+  c.stop();
+});
+
+test('the warning is throttled while the condition persists', () => {
+  // A layer 2 AP is permanently in this state. Repeating every poll would bury
+  // the log it is meant to make readable.
+  const c = _wlWithClients(_noIp(3));
+  const first  = _wlLogCapture(() => c._emitClients());
+  const second = _wlLogCapture(() => { c._emitClients(); c._emitClients(); });
+
+  assert.strictEqual(first.length, 1);
+  assert.strictEqual(second.length, 0, 'silent while inside the throttle window');
+  c.stop();
+});
+
+test('a client that does have an IP means nothing is wrong', () => {
+  // Partial absence is ordinary: a client that just associated has not spoken
+  // IP yet. Warning on that would cry wolf on every healthy router.
+  const c = _wlWithClients([
+    ..._noIp(2),
+    { mac: 'AA:BB:CC:00:00:09', iface: 'wifi1', ssid: 'SkyNet', band: '5GHz', signal: -40, ip: '192.168.88.10', name: 'laptop' },
+  ]);
+  assert.deepStrictEqual(_wlLogCapture(() => c._emitClients()), []);
+  c.stop();
+});
+
+test('an access point with nobody connected is not reported as broken', () => {
+  const c = _wlWithClients([]);
+  assert.deepStrictEqual(_wlLogCapture(() => c._emitClients()), []);
+  c.stop();
+});
+
+test('the warning returns promptly after the condition clears and recurs', () => {
+  // Reset on recovery rather than riding out the throttle, so somebody who
+  // fixes the router and breaks it again is told the second time too.
+  const c = _wlWithClients(_noIp(2));
+  assert.strictEqual(_wlLogCapture(() => c._emitClients()).length, 1);
+
+  c._knownClients.set('M0', { mac: 'AA', iface: 'wifi1', ip: '192.168.88.5', name: 'pc', signal: -50, band: '5GHz' });
+  c._knownClients.set('M1', { mac: 'BB', iface: 'wifi1', ip: '192.168.88.6', name: 'tv', signal: -50, band: '5GHz' });
+  assert.deepStrictEqual(_wlLogCapture(() => c._emitClients()), [], 'healthy again, nothing logged');
+
+  c._knownClients.set('M0', { mac: 'AA', iface: 'wifi1', ip: '', name: '', signal: -50, band: '5GHz' });
+  c._knownClients.set('M1', { mac: 'BB', iface: 'wifi1', ip: '', name: '', signal: -50, band: '5GHz' });
+  assert.strictEqual(_wlLogCapture(() => c._emitClients()).length, 1, 'reported again on recurrence');
+  c.stop();
+});
+
+// ── The scannable-radio catalogue (frequency analyzer) ───────────────────────
+//
+// Built from rows _refreshSsids already fetches, so the scan can validate a
+// request without a write() — whose 30s timeout closes the connection every
+// collector on the router shares.
+
+test('only real radios are scannable, not virtual APs', () => {
+  // The live fleet reports twelve /interface/wifi rows of which only four have a
+  // radio of their own. Offering the other eight would offer scans that cannot
+  // happen, and `master` is the only field that separates them.
+  const c = _wlCollector();
+  c._scanIfaces = c._parseScanIfaces([
+    { name: '2.4GHz WiFi',  master: 'true',  disabled: 'false', running: 'true' },
+    { name: '2.4GHz WiFi2', master: 'false', disabled: 'false', running: 'true' },
+    { name: '5GHz WiFi',    master: 'true',  disabled: 'false', running: 'true' },
+  ], '/interface/wifi/print');
+
+  assert.deepStrictEqual(c.listScannableInterfaces().map(i => i.name),
+    ['2.4GHz WiFi', '5GHz WiFi']);
+});
+
+test('a radio reports the clients a scan would actually disconnect', () => {
+  // Measured on the live fleet, and the reason this exists: scanning a radio
+  // dropped all 15 of its clients within 2 seconds and they took over 15 seconds
+  // to start returning — and not one was associated to the radio's OWN
+  // interface. Every one was on a virtual AP riding the same radio. Counting
+  // only the interface would have shown "no clients" immediately before
+  // knocking fifteen devices off the network.
+  const c = _wlCollector();
+  c._scanIfaces = c._parseScanIfaces([
+    { name: 'radioA', '.id': '*45', master: 'true',  disabled: 'false' },
+    { name: 'radioA-guest', '.id': '*46', master: 'false', 'master-interface': 'radioA', disabled: 'false' },
+    { name: 'radioB', '.id': '*49', master: 'true',  disabled: 'false' },
+    { name: 'radioB-guest', '.id': '*4A', master: 'false', 'master-interface': 'radioB', disabled: 'false' },
+  ], '/interface/wifi/print');
+
+  c._knownClients.set('1', { mac: '1', iface: 'radioA' });
+  c._knownClients.set('2', { mac: '2', iface: 'radioA-guest' });
+  c._knownClients.set('3', { mac: '3', iface: 'radioA-guest' });
+  c._knownClients.set('4', { mac: '4', iface: 'radioB-guest' });
+
+  const byName = Object.fromEntries(c.listScannableInterfaces().map(i => [i.name, i.clients]));
+  assert.strictEqual(byName.radioA, 3, 'its own client plus both on its virtual AP');
+  assert.strictEqual(byName.radioB, 1, 'a radio with clients only on its virtual AP is not idle');
+});
+
+test('an idle radio reports no clients', () => {
+  // The other half: a radio that really is idle must say so, or the warning
+  // cries wolf and stops being read.
+  const c = _wlCollector();
+  c._scanIfaces = c._parseScanIfaces([
+    { name: 'idle', '.id': '*45', master: 'true', disabled: 'false' },
+    { name: 'busy', '.id': '*49', master: 'true', disabled: 'false' },
+  ], '/interface/wifi/print');
+  c._knownClients.set('1', { mac: '1', iface: 'busy' });
+
+  const byName = Object.fromEntries(c.listScannableInterfaces().map(i => [i.name, i.clients]));
+  assert.strictEqual(byName.idle, 0);
+  assert.strictEqual(byName.busy, 1);
+});
+
+test('a CAPsMAN-managed radio and a disabled one are not offered', () => {
+  // A managed CAP's radio is not this box's to take off the air.
+  const c = _wlCollector();
+  c._scanIfaces = c._parseScanIfaces([
+    { name: 'managed',  master: 'true', 'configuration.manager': 'capsman', disabled: 'false' },
+    { name: 'disabled', master: 'true', disabled: 'true' },
+    { name: 'good',     master: 'true', disabled: 'false' },
+  ], '/interface/wifi/print');
+
+  assert.deepStrictEqual(c.listScannableInterfaces().map(i => i.name), ['good']);
+});
+
+test('the catalogue copies no security field', () => {
+  // Same hazard as the SSID list: these rows carry security.passphrase in clear
+  // text and this list reaches a browser.
+  const c = _wlCollector();
+  const blob = JSON.stringify(c._parseScanIfaces([{
+    name: 'wifi1', master: 'true', disabled: 'false',
+    'security.passphrase': 'hunter2', 'security.authentication-types': 'wpa2-psk',
+  }], '/interface/wifi/print'));
+  assert.ok(!blob.includes('hunter2'));
+  assert.ok(!blob.includes('security'));
+});
+
+test('the legacy wireless stack reports no scannable radios', () => {
+  // Its scan command differs and there is no device here to verify it against.
+  // An empty list disables the button; guessing would ship an untestable path.
+  const c = _wlCollector();
+  assert.deepStrictEqual(
+    c._parseScanIfaces([{ name: 'wlan1', master: 'true' }], '/interface/wireless/print'), []);
 });
 
 // ── The CAPsMAN probe must not touch SSID state ──────────────────────────────

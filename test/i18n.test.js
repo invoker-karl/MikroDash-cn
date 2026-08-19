@@ -138,6 +138,43 @@ test('dynamic patterns accept bounded UI values and reject arbitrary user data',
   dom.window.close();
 });
 
+test('every page introduced by upstream v0.7.25 has a translated document title', () => {
+  const messages = loadLocale('zh-CN').messages;
+  const pages = ['VLANs', 'PPP', 'Bridges', 'DNS', 'CAPsMAN', 'Packages',
+    'Queues', 'Router Users', 'WAN', 'Audit'];
+  const translatedWords = new Set(['VLANs', 'Bridges', 'Packages', 'Queues', 'Router Users', 'Audit']);
+  for (const page of pages) {
+    const source = 'MikroDash — ' + page;
+    assert.ok(messages[source], source);
+    if (translatedWords.has(page)) assert.notEqual(messages[source], source, source);
+  }
+});
+
+test('v0.7.25 router-write confirmations and refusals are translated', () => {
+  const messages = loadLocale('zh-CN').messages;
+  const required = [
+    'This applies all scheduled package changes and REBOOTS the router.',
+    'The uplink goes down until the client rebinds — usually seconds, but it is a real outage.',
+    'Traffic it was limiting will no longer be shaped.',
+    'They will no longer be able to log in to this router.',
+    'Package collection is not running for this router',
+    'WAN collection is not running for this router',
+    'Queue collection is not running for this router',
+    'Router user collection is not running for this router',
+    'That is the account MikroDash signs in with — manage it in WinBox',
+    'The RouterOS user needs the "policy" permission for this',
+  ];
+  for (const source of required) {
+    assert.ok(messages[source], source);
+    assert.notEqual(messages[source], source, source);
+  }
+  const app = readPublic('app.js');
+  assert.match(app, /function tr\(s, context\)/);
+  assert.match(app, /window\.prompt\(\s*tr\(/);
+  assert.match(app, /window\.confirm\(tr\('Remove the queue'/);
+  assert.match(app, /'user-remove':\s+tr\('Remove the router user'/);
+});
+
 test('audit mode records inspectable misses without changing the display', () => {
   const dom = createDom();
   const i18n = dom.window.MikroDashI18n;

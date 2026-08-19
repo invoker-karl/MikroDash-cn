@@ -7,6 +7,10 @@
 
 const test   = require('node:test');
 const assert = require('node:assert');
+// Stops every collector these tests construct once the file finishes; without
+// it their timers keep the test process alive. See the helper for why that
+// made the reported test count unstable.
+const { track } = require('./helpers/collector-cleanup');
 
 const {
   COLLECTORS, DISABLEABLE, MODES, DEFAULT_MODE,
@@ -31,8 +35,60 @@ test('registry covers every collector the session builds, exactly once', () => {
   // Mirrors the session object returned by buildSession() in src/index.js.
   const sessionProps = ['dhcpLeases','dhcpNetworks','arp','traffic','conns','talkers','logs',
                         'system','wireless','vpn','firewall','ifStatus','ping','bandwidth',
-                        'routing','netwatch','topology'];
+                        'routing','netwatch','topology','vlans','ppp',
+                        'bridges','dns','capsman','packages','rosusers','queues','wan'];
   assert.deepEqual(COLLECTORS.map(c => c.sessionProp).sort(), [...sessionProps].sort());
+});
+
+test('every polling profile covers every slider it can move', () => {
+  // The bug this exists for: POLL_PROFILES carried 11 keys while POLL_SLIDERS
+  // had grown to 18, so picking a preset wrote `undefined` into seven sliders
+  // and rendered "NaNms". Nothing failed — the page just quietly lied.
+  const fs   = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+
+  const sliders = [...src.matchAll(/\{ key:'(poll[A-Za-z]+)',[^}]*\}/g)].map(m => m[1]);
+  assert.ok(sliders.length >= 18, 'found the slider list (' + sliders.length + ')');
+
+  const profBlock = src.match(/var POLL_PROFILES = \{([\s\S]*?)\n  \};/);
+  assert.ok(profBlock, 'found POLL_PROFILES');
+  const profiles = [...profBlock[1].matchAll(/(\w+):\s*\{([\s\S]*?)\},/g)];
+  assert.strictEqual(profiles.length, 5, 'five canned profiles');
+
+  for (const [, name, body] of profiles) {
+    const keys = new Set([...body.matchAll(/(poll[A-Za-z]+):/g)].map(m => m[1]));
+    const missing = sliders.filter(k => !keys.has(k));
+    assert.deepStrictEqual(missing, [], 'profile "' + name + '" is missing ' + missing.join(', '));
+  }
+});
+
+test('every poll slider is a real, saveable setting', () => {
+  // The other half of the same class of bug: a slider whose key is not in
+  // POLL_BOUNDS, or not in the /api/settings intFields map, moves and saves
+  // nothing. pollTopology, pollVlans and pollPpp were all in that state.
+  const fs   = require('fs');
+  const path = require('path');
+  const src  = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const idx  = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  const Settings = require('../src/settings');
+
+  const sliders = [...src.matchAll(/\{ key:'(poll[A-Za-z]+)',[^}]*\}/g)].map(m => m[1]);
+  const intFields = idx.match(/const intFields = \{([\s\S]*?)\n    \};/);
+  assert.ok(intFields, 'found intFields');
+  const pollMap = idx.match(/const pollMap = \{([\s\S]*?)\};/);
+  assert.ok(pollMap, 'found pollMap');
+
+  for (const key of sliders) {
+    assert.ok(Settings.DEFAULTS[key] !== undefined, key + ' has a default');
+    assert.ok(Settings.POLL_BOUNDS[key], key + ' has bounds');
+    assert.ok(intFields[1].includes(key + ':'), key + ' is accepted by POST /api/settings');
+    // Either through pollMap (which sets collector.pollMs) or through a
+    // dedicated branch — pollIfaces sets ifStatus.metaPollMs, so it cannot use
+    // pollMap and has its own. What matters is that SOMETHING applies it.
+    const applied = pollMap[1].includes(key + ':') || idx.includes("'" + key + "' in updates");
+    assert.ok(applied, key + ' is applied to a live collector');
+  }
 });
 
 test('protected collectors are the ones other collectors read unguarded', () => {
@@ -40,7 +96,7 @@ test('protected collectors are the ones other collectors read unguarded', () => 
   // arp/dhcpLeases/dhcpNetworks are read without a null guard by connections.js;
   // traffic feeds stored history; system feeds identity, the update check and CPU alerts.
   assert.deepEqual(protectedKeys, ['arp','dhcpLeases','dhcpNetworks','system','traffic']);
-  assert.equal(DISABLEABLE.length, 12);
+  assert.equal(DISABLEABLE.length, 21);
 });
 
 // ── Defaults and inheritance ─────────────────────────────────────────────────
@@ -562,7 +618,7 @@ test('ifStatus poll asks for rates even though RouterOS sends disabled="false"',
   // empty, _pollRatesOnce returned before its write, _streamRates stayed empty,
   // every rate rendered 0.00, the emit fingerprint never changed, and the
   // Interfaces page updated once per 60 s heartbeat instead of once per second.
-  const InterfaceStatusCollector = require('../src/collectors/interfaceStatus');
+  const InterfaceStatusCollector = track(require('../src/collectors/interfaceStatus'));
   const calls = [];
   const ros = pollRos(async (cmd, params) => {
     calls.push(cmd);
@@ -591,7 +647,7 @@ test('ifStatus poll asks for rates even though RouterOS sends disabled="false"',
 
 test('ifStatus poll still excludes genuinely disabled interfaces', () => {
   // The fix must not swing the other way and monitor disabled interfaces.
-  const InterfaceStatusCollector = require('../src/collectors/interfaceStatus');
+  const InterfaceStatusCollector = track(require('../src/collectors/interfaceStatus'));
   const asked = [];
   const ros = pollRos(async (cmd, params) => {
     if (cmd === '/interface/monitor-traffic') asked.push(params.find(p => p.startsWith('=interface=')));
@@ -618,7 +674,7 @@ for (const [name, mod, sched] of [
     // suspend() clears _pollTimer as well as the stream, but resume() only ever
     // restarted the stream — so the first time every viewer disconnected, a
     // poll-mode collector died permanently and its card sat stale forever.
-    const Collector = require(mod);
+    const Collector = track(require(mod));
     const ros = pollRos(async () => []);
     const c = new Collector({
       ros, io: { engine: { clientsCount: 1 }, emit() {}, on() {},
@@ -677,7 +733,7 @@ test('connections polls when its session is built while a viewer is already watc
   // check and the later idle->active transition schedules the poll properly. It
   // only bites when a viewer is ALREADY present as the session is built — exactly
   // what happens when you switch the active router from one box to another.
-  const ConnectionsCollector = require('../src/collectors/connections');
+  const ConnectionsCollector = track(require('../src/collectors/connections'));
   const ros = pollRos(async () => []);
   const c = new ConnectionsCollector({
     ros, io: { engine: { clientsCount: 1 }, emit() {}, on() {},
@@ -700,7 +756,7 @@ test('connections polls when its session is built while a viewer is already watc
 test('connections still does not poll for a router nobody is watching', () => {
   // The fix must not undo the idle gate: a cold start with no viewer should stay
   // quiet until someone actually connects.
-  const ConnectionsCollector = require('../src/collectors/connections');
+  const ConnectionsCollector = track(require('../src/collectors/connections'));
   const ros = pollRos(async () => []);
   const c = new ConnectionsCollector({
     ros, io: { engine: { clientsCount: 0 }, emit() {}, on() {},
@@ -733,7 +789,7 @@ function updateRos(host, writeFn) {
 }
 
 function updateCollector(host, calls) {
-  const SystemCollector = require('../src/collectors/system');
+  const SystemCollector = track(require('../src/collectors/system'));
   const ros = updateRos(host, async (cmd) => {
     calls.push(cmd);
     if (cmd === '/system/package/update/print') {
@@ -782,7 +838,7 @@ test('a router whose update state was never resolved still gets one check on swi
   // cache is not an option, so the switch must be allowed to check even though
   // the window is open — but exactly once per collector, so a router that always
   // fails cannot turn the 2 s resource tick into an upstream poll.
-  const SystemCollector = require('../src/collectors/system');
+  const SystemCollector = track(require('../src/collectors/system'));
   const host  = 'never-resolved-' + Date.now();
   const calls = [];
   const mk = () => {
@@ -815,7 +871,7 @@ test('a router whose update state was never resolved still gets one check on swi
 // ─── Wireless API detection must not mistake "no clients" for "no wifi API" ──
 
 function wlCollector(writeFn, streamMode) {
-  const WirelessCollector = require('../src/collectors/wireless');
+  const WirelessCollector = track(require('../src/collectors/wireless'));
   const ros = new EventEmitter();
   ros.setMaxListeners(30);
   ros.connected = true;
@@ -1037,7 +1093,7 @@ test('interface alerts cannot be attributed to the wrong router', () => {
 });
 
 test('the ifStatus payload actually carries the router id', () => {
-  const InterfaceStatusCollector = require('../src/collectors/interfaceStatus');
+  const InterfaceStatusCollector = track(require('../src/collectors/interfaceStatus'));
   const emitted = [];
   const c = new InterfaceStatusCollector({
     ros: pollRos(async () => []),
