@@ -12,7 +12,8 @@ Run this after every merge that should go into the `R5S` container.
 
 - Open the dashboard and confirm Basic Auth works.
 - Dashboard page renders without blank cards.
-- Interfaces page shows active interfaces and non-negative throughput.
+- The traffic picker includes every non-disabled interface, labels link-down
+  interfaces, and keeps a selected down interface instead of silently changing it.
 - DHCP page loads leases.
 - VPN page loads WireGuard peers or renders a clean empty state.
 - Logs page updates live.

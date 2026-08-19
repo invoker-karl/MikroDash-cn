@@ -18,7 +18,7 @@ WORKDIR /app
 # Build tools needed for better-sqlite3 native compilation on alpine
 RUN apk add --no-cache python3 make g++
 COPY package*.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+RUN npm ci --omit=dev --no-audit --no-fund
 # Patch node-routeros to handle RouterOS 7.18+ !empty API reply
 COPY patch-routeros.js ./
 RUN node patch-routeros.js

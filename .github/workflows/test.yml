@@ -19,8 +19,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
           cache: npm
@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # amd64 only — this job verifies behaviour, not multi-arch packaging.
       # docker-publish.yml covers arm64 on tagged releases.
@@ -52,7 +52,11 @@ jobs:
       # the host filesystem before docker ever sees it.
       - name: Run production-dependency test suite
         run: |
-          files=$(find test -name '*.test.js' ! -name 'i18n.test.js' -printf '/app/%p\n' | paste -sd, - | tr ',' ' ')
+          # Browser/Socket.IO integration suites use dev-only jsdom and
+          # socket.io-client and already ran in quality above.
+          files=$(find test -name '*.test.js' \
+            ! -name 'i18n.test.js' ! -name 'post-cn3-audit.test.js' \
+            -printf '/app/%p\n' | paste -sd, - | tr ',' ' ')
           docker run --rm --entrypoint sh \
             -v "$PWD/test:/app/test:ro" \
             mikrodash:ci -c "node --test --test-force-exit $files"
@@ -67,13 +71,17 @@ jobs:
           cid=$(docker run -d --rm --tmpfs /data -p 3099:3081 \
             -e DATA_SECRET=ci-smoke-test mikrodash:ci)
           for i in $(seq 1 20); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3099/healthz || true)
-            if [ "$code" = "200" ] || [ "$code" = "503" ]; then
+            body=$(mktemp)
+            code=$(curl -s -o "$body" -w '%{http_code}' http://127.0.0.1:3099/healthz || true)
+            if { [ "$code" = "200" ] && jq -e '.ok == true' "$body" >/dev/null; } || \
+               { [ "$code" = "503" ] && jq -e '.ok == false and .starting == true' "$body" >/dev/null; }; then
               echo "Server responded with HTTP $code."
+              rm -f "$body"
               docker logs "$cid"
               docker stop "$cid" > /dev/null
               exit 0
             fi
+            rm -f "$body"
             sleep 2
           done
           echo "Server did not respond within 40s:"
