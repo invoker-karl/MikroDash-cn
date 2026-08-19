@@ -14,6 +14,7 @@
 // paths cannot produce different payloads (#105).
 
 const { stopStreamSafe, createPollLoop } = require('./util');
+const { AuthoritativeSnapshotProbe, classifyRStreamPacket, classifySnapshotError } = require('./rstreamSnapshot');
 
 // Hoisted so the stream and poll paths cannot drift apart.
 //
@@ -254,6 +255,19 @@ class TopologyCollector {
 
     this._poll = createPollLoop(() => this._pollOnce(), () => this.pollMs);
     this._pingLoop = createPollLoop(() => this._pingNextOnce(), () => PING_STEP_MS);
+    this._snapshotProbe = new AuthoritativeSnapshotProbe({
+      cooldownMs: Math.max(1000, this.pollMs),
+      read: () => this.ros.write(NEIGHBOR_CMD),
+      apply: rows => {
+        this._rows = rows;
+        this.state.lastTopologyErr = null;
+        this._scheduleRebuild();
+      },
+      onError: (error, classification) => {
+        if (classification.kind === 'permission') this._permissionDenied = true;
+        this.state.lastTopologyErr = String(error && error.message ? error.message : error);
+      },
+    });
   }
 
   // ── fetch ────────────────────────────────────────────────────────────────
@@ -263,6 +277,7 @@ class TopologyCollector {
     try {
       this._rows = (await this.ros.write(NEIGHBOR_CMD)) || [];
       this.state.lastTopologyErr = null;
+      this._scheduleRebuild();
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       if (DENIED_RE.test(msg)) {
@@ -272,7 +287,6 @@ class TopologyCollector {
       }
       this.state.lastTopologyErr = msg;
     }
-    this._scheduleRebuild();
   }
 
   /**
@@ -331,19 +345,31 @@ class TopologyCollector {
     if (!this.ros.connected || !this.showClients) return;
 
     const get = async (spec) => {
-      try { return (await this.ros.write(spec[0], spec.slice(1))) || []; }
-      catch (_) { return null; }
+      try { return { ok: true, rows: (await this.ros.write(spec[0], spec.slice(1))) || [] }; }
+      catch (error) { return { ok: false, error, classification: classifySnapshotError(error) }; }
     };
 
-    let ifaces = await get(WIFI_CMDS.ifaces);
-    let reg = ifaces ? await get(WIFI_CMDS.reg) : null;
+    let ifaceResult = await get(WIFI_CMDS.ifaces);
     let legacy = false;
-    if (!ifaces) {                                   // pre-7.13 stack
-      ifaces = await get(WIFI_LEGACY.ifaces);
-      reg = ifaces ? await get(WIFI_LEGACY.reg) : null;
-      legacy = !!ifaces;
+    if (!ifaceResult.ok && ifaceResult.classification.kind === 'unsupported') {
+      ifaceResult = await get(WIFI_LEGACY.ifaces);   // pre-7.13 stack
+      legacy = ifaceResult.ok;
     }
-    const caps = legacy ? [] : (await get(WIFI_CMDS.caps)) || [];
+    // A timeout or permission failure is not an empty wireless deployment.
+    // Preserve all last-good attribution maps and try again next refresh.
+    if (!ifaceResult.ok) {
+      this.state.lastTopologyErr = ifaceResult.classification.message;
+      return;
+    }
+    const regResult = await get(legacy ? WIFI_LEGACY.reg : WIFI_CMDS.reg);
+    if (!regResult.ok) {
+      this.state.lastTopologyErr = regResult.classification.message;
+      return;
+    }
+    const ifaces = ifaceResult.rows;
+    const reg = regResult.rows;
+    const capsResult = legacy ? { ok: true, rows: [] } : await get(WIFI_CMDS.caps);
+    const caps = capsResult.ok ? capsResult.rows : null;
 
     // radio-mac per interface, following master-interface for virtual APs. A
     // multi-SSID interface carries no radio of its own, so without this chain
@@ -367,10 +393,12 @@ class TopologyCollector {
 
     // A managed AP's radios are not its base MAC but a small offset from it
     // (base+1, +2 …), so match on the first five octets rather than exactly.
-    const capByPrefix = new Map();
-    for (const c of caps) {
-      const base = String(c.address || '').split('%')[0].toUpperCase();
-      if (base) capByPrefix.set(macPrefix(base), { identity: c.identity || '', base });
+    const capByPrefix = caps === null ? this._capByPrefix : new Map();
+    if (caps !== null) {
+      for (const c of caps) {
+        const base = String(c.address || '').split('%')[0].toUpperCase();
+        if (base) capByPrefix.set(macPrefix(base), { identity: c.identity || '', base });
+      }
     }
 
     const assoc = new Map();
@@ -388,6 +416,7 @@ class TopologyCollector {
     this._ifaceRadio = ifaceRadio;
     this._capByPrefix = capByPrefix;
     this._assoc = assoc;
+    this.state.lastTopologyErr = null;
   }
 
   /** VLAN id -> name. Changes only when the operator edits the config, so this
@@ -429,16 +458,10 @@ class TopologyCollector {
     this._stream = stream;
 
     stream.on('data', (pkt) => {
-      // RStream emits [] when the table is empty this interval — rebuild from an
-      // empty row set so departed neighbours actually disappear.
-      if (Array.isArray(pkt)) {
-        if (pkt.length === 0 && !this._batch.length && !this._debounce) {
-          this._rows = [];
-          this._scheduleRebuild();
-        }
-        return;
-      }
-      if (!pkt || typeof pkt !== 'object') return;
+      const classified = classifyRStreamPacket(pkt);
+      if (classified.kind === 'idle') { this._snapshotProbe.onIdle(); return; }
+      if (classified.kind !== 'data') return;
+      this._snapshotProbe.noteRealRow();
       this._batch.push(pkt);
       if (this._debounce) return;
       this._debounce = setTimeout(() => { // codeql[js/resource-exhaustion]
@@ -473,6 +496,7 @@ class TopologyCollector {
   }
 
   _stopStream() {
+    this._snapshotProbe.invalidate();
     if (this._debounce) { clearTimeout(this._debounce); this._debounce = null; }
     if (this._restartTimer) { clearTimeout(this._restartTimer); this._restartTimer = null; }
     this._restarting = false;

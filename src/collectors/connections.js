@@ -9,6 +9,7 @@ const settings = require('../settings');
  */
 const { extractAddress, isInCidrs, isValidIp } = require('../util/ip');
 const { clampPoll, stopStreamSafe, createStreamHealth } = require('./util');
+const { AuthoritativeSnapshotProbe, classifyRStreamPacket } = require('./rstreamSnapshot');
 const { lookupOrg, lookupCategory } = require('../util/asnLookup');
 
 function makeDestKey(c) {
@@ -81,6 +82,18 @@ class ConnectionsCollector {
     // Starts suspended: only resume() (called when a viewer is present) opens
     // the stream, so the watchdog can't open it for an idle router.
     this._suspended = true;
+    this._snapshotProbe = new AuthoritativeSnapshotProbe({
+      cooldownMs: Math.max(1000, this.pollMs),
+      read: () => this.ros.write('/ip/firewall/connection/print', [CONN_PROPLIST]),
+      apply: rows => {
+        this._rowsNext = rows;
+        this._onBatchComplete(true);
+        this.state.lastConnsErr = null;
+      },
+      onError: error => {
+        this.state.lastConnsErr = String(error && error.message ? error.message : error);
+      },
+    });
 
     this.ros.on('close',     () => this.stop());
     this.ros.on('connected', () => {
@@ -124,7 +137,7 @@ class ConnectionsCollector {
   }
 
   // Runs partial-result detection, deposits into cache, then processes rows.
-  _onBatchComplete() {
+  _onBatchComplete(authoritative = false) {
     const fresh = this._rowsNext;
     this._rowsNext = [];
 
@@ -134,7 +147,11 @@ class ConnectionsCollector {
       && fresh.length < this._rowsPrev.length * PARTIAL_DROP_RATIO;
 
     let rows;
-    if (looksPartial) {
+    if (authoritative && fresh.length === 0) {
+      this._partialStreak = 0;
+      rows = fresh;
+      this._rowsPrev = fresh;
+    } else if (looksPartial) {
       this._partialStreak++;
       const dbg = this._debug;
       if (this._partialStreak >= PARTIAL_MAX_STREAK) {
@@ -488,7 +505,10 @@ class ConnectionsCollector {
     this._rowsNext = [];
     this._streamStartTs = Date.now();
     this._stream.on('data', (pkt) => {
-      if (!pkt || typeof pkt !== 'object' || Array.isArray(pkt)) return;
+      const classified = classifyRStreamPacket(pkt);
+      if (classified.kind === 'idle') { this._snapshotProbe.onIdle(); return; }
+      if (classified.kind !== 'data') return;
+      this._snapshotProbe.noteRealRow();
       if (!pkt['.id']) return; // skip non-row packets
       this._rowsNext.push(pkt);
       // Reset the 300ms debounce — batch is complete when rows stop arriving
@@ -518,6 +538,7 @@ class ConnectionsCollector {
   }
 
   _stopStream() {
+    this._snapshotProbe.invalidate();
     clearTimeout(this._commitTimer);
     this._commitTimer  = null;
     // Cancel any pending error-restart so a suspended/stopped collector can't
@@ -545,7 +566,7 @@ class ConnectionsCollector {
     try {
       const rows = (await this.ros.write('/ip/firewall/connection/print', [CONN_PROPLIST])) || [];
       this._rowsNext = rows;
-      this._onBatchComplete();
+      this._onBatchComplete(true);
       this.state.lastConnsErr = null;
     } catch (e) {
       const msg = String(e && e.message ? e.message : e);

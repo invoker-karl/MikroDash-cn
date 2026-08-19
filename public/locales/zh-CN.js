@@ -585,6 +585,7 @@
     'Failed to load users': '无法加载用户', 'Found automatically': '自动检测',
     'From this router’s site,': '来自此路由器的站点：', 'GW:': '网关：', 'IPv6': 'IPv6',
     'Interface list unavailable': '接口列表不可用', 'Kid Control is unavailable': 'Kid Control 不可用',
+    'Kid Control permission denied': 'Kid Control 权限不足',
     'LAN:': '局域网：', 'Leases': '租约', 'No BGP peers': '没有 BGP 对等体',
     'No BGP peers match current filter': '没有符合当前筛选条件的 BGP 对等体',
     'No BGP peers — BGP may not be configured': '没有 BGP 对等体——可能尚未配置 BGP',

@@ -19,6 +19,7 @@
  */
 
 const { clampPoll, stopStreamSafe } = require('./util');
+const { AuthoritativeSnapshotProbe, classifyRStreamPacket, classifySnapshotError } = require('./rstreamSnapshot');
 
 class TopTalkersCollector {
   constructor({ ros, io, pollMs, state, topN, streamMode }) {
@@ -42,6 +43,14 @@ class TopTalkersCollector {
     this._lastFp       = '';
     this._pollTimer    = null;
     this._pollInflight = false;
+    this._snapshotProbe = new AuthoritativeSnapshotProbe({
+      cooldownMs: Math.max(1000, this._pollDelayMs),
+      read: () => this.ros.write('/ip/kid-control/device/print', [
+        '=.proplist=name,mac-address,rate-up,rate-down',
+      ]),
+      apply: rows => this._replaceAuthoritativeRows(rows),
+      onError: (error, classification) => this._handleSnapshotError(error, classification),
+    });
 
     // Register lifecycle listeners once in the constructor so they never
     // accumulate across multiple start() calls (hot-swap safety).
@@ -82,22 +91,10 @@ class TopTalkersCollector {
     );
 
     stream.on('data', (packet) => {
-      // RStream emits [] when the kid-control table is empty this interval —
-      // clear the device list instead of showing the last devices forever.
-      if (Array.isArray(packet)) {
-        if (packet.length === 0) {
-          this._devicesNext.clear();
-          // _commitTick() clears _devicesNext after every completed batch. Use
-          // lastPayload as well so a later empty interval still commits the
-          // transition from rendered devices to an empty table. Fingerprint
-          // suppression in _commitTick() prevents repeated empty emissions.
-          if (!this.lastPayload || this.lastPayload.unavailable || this.lastPayload.devices.length > 0) {
-            this._scheduleCommit();
-          }
-        }
-        return;
-      }
-      if (!packet || typeof packet !== 'object') return;
+      const classified = classifyRStreamPacket(packet);
+      if (classified.kind === 'idle') { this._snapshotProbe.onIdle(); return; }
+      if (classified.kind !== 'data') return;
+      this._snapshotProbe.noteRealRow();
       const mac = packet['mac-address'];
       if (!mac) return;
       this._devicesNext.set(mac, {
@@ -116,18 +113,11 @@ class TopTalkersCollector {
       this._stopStream();
       if (msg.includes('unknown command') || msg.includes('no such')) {
         // Feature not present on this router — disable permanently, no retries.
-        this._unavailable = true;
-        const now = Date.now();
         console.warn('%s', this._lbl + ' Kid Control not available on this router — disabling');
-        const payload = {
-          ts: now, devices: [], pollMs: this.pollMs,
-          unavailable: true, reason: 'Kid Control is unavailable',
-        };
-        this.lastPayload = payload;
-        this._lastFp = 'unavailable';
-        this.io.to('page-dashboard').emit('talkers:update', payload);
-        this.state.lastTalkersTs  = now;
-        this.state.lastTalkersErr = null;
+        this._setUnavailable('Kid Control is unavailable');
+      } else if (/not permitted|not allowed|permission denied|not enough privileges|cannot run/i.test(msg)) {
+        console.warn('%s', this._lbl + ' Kid Control permission denied — disabling until reconnect');
+        this._setUnavailable('Kid Control permission denied');
       } else if (msg.includes('timeout')) {
         // Stream timeout on CHR/VM (limited API threads). Feature likely exists
         // but stream mode can't handle it — auto-downgrade to poll mode.
@@ -146,6 +136,7 @@ class TopTalkersCollector {
   }
 
   _stopStream() {
+    this._snapshotProbe.invalidate();
     clearTimeout(this._commitTimer);  this._commitTimer  = null;
     clearTimeout(this._backoffTimer); this._backoffTimer = null;
     this._devicesNext.clear();
@@ -162,6 +153,44 @@ class TopTalkersCollector {
   _scheduleCommit() {
     clearTimeout(this._commitTimer);
     this._commitTimer = setTimeout(() => this._commitTick(), 300);
+  }
+
+  _replaceAuthoritativeRows(rows) {
+    this._devicesNext.clear();
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const mac = row['mac-address'];
+      if (!mac) continue;
+      this._devicesNext.set(mac, {
+        name: row.name || '', mac,
+        rateUp: parseInt(row['rate-up'] || '0', 10),
+        rateDown: parseInt(row['rate-down'] || '0', 10),
+      });
+    }
+    this._commitTick();
+  }
+
+  _setUnavailable(reason) {
+    this._unavailable = true;
+    const now = Date.now();
+    const payload = { ts: now, devices: [], pollMs: this.pollMs, unavailable: true, reason };
+    this.lastPayload = payload;
+    this._lastFp = 'unavailable:' + reason;
+    this.io.to('page-dashboard').emit('talkers:update', payload);
+    this.state.lastTalkersTs = now;
+    this.state.lastTalkersErr = null;
+  }
+
+  _handleSnapshotError(error, classification = classifySnapshotError(error)) {
+    if (classification.kind === 'unsupported') {
+      this._stopStream();
+      this._setUnavailable('Kid Control is unavailable');
+    } else if (classification.kind === 'permission') {
+      this._stopStream();
+      this._setUnavailable('Kid Control permission denied');
+    } else {
+      this.state.lastTalkersErr = classification.message;
+    }
   }
 
   _commitTick() {
@@ -226,19 +255,11 @@ class TopTalkersCollector {
       if (msg.includes('unknown command') || msg.includes('no such')) {
         // Feature not present — disable permanently, stop scheduling.
         if (!this._unavailable) {
-          this._unavailable = true;
           console.warn('%s', this._lbl + ' poll: Kid Control not available — disabling');
-          const now = Date.now();
-          const payload = {
-            ts: now, devices: [], pollMs: this.pollMs,
-            unavailable: true, reason: 'Kid Control is unavailable',
-          };
-          this.lastPayload = payload;
-          this._lastFp = 'unavailable';
-          this.io.to('page-dashboard').emit('talkers:update', payload);
-          this.state.lastTalkersTs  = now;
-          this.state.lastTalkersErr = null;
+          this._setUnavailable('Kid Control is unavailable');
         }
+      } else if (/not permitted|not allowed|permission denied|not enough privileges|cannot run/i.test(msg)) {
+        if (!this._unavailable) this._setUnavailable('Kid Control permission denied');
       } else {
         // Timeout or other transient error — log, let normal scheduling continue.
         this.state.lastTalkersErr = msg;

@@ -1,5 +1,6 @@
 const ipaddr = require('ipaddr.js');
 const { stopStreamSafe, createPollLoop } = require('./util');
+const { AuthoritativeSnapshotProbe, classifyRStreamPacket } = require('./rstreamSnapshot');
 
 function ipInCidr(ip, cidr) {
   try { return ipaddr.parse(ip).match(ipaddr.parseCIDR(cidr)); } catch { return false; }
@@ -69,6 +70,34 @@ class DhcpNetworksCollector {
       available: false, stale: false, updatedAt: null,
       reason: 'Detect Internet has not completed',
     };
+    this._snapshotProbes = {};
+    for (const key of Object.keys(DHCPNET_CMDS)) {
+      const [cmd, ...args] = DHCPNET_CMDS[key];
+      this._snapshotProbes[key] = new AuthoritativeSnapshotProbe({
+        cooldownMs: Math.max(1000, Number(this.pollMs) || 5000),
+        read: () => this.ros.write(cmd, args),
+        apply: rows => {
+          this._raw[key] = rows;
+          if (key === 'internet') this._internetStatus = {
+            available: true, stale: false, updatedAt: Date.now(), reason: null,
+          };
+          this.state.lastNetworksErr = null;
+          this._scheduleRebuild();
+        },
+        onError: (error) => {
+          const message = String(error && error.message ? error.message : error);
+          this.state.lastNetworksErr = `${key}: ${message}`;
+          if (key === 'internet') {
+            this._internetStatus = {
+              available: false, stale: this._internetStatus.updatedAt !== null,
+              updatedAt: this._internetStatus.updatedAt,
+              reason: 'Detect Internet is unavailable',
+            };
+            this._scheduleRebuild();
+          }
+        },
+      });
+    }
   }
 
   getLanCidrs() { return this.lanCidrs; }
@@ -186,15 +215,20 @@ class DhcpNetworksCollector {
       this.ros.write('/ip/pool/print',                ['=.proplist=name,ranges']),
       this.ros.write('/interface/detect-internet/state/print', ['=.proplist=name,interface,state']),
     ]);
-    this._raw.networks  = nets.status   === 'fulfilled' ? (nets.value   || []) : [];
-    this._raw.addresses = addrs.status  === 'fulfilled' ? (addrs.value  || []) : [];
-    this._raw.pools     = pools.status  === 'fulfilled' ? (pools.value  || []) : [];
+    const failures = [];
+    if (nets.status === 'fulfilled') this._raw.networks = nets.value || [];
+    else failures.push('networks: ' + String(nets.reason && nets.reason.message ? nets.reason.message : nets.reason));
+    if (addrs.status === 'fulfilled') this._raw.addresses = addrs.value || [];
+    else failures.push('addresses: ' + String(addrs.reason && addrs.reason.message ? addrs.reason.message : addrs.reason));
+    if (pools.status === 'fulfilled') this._raw.pools = pools.value || [];
+    else failures.push('pools: ' + String(pools.reason && pools.reason.message ? pools.reason.message : pools.reason));
     if (detect.status === 'fulfilled') {
       this._raw.internet = detect.value || [];
       this._internetStatus = {
         available: true, stale: false, updatedAt: Date.now(), reason: null,
       };
     } else {
+      failures.push('internet: ' + String(detect.reason && detect.reason.message ? detect.reason.message : detect.reason));
       const hadGoodData = this._internetStatus.updatedAt !== null;
       if (!hadGoodData) this._raw.internet = [];
       this._internetStatus = {
@@ -203,6 +237,7 @@ class DhcpNetworksCollector {
         reason: 'Detect Internet is unavailable',
       };
     }
+    this.state.lastNetworksErr = failures.length ? failures.join('; ') : null;
     this._rebuild();
   }
 
@@ -216,19 +251,10 @@ class DhcpNetworksCollector {
     const stream = this.ros.stream([...cmds[key], `=interval=${intervalSec}`], null);
     this._streams[key] = stream;
     stream.on('data', (pkt) => {
-      // RStream emits [] when the table is empty this interval — rebuild from an
-      // empty row set so deleted entries actually disappear.
-      if (Array.isArray(pkt)) {
-        if (pkt.length === 0 && !this._batches[key].length && !this._debounces[key]) {
-          this._raw[key] = [];
-          if (key === 'internet') this._internetStatus = {
-            available: true, stale: false, updatedAt: Date.now(), reason: null,
-          };
-          this._scheduleRebuild();
-        }
-        return;
-      }
-      if (!pkt || typeof pkt !== 'object') return;
+      const classified = classifyRStreamPacket(pkt);
+      if (classified.kind === 'idle') { this._snapshotProbes[key].onIdle(); return; }
+      if (classified.kind !== 'data') return;
+      this._snapshotProbes[key].noteRealRow();
       this._batches[key].push(pkt);
       if (this._debounces[key]) return;
       this._debounces[key] = setTimeout(() => { // codeql[js/resource-exhaustion]
@@ -266,6 +292,7 @@ class DhcpNetworksCollector {
   }
 
   _stopStream(key) {
+    this._snapshotProbes[key].invalidate();
     if (this._debounces[key])     { clearTimeout(this._debounces[key]);     this._debounces[key] = null; }
     if (this._restartTimers[key]) { clearTimeout(this._restartTimers[key]); this._restartTimers[key] = null; }
     this._restarting[key] = false;

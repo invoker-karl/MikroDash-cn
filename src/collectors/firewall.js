@@ -11,6 +11,9 @@
  * The active-table stream is stopped on suspend and restarted on resume.
  */
 const { clampPoll, stopStreamSafe, createPollLoop } = require('./util');
+const { AuthoritativeSnapshotProbe, classifyRStreamPacket } = require('./rstreamSnapshot');
+
+const FIREWALL_PROPLIST = '=.proplist=.id,disabled,chain,action,comment,src-address,dst-address,protocol,dst-port,in-interface,packets,bytes';
 
 class FirewallCollector {
   constructor({ ros, io, pollMs, state, streamMode }) {
@@ -41,6 +44,14 @@ class FirewallCollector {
     this._snapshotDebounce = null;
     this._heartbeat        = null;
     this._resuming         = false;
+    this._snapshotProbe = new AuthoritativeSnapshotProbe({
+      cooldownMs: Math.max(1000, this.pollMs),
+      read: () => this.ros.write(`/ip/firewall/${this._activeTable}/print`, [FIREWALL_PROPLIST]),
+      apply: rows => this._replaceTableSnapshot(this._activeTable, rows),
+      onError: error => {
+        this.state.lastFirewallErr = String(error && error.message ? error.message : error);
+      },
+    });
 
     ros.on('close', () => {
       this._stopTableStream();
@@ -69,7 +80,7 @@ class FirewallCollector {
     };
   }
 
-  _emit() {
+  _emit(clearError = true) {
     const all = [...this._filter, ...this._nat, ...this._mangle, ...this._raw];
     const seenIds = new Set(all.map(r => r.id).filter(Boolean));
     for (const id of this.prevCounts.keys()) {
@@ -93,13 +104,19 @@ class FirewallCollector {
       pollMs:      this.pollMs,
     };
     this.lastPayload = payload;
-    this.state.lastFirewallTs  = Date.now();
-    this.state.lastFirewallErr = null;
+    this.state.lastFirewallTs = Date.now();
+    if (clearError) this.state.lastFirewallErr = null;
 
     if (fp !== this._lastFp) {
       this._lastFp = fp;
       this.io.to('page-firewall').to('dash-card-firewall').emit('firewall:update', payload);
     }
+  }
+
+  _replaceTableSnapshot(table, rows) {
+    const tableKey = '_' + table;
+    this[tableKey] = (rows || []).map(r => this._processRule(r)).filter(Boolean);
+    this._emit();
   }
 
   // ── snapshot flush ────────────────────────────────────────────────────────
@@ -115,6 +132,16 @@ class FirewallCollector {
       const updates = new Map();
       for (const r of this._staging) { if (r['.id']) updates.set(r['.id'], r); }
       this._staging = [];
+      const existingIds = new Set(this[tableKey].map(rule => rule.id).filter(Boolean));
+      const sameStructure = existingIds.size === updates.size &&
+        [...existingIds].every(id => updates.has(id));
+      if (!sameStructure) {
+        // Counter-only rows cannot describe a newly-added rule. Confirm with a
+        // full ordinary /print and atomically replace the table instead of
+        // retaining deleted rules or inventing incomplete new ones.
+        this._snapshotProbe.onIdle();
+        return;
+      }
       this[tableKey] = this[tableKey].map(rule => {
         const u = updates.get(rule.id);
         if (!u) return rule;
@@ -136,12 +163,8 @@ class FirewallCollector {
     if (!this.ros.connected || !table) return;
     try {
       const rows = (await this.ros.write(
-        `/ip/firewall/${table}/print`, ['=.proplist=.id,packets,bytes'])) || [];
-      // Same staging buffer and same flush the stream path uses: /print returns
-      // the whole table at once, so the debounce simply fires once.
-      this._staging = rows;
-      this._scheduleSnapshotFlush();
-      this.state.lastFirewallErr = null;
+        `/ip/firewall/${table}/print`, [FIREWALL_PROPLIST])) || [];
+      this._replaceTableSnapshot(table, rows);
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       this.state.lastFirewallErr = msg;
@@ -166,13 +189,10 @@ class FirewallCollector {
     );
     this._tableStream = stream;
     stream.on('data', (pkt) => {
-      // RStream emits [] when the table is empty this interval — flush an empty
-      // snapshot so a cleared table doesn't keep showing its old rules.
-      if (Array.isArray(pkt)) {
-        if (pkt.length === 0 && !this._staging.length) this._scheduleSnapshotFlush();
-        return;
-      }
-      if (!pkt || typeof pkt !== 'object') return;
+      const classified = classifyRStreamPacket(pkt);
+      if (classified.kind === 'idle') { this._snapshotProbe.onIdle(); return; }
+      if (classified.kind !== 'data') return;
+      this._snapshotProbe.noteRealRow();
       this._staging.push(pkt);
       this._scheduleSnapshotFlush();
     });
@@ -194,6 +214,7 @@ class FirewallCollector {
   }
 
   _stopTableStream() {
+    this._snapshotProbe.invalidate();
     this._tablePoll.stop();
     if (this._snapshotDebounce) { clearTimeout(this._snapshotDebounce); this._snapshotDebounce = null; }
     if (this._tableRestartTimer) { clearTimeout(this._tableRestartTimer); this._tableRestartTimer = null; }
@@ -232,22 +253,20 @@ class FirewallCollector {
   // for every chain even while only the active table is being streamed.
 
   async _loadInitial() {
-    const safeGet = async (cmd, params) => {
-      try { const r = await this.ros.write(cmd, params || []); return Array.isArray(r) ? r : []; }
-      catch { return []; }
-    };
-    const pl = ['=.proplist=.id,disabled,chain,action,comment,src-address,dst-address,protocol,dst-port,in-interface,packets,bytes'];
-    const [filter, nat, mangle, raw] = await Promise.all([
-      safeGet('/ip/firewall/filter/print', pl),
-      safeGet('/ip/firewall/nat/print',    pl),
-      safeGet('/ip/firewall/mangle/print', pl),
-      safeGet('/ip/firewall/raw/print',    pl),
-    ]);
-    this._filter = filter.map(r => this._processRule(r)).filter(Boolean);
-    this._nat    = nat.map(r    => this._processRule(r)).filter(Boolean);
-    this._mangle = mangle.map(r => this._processRule(r)).filter(Boolean);
-    this._raw    = raw.map(r    => this._processRule(r)).filter(Boolean);
-    this._emit();
+    const tables = ['filter', 'nat', 'mangle', 'raw'];
+    const results = await Promise.allSettled(tables.map(table =>
+      this.ros.write(`/ip/firewall/${table}/print`, [FIREWALL_PROPLIST])));
+    const errors = [];
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        const table = tables[index];
+        this['_' + table] = (result.value || []).map(r => this._processRule(r)).filter(Boolean);
+      } else {
+        errors.push(`${tables[index]}: ${String(result.reason && result.reason.message ? result.reason.message : result.reason)}`);
+      }
+    });
+    this.state.lastFirewallErr = errors.length ? errors.join('; ') : null;
+    this._emit(errors.length === 0);
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -267,11 +286,8 @@ class FirewallCollector {
     this._resuming = false;
     this._stopTableStream();
     this._stopHeartbeat();
-    this._filter = [];
-    this._nat    = [];
-    this._mangle = [];
-    this._raw    = [];
-    this.prevCounts.clear();
+    // Preserve last-good structure while the page is idle or a resume fetch is
+    // transiently failing. A successful snapshot, including [], replaces it.
     this._lastFp = '';
   }
 

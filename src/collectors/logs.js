@@ -52,7 +52,7 @@ class LogsCollector {
       }
       return;
     }
-    if (!data || !data.message) return;
+    if (!data || Array.isArray(data) || !data.message) return; // arrays are RStream synthetic idle
 
     const topicsRaw = data.topics || '';
     const entry = {

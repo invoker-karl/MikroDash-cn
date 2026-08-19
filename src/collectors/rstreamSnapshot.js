@@ -68,7 +68,9 @@ class AuthoritativeSnapshotProbe {
       if (!Array.isArray(rows)) throw new TypeError('Authoritative snapshot must be an array');
       this.apply(rows);
     }).catch((error) => {
-      if (generation === this.generation) this.onError(error, classifySnapshotError(error));
+      if (generation === this.generation && realRowVersion === this.realRowVersion) {
+        this.onError(error, classifySnapshotError(error));
+      }
     }).finally(() => {
       if (this.inFlight === request) this.inFlight = null;
       if (generation === this.generation && this._pending) this.onIdle();
