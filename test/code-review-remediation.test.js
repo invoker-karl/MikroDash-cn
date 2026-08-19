@@ -453,7 +453,7 @@ test('interface rate poll records errors without advancing freshness', async () 
 test('talkers confirms synthetic idle before clearing the device list', async () => {
   const ros = mockStreamRos();
   const tk  = new TopTalkersCollector({ ros, io: stubIo(1), pollMs: 3000, state: {}, topN: 5, streamMode: true });
-  tk._startStream();
+  tk.start();
   const s = ros.streams[0];
   s.emit('data', { 'mac-address': 'AA:BB:CC:DD:EE:FF', name: 'kid', 'rate-up': '100', 'rate-down': '200' });
   assert.equal(tk._devicesNext.size, 1);

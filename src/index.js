@@ -402,10 +402,12 @@ function buildSession(routerCfg, routerIo) {
   // completed stream batch here; BandwidthCollector reads via latestWithTs().
   // Partial-result detection lives in ConnectionsCollector._onBatchComplete().
   const connTableCache = {
-    _rows: null, _ts: 0,
-    deposit(rows, ts) { this._rows = rows; this._ts = ts; },
-    latestWithTs()    { return { rows: this._rows || [], ts: this._ts }; },
-    invalidate()      { this._rows = null; this._ts = 0; },
+    _rows: null, _ts: 0, _seq: 0,
+    deposit(rows, ts) { this._rows = rows; this._ts = ts; this._seq++; },
+    latestWithTs()    {
+      return { rows: this._rows || [], ts: this._ts, seq: this._seq, available: Array.isArray(this._rows) };
+    },
+    invalidate()      { this._rows = null; this._ts = 0; this._seq++; },
   };
 
   const dhcpLeases   = new DhcpLeasesCollector ({ros, io:routerIo, state, pollMs:eff.poll.dhcpLeases, streamMode:eff.stream.dhcpLeases});
@@ -444,7 +446,21 @@ function buildSession(routerCfg, routerIo) {
     },
   }));
   const ping         = _on('ping', () => new PingCollector        ({ros, io:routerIo, pollMs:eff.poll.ping,     state, target:PING_TARGET, streamMode:eff.stream.ping, alertsActive:_alertsActive}));
-  const bandwidth    = _on('bandwidth', () => new BandwidthCollector   ({ros, io:routerIo, pollMs:eff.poll.bandwidth, dhcpNetworks, dhcpLeases, arp, ifStatus, state, connTableCache, geoOrgCache}));
+  // Connection byte deltas are a session-local shared rate engine. Keep that
+  // engine alive for Top Talkers even when the optional Bandwidth page is off;
+  // it reads the existing Connections cache and opens no RouterOS command.
+  const needConnectionRates = eff.enabled.conns && (eff.enabled.bandwidth || eff.enabled.talkers);
+  const bandwidth    = needConnectionRates ? new BandwidthCollector({
+    ros, io:routerIo, pollMs:eff.poll.bandwidth, dhcpNetworks, dhcpLeases, arp,
+    ifStatus, state, connTableCache, geoOrgCache, emitEnabled: eff.enabled.bandwidth,
+    // Both instances belong to this buildSession closure, so no payload can
+    // cross router rooms. Talkers remains the sole owner of talkers:update.
+    onDevices: payload => {
+      if (talkers && typeof talkers.acceptConnectionPayload === 'function') {
+        talkers.acceptConnectionPayload(payload);
+      }
+    },
+  }) : makeNullCollector('bandwidth');
   const routing      = _on('routing', () => new RoutingCollector     ({ros, io:routerIo, pollMs:eff.poll.routing,  state, streamMode:eff.stream.routing}));
   const netwatch     = _on('netwatch', () => new NetwatchCollector    ({ros, io:routerIo, pollMs:eff.poll.netwatch,  state, streamMode:eff.stream.netwatch}));
   // Constructed last: it enriches neighbours from arp/ifStatus/system rather than

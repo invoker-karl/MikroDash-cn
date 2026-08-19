@@ -21,7 +21,7 @@ const bpsToMbps = (bytes, dtMs) =>
 const RFC1918 = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'];
 
 class BandwidthCollector {
-  constructor({ ros, io, pollMs, dhcpNetworks, dhcpLeases, arp, ifStatus, state, geoLookup, connTableCache, geoOrgCache }) {
+  constructor({ ros, io, pollMs, dhcpNetworks, dhcpLeases, arp, ifStatus, state, geoLookup, connTableCache, geoOrgCache, onDevices, emitEnabled }) {
     this.ros          = ros;
     this.io           = io;
     this._lbl         = ros.routerLabel ? `[${ros.routerLabel}][bandwidth]` : '[bandwidth]';
@@ -37,6 +37,14 @@ class BandwidthCollector {
     this._prev        = new Map();
     this._ifaceCache  = new Map(); // srcIp -> iface name
     this.connTableCache = connTableCache || null;
+    // Optional session-local projection sink. The dashboard Top Talkers card
+    // consumes the same already-computed per-LAN-device rates instead of
+    // opening another RouterOS command or receiving the full Bandwidth payload.
+    this.onDevices = typeof onDevices === 'function' ? onDevices : null;
+    // The rate engine is shared with Dashboard Top Talkers. When the optional
+    // Bandwidth page is disabled it still computes the compact session-local
+    // projection, but must not publish the disabled page's event.
+    this.emitEnabled = emitEnabled !== false;
     this._geoCache    = geoOrgCache ? geoOrgCache.geo : new Map(); // ip -> { country, city }
     this._orgCache    = geoOrgCache ? geoOrgCache.org : new Map(); // ip -> org string | null
     this.timer        = null;
@@ -46,6 +54,7 @@ class BandwidthCollector {
     this._lastFp      = '';
     this._lastEmitTs  = 0;
     this._lastSnapshotTs = 0; // tracks the connTableCache snapshot timestamp to detect cache hits
+    this._lastSnapshotKey = '';
     this._lastIfaceTs    = 0; // fingerprint to detect ifStatus payload changes for cache invalidation
     // Set to true by start(), never reset. Allows the connected handler to
     // distinguish the initial connect (where startCollectors() calls start()
@@ -63,6 +72,7 @@ class BandwidthCollector {
       this._lastFp = '';
       this._lastEmitTs = 0;
       this._lastSnapshotTs = 0;
+      this._lastSnapshotKey = '';
       // Only restart here on reconnect after a close. On the very first
       // connect, startCollectors() in index.js calls start() explicitly —
       // calling stop()+start() here too would create two concurrent intervals.
@@ -141,12 +151,18 @@ class BandwidthCollector {
     const result     = this.connTableCache
       ? this.connTableCache.latestWithTs()
       : { rows: [], ts: 0 };
+    // null cache means "no complete Connections snapshot yet", not a
+    // successful empty connection table. Only the latter may clear Top Talkers.
+    if (result && result.available === false) return;
     const rows       = result.rows;
     const snapshotTs = result.ts;
+    const snapshotKey = Number.isFinite(result.seq) && result.seq > 0
+      ? `seq:${result.seq}` : `ts:${snapshotTs}`;
 
     // If the snapshot hasn't changed since the last tick (same cache hit),
     // byte deltas would all be zero — skip rather than overwrite good data.
-    if (snapshotTs === this._lastSnapshotTs) return;
+    if (snapshotKey === this._lastSnapshotKey) return;
+    this._lastSnapshotKey = snapshotKey;
     this._lastSnapshotTs = snapshotTs;
 
     const now = snapshotTs;
@@ -257,8 +273,12 @@ class BandwidthCollector {
     devices.sort((a, b) => b.totalMbps - a.totalMbps);
 
     this.lastPayload = { ts: now, devices, pollMs: this.pollMs };
+    if (this.onDevices) {
+      try { this.onDevices(this.lastPayload); }
+      catch (e) { console.error('%s', this._lbl + ' device projection failed:', String(e && e.message ? e.message : e)); }
+    }
     const fp = JSON.stringify(devices.map(d => ({ src: d.srcIp, rx: d.rxMbps, tx: d.txMbps })));
-    if (fp !== this._lastFp || now - this._lastEmitTs >= 10000) {
+    if (this.emitEnabled && (fp !== this._lastFp || now - this._lastEmitTs >= 10000)) {
       this._lastFp = fp;
       this._lastEmitTs = now;
       this.io.to('page-bandwidth').to('dash-card-bandwidth').emit('bandwidth:update', this.lastPayload);
@@ -271,6 +291,10 @@ class BandwidthCollector {
     this._stopping = true;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     this._inflight = false;
+    if (this.onDevices) {
+      try { this.onDevices(null); }
+      catch (e) { console.error('%s', this._lbl + ' device projection stop failed:', String(e && e.message ? e.message : e)); }
+    }
   }
 
   start() {

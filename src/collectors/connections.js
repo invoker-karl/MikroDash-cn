@@ -147,6 +147,7 @@ class ConnectionsCollector {
       && fresh.length < this._rowsPrev.length * PARTIAL_DROP_RATIO;
 
     let rows;
+    let acceptedFresh = true;
     if (authoritative) {
       this._partialStreak = 0;
       rows = fresh;
@@ -162,6 +163,7 @@ class ConnectionsCollector {
       } else {
         if (dbg) console.warn('%s', this._lbl, `partial result (${fresh.length} rows, prev ${this._rowsPrev.length}) — keeping stale (${this._partialStreak}/${PARTIAL_MAX_STREAK})`);
         rows = this._rowsPrev;
+        acceptedFresh = false;
       }
     } else {
       this._partialStreak = 0;
@@ -169,8 +171,10 @@ class ConnectionsCollector {
       this._rowsPrev = rows;
     }
 
-    // Always deposit into shared cache (cheap) so bandwidth can read fresh data
-    if (this.connTableCache) this.connTableCache.deposit(rows, Date.now());
+    // A rejected partial burst is retained for the Connections UI, but it is
+    // not a new counter snapshot. Depositing it with a fresh timestamp would
+    // make the shared rate engine calculate a false all-zero interval.
+    if (this.connTableCache && acceptedFresh) this.connTableCache.deposit(rows, Date.now());
 
     // Skip expensive geo/ASN processing when no browser clients are watching
     if (this.io.engine.clientsCount === 0) return;

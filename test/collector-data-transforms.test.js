@@ -810,7 +810,7 @@ test('talkers stream error "unknown command" disables permanently with no retry 
   const state = {};
   const collector = new TopTalkersCollector({ ros, io, pollMs: 3000, state, topN: 5 });
 
-  collector._startStream();
+  collector.start();
   streamHandlers.error(new Error('unknown command'));
 
   assert.equal(collector._unavailable, true);
@@ -827,7 +827,7 @@ test('talkers stream timeout auto-downgrades to poll mode', () => {
   const state = {};
   const collector = new TopTalkersCollector({ ros, io, pollMs: 3000, state, topN: 5 });
 
-  collector._startStream();
+  collector.start();
   streamHandlers.error(new Error('request timeout'));
 
   assert.equal(collector.streamMode, false, 'streamMode must flip to false');

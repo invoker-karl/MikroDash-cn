@@ -109,7 +109,10 @@ test('dashboard DOM clears talkers and distinguishes unavailable from a legal em
   assert.match(context.talkersTable.textContent, /No devices/);
   assert.doesNotMatch(context.talkersTable.textContent, /stale/);
   handlers['talkers:update']({ devices: [], unavailable: true });
-  assert.match(context.talkersTable.textContent, /Kid Control is unavailable/);
+  assert.match(context.talkersTable.textContent, /Device traffic is unavailable/);
+  handlers['talkers:update']({ devices: [{ name: 'Save', mac: 'AA', rx_mbps: 1, tx_mbps: 2 }] });
+  assert.equal(context.talkersTable.querySelector('tr').hasAttribute('data-i18n-user-data'), true,
+    'RouterOS/DHCP device labels are protected from the UI translation observer');
 });
 
 test('Detect Internet rejection is distinct from a successful empty result and preserves other DHCP data', async () => {
