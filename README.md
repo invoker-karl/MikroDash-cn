@@ -1,7 +1,7 @@
 # MikroDash 中文版
 
 This fork is the reviewed Simplified Chinese edition of MikroDash. Release
-`0.7.8-cn.3` tracks upstream `v0.7.8`; English remains available from the
+`0.7.8-cn.4` tracks upstream `v0.7.8`; English remains available from the
 language selector. Chinese images use
 `ghcr.io/invoker-karl/mikrodash-cn:<version>` on `linux/amd64` and
 `linux/arm64`. Node 24 no longer supports the former `linux/arm/v7` target.
@@ -150,7 +150,7 @@ Pull and run the pre-built image directly — no need to clone the repo or creat
 docker pull ghcr.io/invoker-karl/mikrodash-cn:latest
 ```
 
-Images are published by GitHub Actions on Chinese version tags only, so `latest` always tracks the most recent verified release rather than unreleased work on `main`. Pull requests build and smoke-test the production image on `linux/amd64`; each tagged release builds and starts both `linux/amd64` and `linux/arm64` before promotion. Each release is a multi-arch manifest covering those two platforms. Docker will automatically pull the correct layer for your platform — this includes Raspberry Pi 4/5, MikroTik's own R5S/RB5009 companion boards, and Apple M-series machines running Linux containers.
+Images are published by GitHub Actions on Chinese version tags only, so `latest` always tracks the most recent verified release rather than unreleased work on `main`. Promotion is serialized and rejects an older tag whenever a newer Chinese release tag exists, so overlapping builds cannot move `latest` backwards. Pull requests build and smoke-test the production image on `linux/amd64`; each tagged release builds and starts both `linux/amd64` and `linux/arm64` before promotion. Each release is a multi-arch manifest covering those two platforms. Docker will automatically pull the correct layer for your platform — this includes Raspberry Pi 4/5, MikroTik's own R5S/RB5009 companion boards, and Apple M-series machines running Linux containers.
 
 > **ARMv7 (32-bit ARM) is no longer built, as of 0.6.0.** MikroDash moved to a Node 24 base image, and Node 24 dropped 32-bit ARM upstream, so `node:24-alpine` publishes no `linux/arm/v7` variant.
 >
@@ -161,7 +161,7 @@ Images are published by GitHub Actions on Chinese version tags only, so `latest`
 To pin to a specific release:
 
 ```bash
-docker pull ghcr.io/invoker-karl/mikrodash-cn:0.7.8-cn.3
+docker pull ghcr.io/invoker-karl/mikrodash-cn:0.7.8-cn.4
 ```
 
 Run with Docker Compose — create a `docker-compose.yml`:
@@ -201,7 +201,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t mikrodash:local --load
 ```
 
 - Dashboard: `http://localhost:3081`
-- Health check: `http://localhost:3081/healthz` (`200` only after startup completes, RouterOS is connected, and the critical collectors are delivering fresh data; a stalled traffic stream or an unreachable `defaultIf` now returns `503`)
+- Health check: `http://localhost:3081/healthz` (`200` only after startup completes, RouterOS is connected, the configured `defaultIf` exists, and the critical collectors are delivering fresh data; temporarily viewing a different interface never masks an invalid default, which remains `503`)
 
 Source builds require the bundled `node-routeros` compatibility patch. If startup reports a missing patch marker, run `node patch-routeros.js` again before launching MikroDash.
 

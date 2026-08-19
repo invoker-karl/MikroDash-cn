@@ -69,7 +69,7 @@ function deltaOf(prev, cur) {
 }
 
 class InterfaceStatusCollector {
-  constructor({ ros, io, pollMs, metaPollMs, state, streamMode, alertsActive, rid }) {
+  constructor({ ros, io, pollMs, metaPollMs, state, streamMode, alertsActive, rid, onInterfaceMetadata }) {
     this.ros        = ros;
     this.io         = io;
     // See SystemCollector: alerts are fed from the emit path, so a router with
@@ -87,6 +87,8 @@ class InterfaceStatusCollector {
     // name alone, and a late in-flight update from the outgoing session — the
     // teardown is asynchronous — reads as ether2..5 going down and back up.
     this.rid = rid || '';
+    this._onInterfaceMetadata = typeof onInterfaceMetadata === 'function' ? onInterfaceMetadata : null;
+    this._lastMetadataFp = null;
 
     this._ifaces     = new Map(); // name -> committed interface row
     this._addrs      = new Map(); // interface name -> [cidr, ...]
@@ -144,6 +146,7 @@ class InterfaceStatusCollector {
       this._prevCounters.clear();
       this._deltas.clear();
       this._lastFp = '';
+      this._lastMetadataFp = null;
       this._startMetaStreams();
       this._startEmitTimer();
       if (!this.streamMode) this._startRatesPoll();
@@ -565,6 +568,22 @@ class InterfaceStatusCollector {
       e: i.errors, dr: i.drops, ld: i.linkDowns,
     })));
     this.lastPayload = { ts: now, routerId: this.rid, interfaces };
+    // Interface membership and administrative/link state are also control
+    // plane metadata for TrafficCollector. Notify the owning router session
+    // before the viewer idle gate, and only when that compact set changes.
+    const metadata = interfaces.map(i => ({
+      name: i.name, running: !!i.running, disabled: !!i.disabled,
+    })).sort((a, b) => a.name.localeCompare(b.name));
+    const metadataFp = JSON.stringify(metadata);
+    if (this._onInterfaceMetadata && metadataFp !== this._lastMetadataFp) {
+      this._lastMetadataFp = metadataFp;
+      try {
+        this._onInterfaceMetadata(metadata);
+      } catch (err) {
+        console.error('%s interface metadata callback failed: %s',
+          this._lbl, err && err.message ? err.message : String(err));
+      }
+    }
     // Alerts ride the emit path, so a router with alerts enabled is exempt from
     // the idle gate or interface up/down alerts never fire.
     if (this.io.engine.clientsCount === 0 && !this._alertsActive()) return;

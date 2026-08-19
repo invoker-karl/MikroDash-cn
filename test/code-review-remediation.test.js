@@ -308,6 +308,7 @@ test('traffic watchdog restarts a silently stalled stream', async () => {
   await withPatchedTimers(async (timers) => {
     const ros = mockStreamRos();
     const t = new TrafficCollector({ ros, io: stubIo(0), defaultIf: 'wan', historyMinutes: 1, pollMs: 1000, state: {} });
+    t.setAvailableInterfaces(['wan']);
     t.start();
     const first = t._allStream;
     t._streamStartTs = Date.now() - 11000;
@@ -324,6 +325,7 @@ test('traffic stream accepts numeric zero counters as a healthy idle sample', ()
   const ros = mockStreamRos();
   const state = {};
   const t = new TrafficCollector({ ros, io: stubIo(0), defaultIf: 'wan', historyMinutes: 1, pollMs: 1000, state });
+  t.setAvailableInterfaces(['wan']);
   t.start();
   t._allStream.emit('data', { 'rx-bits-per-second': 0, 'tx-bits-per-second': 0 });
   assert.ok(state.lastTrafficTs > 0, 'idle zero-rate packet advances freshness');
@@ -350,7 +352,7 @@ test('traffic excludes a missing default interface and recovers on a valid brows
 
   t.start();
   t.bindSocket(sock);
-  assert.equal(calls[0].params[0], '=interface=missing-wan', 'startup remains optimistic before the interface list loads');
+  assert.equal(calls.length, 0, 'startup waits for the authoritative interface list');
 
   t.setAvailableInterfaces([{ name: 'lan', running: true, disabled: false }]);
   assert.equal(t._allStream, null, 'poisoned stream is stopped when the authoritative list arrives');
@@ -380,6 +382,7 @@ test('traffic records no-such-item stream failures instead of hiding them', () =
   console.error = () => {};
   try {
     t.start();
+    t.setAvailableInterfaces(['wan']);
     t._allStream.emit('error', new Error('no such item'));
     assert.equal(state.lastTrafficErr, 'no such item');
     assert.ok(t._restartTimer, 'failed stream remains eligible for recovery');

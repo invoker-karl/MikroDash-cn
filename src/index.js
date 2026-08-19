@@ -41,6 +41,7 @@ const { verifyRouterOSPatchMarkers } = require('./routeros/patchVerification');
 const { classifyRosError } = require('./routeros/classifyError');
 const { scheduleForcedShutdownTimer } = require('./shutdown');
 const { isPublicI18nPath } = require('./i18nAssets');
+const { applySessionInterfaceMetadata } = require('./interfaceMetadata');
 
 try {
   verifyRouterOSPatchMarkers({ readFileSync: fs.readFileSync });
@@ -328,6 +329,7 @@ function _syncOverviewSessions() {
 function _freshState() {
   return {
     lastTrafficTs:0,  lastTrafficErr:null,
+    trafficConfigValid:null,
     lastConnsTs:0,    lastConnsErr:null,
     lastNetworksTs:0,
     lastLeasesTs:0,
@@ -358,6 +360,9 @@ function buildSession(routerCfg, routerIo) {
   // start() would not stop them. makeNullCollector stands in on the session.
   const _on    = (key, build) => eff.enabled[key] ? build() : makeNullCollector(key);
   const state  = _freshState();
+  // Assigned after all collectors are constructed. InterfaceStatus invokes
+  // the callback only after start/connected, when the session is fully built.
+  let session = null;
 
   // When TLS is enabled, pass an options object rather than a boolean so we can
   // set rejectUnauthorized. node-routeros passes this directly to tls.connect().
@@ -429,7 +434,15 @@ function buildSession(routerCfg, routerIo) {
   const wireless     = _on('wireless', () => new WirelessCollector    ({ros, io:routerIo, pollMs:eff.poll.wireless, state, dhcpLeases, arp, streamMode:eff.stream.wireless}));
   const vpn          = _on('vpn', () => new VpnCollector         ({ros, io:routerIo, pollMs:eff.poll.vpn,      state, rid:routerCfg.id, streamMode:eff.stream.vpn}));
   const firewall     = _on('firewall', () => new FirewallCollector    ({ros, io:routerIo, pollMs:eff.poll.firewall,  state, streamMode:eff.stream.firewall}));
-  const ifStatus     = _on('ifStatus', () => new InterfaceStatusCollector({ros, io:routerIo, pollMs:eff.poll.ifStatus, metaPollMs:eff.poll.ifaces, state, streamMode:eff.stream.ifStatus, alertsActive:_alertsActive, rid:routerCfg.id}));
+  const ifStatus     = _on('ifStatus', () => new InterfaceStatusCollector({
+    ros, io:routerIo, pollMs:eff.poll.ifStatus, metaPollMs:eff.poll.ifaces,
+    state, streamMode:eff.stream.ifStatus, alertsActive:_alertsActive, rid:routerCfg.id,
+    onInterfaceMetadata: (interfaces) => {
+      // This callback belongs to this buildSession closure and routerIo room;
+      // it must never mutate another router's cache or broadcast globally.
+      applySessionInterfaceMetadata(session, routerIo, interfaces);
+    },
+  }));
   const ping         = _on('ping', () => new PingCollector        ({ros, io:routerIo, pollMs:eff.poll.ping,     state, target:PING_TARGET, streamMode:eff.stream.ping, alertsActive:_alertsActive}));
   const bandwidth    = _on('bandwidth', () => new BandwidthCollector   ({ros, io:routerIo, pollMs:eff.poll.bandwidth, dhcpNetworks, dhcpLeases, arp, ifStatus, state, connTableCache, geoOrgCache}));
   const routing      = _on('routing', () => new RoutingCollector     ({ros, io:routerIo, pollMs:eff.poll.routing,  state, streamMode:eff.stream.routing}));
@@ -440,10 +453,11 @@ function buildSession(routerCfg, routerIo) {
 
   const allCollectors = [traffic, dhcpLeases, dhcpNetworks, arp, conns, talkers, logs, system, wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology];
 
-  return { ros, state, connTableCache, DEFAULT_IF, HISTORY_MINUTES, collection: eff,
+  session = { ros, state, connTableCache, DEFAULT_IF, HISTORY_MINUTES, collection: eff,
            dhcpLeases, dhcpNetworks, arp, traffic, conns, talkers, logs, system,
            wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology, allCollectors,
-           routerId: routerCfg.id, cachedInterfaces: null };
+           routerId: routerCfg.id, cachedInterfaces: null, _interfacesRevision: 0 };
+  return session;
 }
 
 // ── Session teardown ──────────────────────────────────────────────────────────
@@ -465,6 +479,10 @@ async function teardownSession(session, entry) {
   // phantom outage (and fired a router-down alert) about 30 s after every router
   // switch or idle teardown, for a router that was never unreachable. See #84.
   session._destroyed = true;
+  if (session._ifacesRetryTimer) {
+    clearTimeout(session._ifacesRetryTimer);
+    session._ifacesRetryTimer = null;
+  }
   if (session._cancelDownTimer) session._cancelDownTimer();
   for (const c of session.allCollectors) {
     if (typeof c.stop === 'function') c.stop();
@@ -485,6 +503,60 @@ function broadcastRosStatus(connected, reason, entry) {
   if (entry) entry.rosConnected = connected;
   const target = entry ? entry.routerIo : io;
   target.emit('ros:status', { connected, reason: reason || null });
+}
+
+async function refreshSessionInterfaces(session) {
+  if (!session._ifacesFetch) {
+    const revision = session._interfacesRevision || 0;
+    session._ifacesFetch = fetchInterfaces(session.ros).then((interfaces) => {
+      // A live InterfaceStatus snapshot may have arrived while this request was
+      // in flight. Do not overwrite that newer router-local authority.
+      if ((session._interfacesRevision || 0) !== revision) return session.cachedInterfaces || [];
+      session.cachedInterfaces = interfaces || [];
+      session.traffic.setAvailableInterfaces(session.cachedInterfaces);
+      return session.cachedInterfaces;
+    }).catch((err) => {
+      if ((session._interfacesRevision || 0) !== revision) {
+        return session.cachedInterfaces || [];
+      }
+      // A failed refresh must be retryable. Do not retain either a rejected
+      // promise or the pre-reconnect cache as an authoritative whitelist.
+      session._ifacesFetch = null;
+      session.cachedInterfaces = null;
+      throw err;
+    });
+  }
+  return session._ifacesFetch;
+}
+
+function refreshAndBroadcastSessionInterfaces(session, entry) {
+  return refreshSessionInterfaces(session).then((interfaces) => {
+    if (session._ifacesRetryTimer) {
+      clearTimeout(session._ifacesRetryTimer);
+      session._ifacesRetryTimer = null;
+    }
+    if (!session._destroyed && entry && entry.routerIo) {
+      entry.routerIo.emit('interfaces:list', {
+        ok: true, defaultIf: session.DEFAULT_IF, interfaces,
+      });
+    }
+    return interfaces;
+  }).catch((e) => {
+    if (!session._destroyed && entry && entry.routerIo) {
+      const reason = sanitizeErr(e);
+      console.error('[MikroDash] refreshInterfaces failed:', reason);
+      entry.routerIo.emit('interfaces:error', { ok: false, reason });
+      // Keep one retry per session. The rejected promise was cleared by
+      // refreshSessionInterfaces, so the next attempt performs a real fetch.
+      if (session.ros.connected && !session._ifacesRetryTimer) {
+        session._ifacesRetryTimer = setTimeout(() => {
+          session._ifacesRetryTimer = null;
+          refreshAndBroadcastSessionInterfaces(session, entry).catch(() => {});
+        }, 5000);
+      }
+    }
+    throw e;
+  });
 }
 
 function wireRosEvents(session, entry) {
@@ -576,8 +648,15 @@ function wireRosEvents(session, entry) {
     // and call suspend() to clear state first.
     session.conns.resume();
     _updateAllPageStreams(session, entry);
+    // Existing browser sockets do not reconnect when only RouterOS does. Push
+    // the refreshed, session-scoped topology into this router's room.
+    refreshAndBroadcastSessionInterfaces(session, entry).catch(() => {});
   });
   ros.on('close', () => {
+    if (session._ifacesRetryTimer) {
+      clearTimeout(session._ifacesRetryTimer);
+      session._ifacesRetryTimer = null;
+    }
     session.connTableCache.invalidate();
     console.log('%s', `[${ros.routerLabel}][ROS] connection to ${host}:${port} closed`);
     broadcastRosStatus(false, 'RouterOS connection closed', entry);
@@ -3652,24 +3731,24 @@ async function sendInitialState(socket, entry) {
     try { await s.ros.waitUntilConnected(10000); } catch (_) {}
   }
 
-  let ifs = [];
   try {
-    if (!s._ifacesFetch) s._ifacesFetch = fetchInterfaces(s.ros);
-    s.cachedInterfaces = await s._ifacesFetch;
-    ifs = s.cachedInterfaces;
-    s.traffic.setAvailableInterfaces(ifs);
+    const ifs = await refreshSessionInterfaces(s);
+    socket.emit('interfaces:list', { ok: true, defaultIf: s.DEFAULT_IF, interfaces: ifs });
   } catch (e) {
     // Don't cache the rejected promise — the next connect should retry instead
     // of replaying this failure until the router reconnects.
-    s._ifacesFetch = null;
     const reason = sanitizeErr(e);
     console.error('[MikroDash] fetchInterfaces failed for socket', socket.id, ':', reason);
-    socket.emit('interfaces:error', { reason });
+    socket.emit('interfaces:error', { ok: false, reason });
   }
-  socket.emit('interfaces:list', { defaultIf: s.DEFAULT_IF, interfaces: ifs });
-  // A configuration warning may predate this browser connection. Replay it
-  // explicitly; the original broadcast only reaches sockets already online.
-  if (s.traffic.lastHealth) socket.emit('stream:health', s.traffic.lastHealth);
+  // Always replay an explicit state for every health-aware collector. A null
+  // history means healthy, not "leave whatever the previous router displayed".
+  for (const [collector, instance] of [['traffic', s.traffic], ['connections', s.conns]]) {
+    socket.emit('stream:health', instance.lastHealth || {
+      collector, degraded: false, restarts: 0,
+      since: null, reason: null, ts: Date.now(),
+    });
+  }
 
   let _wanIp = s.state.lastWanIp || '';
   if (!_wanIp && s.ifStatus.lastPayload) {
@@ -3723,6 +3802,10 @@ async function sendInitialState(socket, entry) {
   // gauges on every page and belong to no single one, so they follow
   // router:read like the router list itself.
   if (s.traffic && s.traffic.lastWanStatus) socket.emit('wan:status', s.traffic.lastWanStatus);
+  if (s.traffic && typeof s.traffic.getInterfaceStatus === 'function') {
+    const _selectedStatus = s.traffic.getInterfaceStatus(s.DEFAULT_IF);
+    if (_selectedStatus) socket.emit('traffic:status', _selectedStatus);
+  }
   if (s.system.lastPayload)    socket.emit('system:update',    s.system.lastPayload);
   if (s.wireless.lastPayload  && _mayReplay(socket, 'wireless'))  socket.emit('wireless:update',  s.wireless.lastPayload);
   if (s.vpn.lastPayload       && _mayReplay(socket, 'vpn'))       socket.emit('vpn:update',       s.vpn.lastPayload);

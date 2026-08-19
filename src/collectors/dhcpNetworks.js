@@ -65,6 +65,10 @@ class DhcpNetworksCollector {
     this._restarting = { networks: false, addresses: false, pools: false, internet: false };
     this._restartTimers = { networks: null, addresses: null, pools: null, internet: null };
     this._rebuildDebounce = null;
+    this._internetStatus = {
+      available: false, stale: false, updatedAt: null,
+      reason: 'Detect Internet has not completed',
+    };
   }
 
   getLanCidrs() { return this.lanCidrs; }
@@ -135,11 +139,17 @@ class DhcpNetworksCollector {
 
     const fp = JSON.stringify({
       cidrs: this.lanCidrs, wanIp, internetIfaces,
+      internetStatus: {
+        available: this._internetStatus.available,
+        stale: this._internetStatus.stale,
+        reason: this._internetStatus.reason,
+      },
       networks: networks.map(n => ({ cidr: n.cidr, leaseCount: n.leaseCount, poolSize: n.poolSize })),
     });
     this.lastPayload = {
       ts: Date.now(), lanCidrs: this.lanCidrs, networks: this.networks,
       wanIp, totalPoolSize, totalLeases, pollMs: this.pollMs, internetIfaces,
+      internetStatus: { ...this._internetStatus },
     };
     if (fp !== this._lastFp) {
       this._lastFp = fp;
@@ -179,7 +189,20 @@ class DhcpNetworksCollector {
     this._raw.networks  = nets.status   === 'fulfilled' ? (nets.value   || []) : [];
     this._raw.addresses = addrs.status  === 'fulfilled' ? (addrs.value  || []) : [];
     this._raw.pools     = pools.status  === 'fulfilled' ? (pools.value  || []) : [];
-    this._raw.internet  = detect.status === 'fulfilled' ? (detect.value || []) : [];
+    if (detect.status === 'fulfilled') {
+      this._raw.internet = detect.value || [];
+      this._internetStatus = {
+        available: true, stale: false, updatedAt: Date.now(), reason: null,
+      };
+    } else {
+      const hadGoodData = this._internetStatus.updatedAt !== null;
+      if (!hadGoodData) this._raw.internet = [];
+      this._internetStatus = {
+        available: false, stale: hadGoodData,
+        updatedAt: this._internetStatus.updatedAt,
+        reason: 'Detect Internet is unavailable',
+      };
+    }
     this._rebuild();
   }
 
@@ -198,6 +221,9 @@ class DhcpNetworksCollector {
       if (Array.isArray(pkt)) {
         if (pkt.length === 0 && !this._batches[key].length && !this._debounces[key]) {
           this._raw[key] = [];
+          if (key === 'internet') this._internetStatus = {
+            available: true, stale: false, updatedAt: Date.now(), reason: null,
+          };
           this._scheduleRebuild();
         }
         return;
@@ -209,12 +235,23 @@ class DhcpNetworksCollector {
         this._debounces[key] = null;
         this._raw[key] = this._batches[key];
         this._batches[key] = [];
+        if (key === 'internet') this._internetStatus = {
+          available: true, stale: false, updatedAt: Date.now(), reason: null,
+        };
         this._scheduleRebuild();
       }, 50);
     });
     stream.on('error', (err) => {
       const msg = err && err.message ? err.message : String(err);
       console.error('%s', this._lbl, `${key} stream error:`, msg);
+      if (key === 'internet') {
+        this._internetStatus = {
+          available: false, stale: this._internetStatus.updatedAt !== null,
+          updatedAt: this._internetStatus.updatedAt,
+          reason: 'Detect Internet is unavailable',
+        };
+        this._scheduleRebuild();
+      }
       this._stopStream(key);
       if (this.ros.connected && !this._restarting[key]) {
         this._restarting[key] = true;
@@ -242,8 +279,16 @@ class DhcpNetworksCollector {
       try {
         const [cmd, ...args] = DHCPNET_CMDS[key];
         this._raw[key] = (await this.ros.write(cmd, args)) || [];
+        if (key === 'internet') this._internetStatus = {
+          available: true, stale: false, updatedAt: Date.now(), reason: null,
+        };
       } catch (e) {
         console.error('%s', this._lbl + ` ${key} poll error:`, e && e.message ? e.message : e);
+        if (key === 'internet') this._internetStatus = {
+          available: false, stale: this._internetStatus.updatedAt !== null,
+          updatedAt: this._internetStatus.updatedAt,
+          reason: 'Detect Internet is unavailable',
+        };
       }
     }
     this._scheduleRebuild();     // same rebuild the stream path triggers

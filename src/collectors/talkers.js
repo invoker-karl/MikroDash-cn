@@ -85,7 +85,16 @@ class TopTalkersCollector {
       // RStream emits [] when the kid-control table is empty this interval —
       // clear the device list instead of showing the last devices forever.
       if (Array.isArray(packet)) {
-        if (packet.length === 0 && this._devicesNext.size > 0) { this._devicesNext.clear(); this._scheduleCommit(); }
+        if (packet.length === 0) {
+          this._devicesNext.clear();
+          // _commitTick() clears _devicesNext after every completed batch. Use
+          // lastPayload as well so a later empty interval still commits the
+          // transition from rendered devices to an empty table. Fingerprint
+          // suppression in _commitTick() prevents repeated empty emissions.
+          if (!this.lastPayload || this.lastPayload.unavailable || this.lastPayload.devices.length > 0) {
+            this._scheduleCommit();
+          }
+        }
         return;
       }
       if (!packet || typeof packet !== 'object') return;
@@ -102,14 +111,20 @@ class TopTalkersCollector {
 
     stream.on('error', (err) => {
       const msg = String(err && err.message ? err.message : err);
-      this._stream = null;
+      // Stop the actual errored stream before clearing our reference. Clearing
+      // first made _stopStream() return early and leaked the RouterOS stream.
+      this._stopStream();
       if (msg.includes('unknown command') || msg.includes('no such')) {
         // Feature not present on this router — disable permanently, no retries.
         this._unavailable = true;
         const now = Date.now();
         console.warn('%s', this._lbl + ' Kid Control not available on this router — disabling');
-        const payload = { ts: now, devices: [], pollMs: this.pollMs };
+        const payload = {
+          ts: now, devices: [], pollMs: this.pollMs,
+          unavailable: true, reason: 'Kid Control is unavailable',
+        };
         this.lastPayload = payload;
+        this._lastFp = 'unavailable';
         this.io.to('page-dashboard').emit('talkers:update', payload);
         this.state.lastTalkersTs  = now;
         this.state.lastTalkersErr = null;
@@ -133,10 +148,10 @@ class TopTalkersCollector {
   _stopStream() {
     clearTimeout(this._commitTimer);  this._commitTimer  = null;
     clearTimeout(this._backoffTimer); this._backoffTimer = null;
+    this._devicesNext.clear();
     if (!this._stream) return;
     stopStreamSafe(this._stream);
     this._stream = null;
-    this._devicesNext.clear();
   }
 
   _restartStream() {
@@ -173,7 +188,7 @@ class TopTalkersCollector {
     devices = devices.slice(0, this.topN);
 
     const fp = JSON.stringify(devices.map(d => ({ mac: d.mac, tx: d.tx_mbps, rx: d.rx_mbps })));
-    this.lastPayload = { ts: now, devices, pollMs: this.pollMs };
+    this.lastPayload = { ts: now, devices, pollMs: this.pollMs, unavailable: false, reason: null };
     if (fp !== this._lastFp) {
       this._lastFp = fp;
       this.io.to('page-dashboard').emit('talkers:update', this.lastPayload);
@@ -214,8 +229,12 @@ class TopTalkersCollector {
           this._unavailable = true;
           console.warn('%s', this._lbl + ' poll: Kid Control not available — disabling');
           const now = Date.now();
-          const payload = { ts: now, devices: [], pollMs: this.pollMs };
+          const payload = {
+            ts: now, devices: [], pollMs: this.pollMs,
+            unavailable: true, reason: 'Kid Control is unavailable',
+          };
           this.lastPayload = payload;
+          this._lastFp = 'unavailable';
           this.io.to('page-dashboard').emit('talkers:update', payload);
           this.state.lastTalkersTs  = now;
           this.state.lastTalkersErr = null;

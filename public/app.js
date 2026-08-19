@@ -219,10 +219,10 @@ var dhcpSearch       = $('dhcpSearch');
 
 // ── State ──────────────────────────────────────────────────────────────────
 var autoScroll = true, logFilter = '', logLevel = '';
-var currentIf = '', windowSecs = 60, RIGHT_BUFFER_MS = 1000, _ifaceSelectKey = '';
+var currentIf = '', windowSecs = 60, RIGHT_BUFFER_MS = 1000, _ifaceSelectKey = '', _serverDefaultIf = '', _interfacesReady = false;
 var fwTab = 'filter', fwData = {};
 var connHistory = [], MAX_CONN_HIST = 60;
-var lastTalkers = null, lastLanData = null;
+var lastLanData = null;
 var allLeases = [], leaseFilter = '', leaseServerFilter = '';
 var _dhcpTotalPoolSize = 0;  // updated from lan:overview; used to render gauge from leases:list
 var _dhcpNetworksData  = null; // last lan:overview payload
@@ -678,9 +678,13 @@ function initChart(points){
 // ── WAN ────────────────────────────────────────────────────────────────────
 function renderWanStatus(s){
   wanStatusBadge.className='wan-badge';
-  if(s.disabled){wanStatusBadge.className+=' wan-disabled';wanStatusBadge.textContent=(s.ifName||'?')+' · disabled';}
-  else if(s.running){wanStatusBadge.className+=' wan-up';wanStatusBadge.textContent=(s.ifName||'?')+' · up';}
-  else{wanStatusBadge.className+=' wan-down';wanStatusBadge.textContent=(s.ifName||'?')+' · down';}
+  var stateText=' · down';
+  if(s.pending){wanStatusBadge.className+=' wan-disabled';stateText=' · waiting';}
+  else if(s.unavailable){wanStatusBadge.className+=' wan-disabled';stateText=' · unavailable';}
+  else if(s.disabled){wanStatusBadge.className+=' wan-disabled';stateText=' · disabled';}
+  else if(s.running){wanStatusBadge.className+=' wan-up';stateText=' · up';}
+  else{wanStatusBadge.className+=' wan-down';}
+  wanStatusBadge.innerHTML='<span data-i18n-user-data>'+esc(s.ifName||'?')+'</span><span>'+stateText+'</span>';
 }
 
 // ── System ─────────────────────────────────────────────────────────────────
@@ -818,7 +822,16 @@ socket.on('lan:overview',function(data){
   var ifaceEl=$('netInternetIfaces');
   if(ifaceEl){
     var ifaces=data.internetIfaces||[];
-    if(!ifaces.length){
+    var internetStatus=data.internetStatus||{available:true,stale:false};
+    if(!internetStatus.available){
+      var unavailableText=internetStatus.stale
+        ?'Detect Internet unavailable — showing last known data'
+        :'Detect Internet is unavailable';
+      if(!ifaces.length)ifaceEl.innerHTML='<div class="empty-state">'+esc(unavailableText)+'</div>';
+      else ifaceEl.innerHTML='<div class="empty-state">'+esc(unavailableText)+'</div>'+
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.25rem">'+
+        ifaces.map(function(f){return'<div class="net-wan-row"><div class="net-field-label">'+esc(f.name)+'</div><div class="net-field-val">'+esc((f.ip||'').split('/')[0]||'\u2014')+'</div></div>';}).join('')+'</div>';
+    } else if(!ifaces.length){
       ifaceEl.innerHTML='<div class="empty-state">No internet interfaces detected</div>';
     } else {
       ifaceEl.innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:.25rem">'+
@@ -996,8 +1009,11 @@ socket.on('conn:update',function(data){
 // ── Top Talkers ────────────────────────────────────────────────────────────
 socket.on('talkers:update',function(data){
   var devices=data.devices||[];
-  if(!devices.length){if(lastTalkers)return;talkersTable.innerHTML='<tr><td colspan="4" class="empty-state">No devices</td></tr>';return;}
-  lastTalkers=devices;
+  if(!devices.length){
+    var emptyText=data.unavailable?'Kid Control is unavailable':'No devices';
+    talkersTable.innerHTML='<tr><td colspan="4" class="empty-state">'+esc(emptyText)+'</td></tr>';
+    return;
+  }
   talkersTable.innerHTML=devices.map(function(d){
     return'<tr><td>'+esc(d.name||'\u2014')+'</td><td style="color:var(--text-muted)">'+esc(d.mac||'\u2014')+'</td>'+
       '<td class="text-end" style="color:var(--accent-rx)">'+fmtMbps(d.rx_mbps)+'</td>'+
@@ -1206,8 +1222,16 @@ function renderIfaceList(ifaces) {
 // the Interfaces page. Rates, IPs and MACs ride on ifstatus:update, which is
 // page-scoped (issue #108).
 socket.on('ifstatus:names',function(data){
+  // A router switch keeps the same socket. Packets already queued from the old
+  // router can arrive before the new authoritative interfaces:list; ignore
+  // them rather than briefly restoring and subscribing to the old interface.
+  if(!_interfacesReady)return;
   var ifaces=data.interfaces||[];
-  _rebuildIfaceSelect(ifaces.filter(function(i){return i.running&&!i.disabled;}).map(function(i){return i.name;}));
+  // Keep the authoritative object shape. _rebuildIfaceSelect deliberately
+  // retains non-disabled link-down interfaces and needs running/disabled to
+  // render them accurately. The server default comes from interfaces:list;
+  // an ifstatus heartbeat must not silently replace it with a UI fallback.
+  _rebuildIfaceSelect(ifaces,_serverDefaultIf);
 });
 
 socket.on('ifstatus:update',function(data){
@@ -2332,42 +2356,53 @@ Object.keys(logCountEls).forEach(function(sev){
 });;
 
 // ── Interface + window selectors ───────────────────────────────────────────
-function _rebuildIfaceSelect(names) {
-  var key = names.join(',');
-  if (key === _ifaceSelectKey) return;
-  _ifaceSelectKey = key;
-  ifaceSelect.innerHTML = '';
-  names.forEach(function(n) {
-    var opt = document.createElement('option');
-    opt.value = n; opt.textContent = n;
-    ifaceSelect.appendChild(opt);
+function _setInterfacesPending() {
+  _interfacesReady=false;
+  _serverDefaultIf='';
+  _ifaceSelectKey='!pending';
+  ifaceSelect.innerHTML='';
+  ifaceSelect.disabled=true;
+}
+function _rebuildIfaceSelect(interfaces, defaultIf) {
+  var usable=(interfaces||[]).filter(function(i){
+    return i&&i.name&&i.disabled!==true&&i.disabled!=='true';
   });
-  // Current interface went down — switch to the first active one.
-  if (currentIf && names.indexOf(currentIf) === -1 && names.length) {
-    ifaceSelect.value = names[0];
-    socket.emit('traffic:select', { ifName: names[0] });
-  } else {
-    ifaceSelect.value = currentIf || names[0] || '';
+  var names=usable.map(function(i){return i.name;});
+  var key = usable.map(function(i){
+    return i.name+':'+(i.running===true||i.running==='true'?'up':'down');
+  }).join(',');
+  if (key !== _ifaceSelectKey) {
+    _ifaceSelectKey = key;
+    ifaceSelect.innerHTML = '';
+    usable.forEach(function(i) {
+      var opt = document.createElement('option');
+      var running=i.running===true||i.running==='true';
+      opt.value = i.name; opt.textContent = i.name+(running?'':' (down)');
+      ifaceSelect.appendChild(opt);
+    });
+  }
+  // Link-down is still a real interface and must remain selected. Fall back
+  // only when the name is genuinely absent (or disabled and thus unusable).
+  var preferred=currentIf||defaultIf||'';
+  var selected=names.indexOf(preferred)!==-1?preferred:(names[0]||'');
+  ifaceSelect.value=selected;
+  if(selected&&selected!==preferred){
+    socket.emit('traffic:select',{ifName:selected});
   }
 }
 socket.on('interfaces:list',function(data){
-  var active=(data.interfaces||[]).filter(function(i){
-    return (i.running===true||i.running==='true')&&i.disabled!==true&&i.disabled!=='true';
-  }).map(function(i){return i.name;});
-  _rebuildIfaceSelect(active);
-  if(!currentIf){
-    // A removed/renamed default interface must not clear the picker or remain
-    // subscribed invisibly. Fall back to the first active RouterOS interface;
-    // the server independently filters the invalid default from its combined
-    // monitor-traffic request and surfaces the configuration warning.
-    var initialIf=active.indexOf(data.defaultIf)!==-1?data.defaultIf:(active[0]||'');
-    ifaceSelect.value=initialIf;
-    if(initialIf&&initialIf!==data.defaultIf)socket.emit('traffic:select',{ifName:initialIf});
-  }
+  if(data&&data.ok===false)return;
+  _interfacesReady=true;
+  ifaceSelect.disabled=false;
+  _serverDefaultIf=(data&&data.defaultIf)||'';
+  _rebuildIfaceSelect((data&&data.interfaces)||[],_serverDefaultIf);
 });
 // If the server failed to fetch the interface list, show a visible placeholder
 // in the dropdown rather than leaving it silently empty.
 socket.on('interfaces:error',function(data){
+  _interfacesReady=false;
+  _ifaceSelectKey='!error';
+  ifaceSelect.disabled=true;
   ifaceSelect.innerHTML='';
   var opt=document.createElement('option');
   opt.value='';
@@ -2451,7 +2486,14 @@ socket.on('traffic:update',function(sample){
     // Scale advance and rendering delegated to 60fps keepalive
   });
 });
-socket.on('wan:status',function(s){renderWanStatus(s);});
+socket.on('wan:status',function(s){if(!currentIf||s.ifName===currentIf)renderWanStatus(s);});
+// Selected-interface status is independent from the configured WAN. Keep the
+// legacy wan:status listener for older servers while preferring this scoped
+// event after a traffic selection.
+socket.on('traffic:status',function(s){
+  if(!s||!currentIf||s.ifName!==currentIf)return;
+  renderWanStatus(s);
+});
 
 // ── Reconnect ──────────────────────────────────────────────────────────────
 var _rosCurrentlyDisconnected = false;
@@ -2573,6 +2615,7 @@ socket.on('connect',function(){
   document.body.classList.remove('is-disconnected');
   _sysMetaWritten=false;
   currentIf=''; allPoints=[];
+  _setInterfacesPending();
   if(_rosCurrentlyDisconnected) {
     rosBanner.classList.add('show');
     document.body.classList.add('is-ros-disconnected');
@@ -2681,7 +2724,21 @@ function clearDashboardData() {
   });
 }
 
-socket.on('router:switching', function () { clearDashboardData(); });
+function clearStreamHealthWarnings() {
+  Object.keys(STREAM_WARN_CARDS).forEach(function (collector) {
+    var card = $(STREAM_WARN_CARDS[collector]);
+    var warn = $(STREAM_WARN_CARDS[collector] + 'Warn');
+    if (warn) warn.textContent = '';
+    if (card) card.classList.remove('is-degraded');
+  });
+}
+
+socket.on('router:switching', function () {
+  currentIf='';
+  _setInterfacesPending();
+  clearDashboardData();
+  clearStreamHealthWarnings();
+});
 
 // Room memberships are per-socket AND per-router — they are named
 // router-<id>-page-<name> and router-<id>-dash-card-<key>. A switch moves this
@@ -7381,7 +7438,6 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     // Clear cached-data guards so the lan:overview and talkers handlers
     // don't skip incoming payloads from the new router.
     lastLanData = null;
-    lastTalkers = null;
     // Reset system meta so new router's board info replaces old
     _sysMetaWritten = false;
     // Clear ping history

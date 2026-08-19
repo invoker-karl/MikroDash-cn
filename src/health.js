@@ -18,6 +18,13 @@ function computeHealthStatus({ startupReady, rosConnected, state = {}, now = Dat
       if (!Number.isFinite(maxAge) || !Number.isFinite(ts) || ts <= 0 || now - ts > maxAge) stale.push(name);
     }
   }
+  // A fresh sample from a browser-selected fallback does not make an invalid
+  // configured default healthy. The formal default is operational config;
+  // temporary UI selection is deliberately independent of it.
+  if (startupReady && rosConnected && requiredCollectors.includes('traffic') &&
+      (state.trafficConfigValid === false || state.trafficConfigValid === null)) {
+    stale.push('traffic-config');
+  }
   const ok = !!startupReady && !!rosConnected && stale.length === 0;
   return {
     ok,

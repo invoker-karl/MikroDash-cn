@@ -1,6 +1,6 @@
 {
   "name": "mikrodash",
-  "version": "0.7.8-cn.3",
+  "version": "0.7.8-cn.4",
   "private": true,
   "description": "MikroTik RouterOS v7 live dashboard — streaming binary API, Tabler + Socket.IO",
   "main": "src/index.js",
@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test --test-force-exit",
-    "lint": "eslint src/ public/app.js public/i18n.js",
+    "lint": "eslint src/ public/app.js public/i18n.js scripts/*.js",
     "i18n:audit": "node scripts/i18n-audit.js"
   },
   "overrides": {
@@ -32,6 +32,8 @@
   },
   "devDependencies": {
     "eslint": "^8.57.1",
-    "jsdom": "^26.1.0"
+    "espree": "^9.6.1",
+    "jsdom": "^26.1.0",
+    "socket.io-client": "^4.7.5"
   }
 }

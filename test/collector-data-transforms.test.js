@@ -23,13 +23,16 @@ test('traffic collector emits normalized socket and WAN payloads from a poll cyc
     disabled: 'false',
   });
 
-  assert.equal(socketEmits.length, 1);
-  assert.equal(socketEmits[0].ev, 'traffic:update');
-  assert.equal(socketEmits[0].data.ifName, 'wan');
-  assert.equal(socketEmits[0].data.rx_mbps, 0.028);
-  assert.equal(socketEmits[0].data.tx_mbps, 1.5);
-  assert.equal(socketEmits[0].data.running, true);
-  assert.equal(socketEmits[0].data.disabled, false);
+  assert.equal(socketEmits.length, 2);
+  const update = socketEmits.find(e => e.ev === 'traffic:update');
+  const status = socketEmits.find(e => e.ev === 'traffic:status');
+  assert.equal(update.data.ifName, 'wan');
+  assert.equal(update.data.rx_mbps, 0.028);
+  assert.equal(update.data.tx_mbps, 1.5);
+  assert.equal(update.data.running, true);
+  assert.equal(update.data.disabled, false);
+  assert.equal(status.data.ifName, 'wan');
+  assert.equal(status.data.running, true);
 
   assert.equal(broadcastEmits.length, 1);
   assert.equal(broadcastEmits[0].ev, 'wan:status');
