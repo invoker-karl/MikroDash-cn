@@ -2,6 +2,33 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.8-cn.5] — Authoritative RouterOS snapshot reconciliation
+
+- Corrected the shared RouterOS streaming contract: an array emitted by
+  `node-routeros` is a synthetic idle notification, not proof that a table is
+  empty. Streamed objects remain incremental data; only a successful ordinary
+  `/print` result is an authoritative snapshot.
+- Top Talkers now coalesces idle notifications into generation-guarded one-shot
+  confirmation. A successful empty result clears the card, a successful
+  non-empty result replaces it atomically, transient failures retain the last
+  good rows, and unsupported or permission-denied Kid Control states remain
+  distinct. Stop, reconnect, and delivery-mode changes invalidate late probes.
+- Applied the same last-good/authoritative-empty discipline to DHCP networks and
+  Detect Internet, wireless and CAPsMAN clients/SSIDs, topology neighbours and
+  WiFi attribution, connections, firewall rules, routing and BGP, WireGuard and
+  other VPN sessions, DHCP leases, ARP, and interface metadata. Successful
+  structural snapshots can now remove the final row without idle events
+  creating ghost peers, false freshness, or destructive empty states.
+- Added a shared snapshot adapter with coalescing, cooldown, real-row version,
+  and generation guards, plus tests using the installed RStream and fake timers
+  to lock down its actual idle behaviour and collector lifecycle races.
+- Dependency patch verification now fails the build unless every required
+  `node-routeros` marker and the expected empty-reply and multi-block behaviours
+  are present.
+
+API-handler starvation remains unconfirmed and is not claimed as a cause or fix
+in this release.
+
 ## [0.7.8-cn.4] — Authoritative interface recovery and release hardening
 
 - RouterOS reconnects now invalidate the session-scoped interface whitelist and
