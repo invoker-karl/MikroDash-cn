@@ -2,6 +2,36 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.8-cn.4] — Authoritative interface recovery and release hardening
+
+- RouterOS reconnects now invalidate the session-scoped interface whitelist and
+  retry its authoritative refresh before traffic streams reopen. Live interface
+  name, running, or disabled changes also reconcile the same router's cache,
+  stream set, and browser list without requiring a reconnect.
+- The interface selector retains non-disabled link-down interfaces, shows their
+  state immediately, and keeps the selected-interface badge in sync independently
+  of the configured WAN. Router switches clear old health and interface state and
+  ignore queued interface-name updates until the new router's list is ready.
+- `/healthz` now keeps an absent configured default interface degraded even when
+  a browser temporarily selects a valid fallback. Initial traffic and connection
+  health is replayed explicitly as healthy or degraded.
+- Top Talkers now clears a previously populated table when RouterOS returns a
+  legitimate empty result, while reporting Kid Control unavailable as a distinct
+  state. Errored Kid Control streams are stopped before their reference is cleared.
+- Detect Internet now distinguishes a successful empty result from an unavailable
+  or stale query, with a safe reason and update timestamp, without discarding the
+  rest of the DHCP network data.
+- Release promotion is serialized and monotonic: a reviewed version image must be
+  verified before `latest` can advance, an older version cannot replace it, and the
+  release tag commit must belong to reviewed `main`. Workflow actions are pinned,
+  container smoke checks validate the expected starting response, and production
+  dependencies are installed from the lock file.
+- The Chinese completeness audit now classifies dynamic `app.js` UI text and more
+  accessibility attributes in addition to the 816 static HTML candidates.
+
+API-handler starvation was considered during review but was not established as a
+confirmed root cause; this release does not claim to have fixed it.
+
 ## [0.7.8-cn.3] — Traffic recovery for renamed interfaces
 
 - Fixed an invalid or renamed default RouterOS interface blocking traffic for
