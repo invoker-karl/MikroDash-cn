@@ -1,7 +1,7 @@
 'use strict';
 // Regression tests for the 2026-07-26 code-review remediation batches:
 // connectLoop listener containment, connections suspend/watchdog, traffic
-// bindSocket idempotency, empty-table stream packets, ping restart-timer
+// bindSocket idempotency, synthetic-idle stream packets, ping restart-timer
 // cleanup, router input validation, and credential ciphertext preservation.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -448,7 +448,7 @@ test('interface rate poll records errors without advancing freshness', async () 
   assert.match(state.lastIfStatusErr, /monitor failed/);
 });
 
-// ── Empty-table stream packets ───────────────────────────────────────────────
+// ── Synthetic-idle stream packets and authoritative confirmation ────────────
 
 test('talkers confirms synthetic idle before clearing the device list', async () => {
   const ros = mockStreamRos();

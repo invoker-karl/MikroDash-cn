@@ -484,13 +484,11 @@ class WirelessCollector {
         // the poll path had none, so a router pointed at a command tree it does
         // not have just error-logged every interval, forever.
         //
-        // Both directions matter. wifi->wireless mirrors the stream. The reverse
-        // rescues a board that latched legacy from an EMPTY wifi table — the
-        // deliberate heuristic in _onBatch, which is right for a RouterOS 7 box
-        // whose radios really are legacy, but wrong for a wifi-only board such as
-        // a hAP ac2 with its radios disabled, where wifi answers empty and
-        // /interface/wireless does not exist at all. That board now heals itself
-        // on the first error instead of staying blank until a restart.
+        // Both directions matter, but fallback is allowed only after RouterOS
+        // explicitly rejects the active command tree. A successful empty table
+        // means "this stack exists and currently has no clients", so it keeps
+        // the current mode. Tracking explicit rejections also prevents two
+        // absent command trees from bouncing wifi <-> wireless forever.
         if (/no such command|unknown command/i.test(msg)) {
           this._handleSnapshotError(type, e, classifySnapshotError(e));
           continue;
