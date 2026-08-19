@@ -1,9 +1,16 @@
 const path = require('path');
 
-const PATCH_MARKERS = ['MIKRODASH_PATCHED_EMPTY_REPLY', 'MIKRODASH_PATCHED_UNREGISTEREDTAG', 'MIKRODASH_PATCHED_UTF8_ENCODING'];
+const PATCH_MARKERS = [
+  'MIKRODASH_PATCHED_EMPTY_REPLY',
+  'MIKRODASH_PATCHED_UNREGISTEREDTAG',
+  'MIKRODASH_PATCHED_UTF8_ENCODING',
+  'MIKRODASH_PATCHED_MULTI_BLOCK',
+  'MIKRODASH_PATCHED_MULTI_BLOCK_V2',
+];
 
 function resolveDistPath(marker) {
-  return marker.includes('EMPTY') ? 'Channel.js' : path.join('connector', 'Receiver.js');
+  return marker.includes('EMPTY') || marker.includes('MULTI_BLOCK')
+    ? 'Channel.js' : path.join('connector', 'Receiver.js');
 }
 
 function verifyRouterOSPatchMarkers({

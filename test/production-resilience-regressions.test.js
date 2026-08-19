@@ -138,6 +138,18 @@ test('verifyRouterOSPatchMarkers throws when a patch file cannot be read', () =>
   );
 });
 
+test('all node-routeros compatibility patches are required at startup', () => {
+  const { PATCH_MARKERS, resolveDistPath } = require('../src/routeros/patchVerification');
+  assert.deepEqual(PATCH_MARKERS, [
+    'MIKRODASH_PATCHED_EMPTY_REPLY',
+    'MIKRODASH_PATCHED_UNREGISTEREDTAG',
+    'MIKRODASH_PATCHED_UTF8_ENCODING',
+    'MIKRODASH_PATCHED_MULTI_BLOCK',
+    'MIKRODASH_PATCHED_MULTI_BLOCK_V2',
+  ]);
+  assert.equal(resolveDistPath('MIKRODASH_PATCHED_MULTI_BLOCK_V2'), 'Channel.js');
+});
+
 test('ROS write timeout closes the active connection before rejecting', async () => {
   const ros = new ROS({});
   let closeCalls = 0;
