@@ -2,6 +2,21 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.8-cn.6] — RouterOS Kid Control statistics compatibility
+
+- Top Talkers now requests the Kid Control `stats` view for streaming,
+  authoritative confirmation, and polling. This matches RouterOS releases where
+  rates and byte counters are absent from an ordinary device print and prevents
+  an ordinary-print false empty result from clearing valid traffic rows.
+- Kid Control rows now accept numeric or unit-formatted rate values and can
+  derive rates from byte-counter deltas. Row reconciliation uses only a MAC
+  address or RouterOS item ID as stable identity; internal keys are not exposed
+  to browsers.
+- A successful authoritative empty `stats` snapshot still clears stale rows,
+  while transient snapshot failures retain the last known good result.
+- The top-bar MikroDash product name is explicitly excluded from translation,
+  so switching languages no longer changes it to “Mikro短划线”.
+
 ## [0.7.8-cn.5] — Authoritative RouterOS snapshot reconciliation
 
 - Corrected the shared RouterOS streaming contract: an array emitted by
