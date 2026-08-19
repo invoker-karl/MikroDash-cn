@@ -328,6 +328,7 @@ function _syncOverviewSessions() {
 function _freshState() {
   return {
     lastTrafficTs:0,  lastTrafficErr:null,
+    trafficConfigValid:null,
     lastConnsTs:0,    lastConnsErr:null,
     lastNetworksTs:0,
     lastLeasesTs:0,
@@ -465,6 +466,10 @@ async function teardownSession(session, entry) {
   // phantom outage (and fired a router-down alert) about 30 s after every router
   // switch or idle teardown, for a router that was never unreachable. See #84.
   session._destroyed = true;
+  if (session._ifacesRetryTimer) {
+    clearTimeout(session._ifacesRetryTimer);
+    session._ifacesRetryTimer = null;
+  }
   if (session._cancelDownTimer) session._cancelDownTimer();
   for (const c of session.allCollectors) {
     if (typeof c.stop === 'function') c.stop();
@@ -485,6 +490,53 @@ function broadcastRosStatus(connected, reason, entry) {
   if (entry) entry.rosConnected = connected;
   const target = entry ? entry.routerIo : io;
   target.emit('ros:status', { connected, reason: reason || null });
+}
+
+async function refreshSessionInterfaces(session) {
+  if (!session._ifacesFetch) {
+    session._ifacesFetch = fetchInterfaces(session.ros).then((interfaces) => {
+      session.cachedInterfaces = interfaces || [];
+      session.traffic.setAvailableInterfaces(session.cachedInterfaces);
+      return session.cachedInterfaces;
+    }).catch((err) => {
+      // A failed refresh must be retryable. Do not retain either a rejected
+      // promise or the pre-reconnect cache as an authoritative whitelist.
+      session._ifacesFetch = null;
+      session.cachedInterfaces = null;
+      throw err;
+    });
+  }
+  return session._ifacesFetch;
+}
+
+function refreshAndBroadcastSessionInterfaces(session, entry) {
+  return refreshSessionInterfaces(session).then((interfaces) => {
+    if (session._ifacesRetryTimer) {
+      clearTimeout(session._ifacesRetryTimer);
+      session._ifacesRetryTimer = null;
+    }
+    if (!session._destroyed && entry && entry.routerIo) {
+      entry.routerIo.emit('interfaces:list', {
+        ok: true, defaultIf: session.DEFAULT_IF, interfaces,
+      });
+    }
+    return interfaces;
+  }).catch((e) => {
+    if (!session._destroyed && entry && entry.routerIo) {
+      const reason = sanitizeErr(e);
+      console.error('[MikroDash] refreshInterfaces failed:', reason);
+      entry.routerIo.emit('interfaces:error', { ok: false, reason });
+      // Keep one retry per session. The rejected promise was cleared by
+      // refreshSessionInterfaces, so the next attempt performs a real fetch.
+      if (session.ros.connected && !session._ifacesRetryTimer) {
+        session._ifacesRetryTimer = setTimeout(() => {
+          session._ifacesRetryTimer = null;
+          refreshAndBroadcastSessionInterfaces(session, entry).catch(() => {});
+        }, 5000);
+      }
+    }
+    throw e;
+  });
 }
 
 function wireRosEvents(session, entry) {
@@ -576,8 +628,15 @@ function wireRosEvents(session, entry) {
     // and call suspend() to clear state first.
     session.conns.resume();
     _updateAllPageStreams(session, entry);
+    // Existing browser sockets do not reconnect when only RouterOS does. Push
+    // the refreshed, session-scoped topology into this router's room.
+    refreshAndBroadcastSessionInterfaces(session, entry).catch(() => {});
   });
   ros.on('close', () => {
+    if (session._ifacesRetryTimer) {
+      clearTimeout(session._ifacesRetryTimer);
+      session._ifacesRetryTimer = null;
+    }
     session.connTableCache.invalidate();
     console.log('%s', `[${ros.routerLabel}][ROS] connection to ${host}:${port} closed`);
     broadcastRosStatus(false, 'RouterOS connection closed', entry);
@@ -3652,24 +3711,24 @@ async function sendInitialState(socket, entry) {
     try { await s.ros.waitUntilConnected(10000); } catch (_) {}
   }
 
-  let ifs = [];
   try {
-    if (!s._ifacesFetch) s._ifacesFetch = fetchInterfaces(s.ros);
-    s.cachedInterfaces = await s._ifacesFetch;
-    ifs = s.cachedInterfaces;
-    s.traffic.setAvailableInterfaces(ifs);
+    const ifs = await refreshSessionInterfaces(s);
+    socket.emit('interfaces:list', { ok: true, defaultIf: s.DEFAULT_IF, interfaces: ifs });
   } catch (e) {
     // Don't cache the rejected promise — the next connect should retry instead
     // of replaying this failure until the router reconnects.
-    s._ifacesFetch = null;
     const reason = sanitizeErr(e);
     console.error('[MikroDash] fetchInterfaces failed for socket', socket.id, ':', reason);
-    socket.emit('interfaces:error', { reason });
+    socket.emit('interfaces:error', { ok: false, reason });
   }
-  socket.emit('interfaces:list', { defaultIf: s.DEFAULT_IF, interfaces: ifs });
-  // A configuration warning may predate this browser connection. Replay it
-  // explicitly; the original broadcast only reaches sockets already online.
-  if (s.traffic.lastHealth) socket.emit('stream:health', s.traffic.lastHealth);
+  // Always replay an explicit state for every health-aware collector. A null
+  // history means healthy, not "leave whatever the previous router displayed".
+  for (const [collector, instance] of [['traffic', s.traffic], ['connections', s.conns]]) {
+    socket.emit('stream:health', instance.lastHealth || {
+      collector, degraded: false, restarts: 0,
+      since: null, reason: null, ts: Date.now(),
+    });
+  }
 
   let _wanIp = s.state.lastWanIp || '';
   if (!_wanIp && s.ifStatus.lastPayload) {
@@ -3723,6 +3782,10 @@ async function sendInitialState(socket, entry) {
   // gauges on every page and belong to no single one, so they follow
   // router:read like the router list itself.
   if (s.traffic && s.traffic.lastWanStatus) socket.emit('wan:status', s.traffic.lastWanStatus);
+  if (s.traffic && typeof s.traffic.getInterfaceStatus === 'function') {
+    const _selectedStatus = s.traffic.getInterfaceStatus(s.DEFAULT_IF);
+    if (_selectedStatus) socket.emit('traffic:status', _selectedStatus);
+  }
   if (s.system.lastPayload)    socket.emit('system:update',    s.system.lastPayload);
   if (s.wireless.lastPayload  && _mayReplay(socket, 'wireless'))  socket.emit('wireless:update',  s.wireless.lastPayload);
   if (s.vpn.lastPayload       && _mayReplay(socket, 'vpn'))       socket.emit('vpn:update',       s.vpn.lastPayload);

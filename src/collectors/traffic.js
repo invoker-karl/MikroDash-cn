@@ -42,6 +42,8 @@ class TrafficCollector {
     this._configError   = null;
     this._configErrorSince = null;
     this.lastWanStatus = null;
+    this._interfaceStatus = new Map();
+    this._started = false;
     // Restarting a dead stream forever is correct recovery for a transient
     // stall, but it turns a persistent fault into a silent sawtooth: the chart
     // just grows holes and nothing says why. Track it and report it. (#106)
@@ -49,11 +51,12 @@ class TrafficCollector {
     this.lastHealth = null;
 
     this.ros.on('connected', () => {
-      this._ifNamesKey = ''; // force restart on reconnect
-      this._stopAllStream();
+      // Interface membership can change while RouterOS is offline. Treat the
+      // old whitelist as non-authoritative and wait for the session-level
+      // reconnect refresh instead of optimistically reopening stale names.
+      this.invalidateAvailableInterfaces();
       this._ensureHistory(this.defaultIf);
-      this._updateStream();
-      this._startWatchdog();
+      if (this._started) this._startWatchdog();
     });
     this.ros.on('close', () => {
       this._stopAllStream();
@@ -72,6 +75,23 @@ class TrafficCollector {
     for (const r of rows) buf.push({ ts: r.ts, rx_mbps: r.rx_mbps, tx_mbps: r.tx_mbps });
   }
 
+  invalidateAvailableInterfaces() {
+    this._stopAllStream();
+    this._ifNamesKey = '';
+    this.availableIfs = new Set();
+    this._interfacesLoaded = false;
+    this.state.trafficConfigValid = null;
+    // Never replay a pre-disconnect "running" snapshot while the current
+    // interface topology is unknown. Emit an explicit pending state so an
+    // already-connected browser also clears its old badge immediately.
+    this.lastWanStatus = {
+      ifName: this.defaultIf, ts: Date.now(), running: false,
+      disabled: false, unavailable: true, pending: true,
+    };
+    this._interfaceStatus.clear();
+    this.io.emit('wan:status', this.lastWanStatus);
+  }
+
   setAvailableInterfaces(interfaces) {
     const streamWasStarted = !!this._allStream || this._ifNamesKey !== '';
     const names = (interfaces || []).map(i => typeof i === 'string' ? i : i && i.name).filter(Boolean);
@@ -85,6 +105,7 @@ class TrafficCollector {
     // receives a sample. Once the authoritative interface list is available,
     // keep invalid names out of the stream and expose the configuration fault.
     if (!this.availableIfs.has(this.defaultIf)) {
+      this.state.trafficConfigValid = false;
       const detail = `Configured default interface "${this.defaultIf}" is unavailable`;
       if (this._configError !== detail) {
         this._configError = detail;
@@ -93,16 +114,25 @@ class TrafficCollector {
         console.warn('%s', this._lbl + ' ' + detail);
         this._emitConfigHealth(true);
       }
+      this.lastWanStatus = {
+        ifName: this.defaultIf, ts: Date.now(), running: false,
+        disabled: false, unavailable: true,
+      };
+      this.io.emit('wan:status', this.lastWanStatus);
     } else if (this._configError) {
+      this.state.trafficConfigValid = true;
       this._configError = null;
       this._configErrorSince = null;
       this.state.lastTrafficErr = null;
       this._emitConfigHealth(false);
+      if (this.lastWanStatus && this.lastWanStatus.unavailable) this.lastWanStatus = null;
+    } else {
+      this.state.trafficConfigValid = true;
     }
 
     // Loading the whitelist can remove an invalid name from a stream that was
     // optimistically opened during startup, so always re-evaluate the union.
-    if (streamWasStarted) this._updateStream();
+    if (streamWasStarted || this._started) this._updateStream();
   }
 
   // Returns the sorted union of subscribed interfaces + defaultIf.
@@ -110,10 +140,11 @@ class TrafficCollector {
     const s = new Set([this.defaultIf]);
     for (const { ifName } of this.subscriptions.values()) s.add(ifName);
     const names = [...s];
-    // Before fetchInterfaces completes we retain the historical optimistic
-    // startup. Afterwards the RouterOS list is authoritative and no stale name
-    // may enter the consolidated command.
-    return (this._interfacesLoaded ? names.filter(name => this.availableIfs.has(name)) : names).sort();
+    // Nothing reaches RouterOS until the authoritative list is ready. This
+    // avoids requesting an unverified configured default during startup and
+    // prevents stale names from reopening after reconnect.
+    if (!this._interfacesLoaded) return [];
+    return names.filter(name => this.availableIfs.has(name)).sort();
   }
 
   // Restart the stream only when the subscription set has changed.
@@ -226,8 +257,8 @@ class TrafficCollector {
       reason:    configDegraded ? 'Configured default interface is unavailable' : null,
       ts:        Date.now(),
     };
-    console.warn('%s', this._lbl + (changed
-      ? ' stream degraded — ' + this._health.restarts + ' restarts without recovery'
+    console.warn('%s', this._lbl + (this.lastHealth.degraded
+      ? ' stream degraded — ' + (this.lastHealth.reason || (this._health.restarts + ' restarts without recovery'))
       : ' stream recovered'));
     this.io.emit('stream:health', this.lastHealth);
   }
@@ -253,6 +284,7 @@ class TrafficCollector {
     const staleMs = 10000;
     this._watchdogTimer = setInterval(() => {
       if (!this.ros.connected || this._restartTimer) return;
+      if (!this._interfacesLoaded) return;
       if (!this._allStream) {
         console.warn('%s', this._lbl + ' watchdog: stream missing — restarting');
         this._startAllStream();
@@ -294,6 +326,11 @@ class TrafficCollector {
         ifName: nextIf,
         points: this.hist.get(nextIf).toArray(),
       });
+      const status = this.getInterfaceStatus(nextIf);
+      socket.emit('traffic:status', status || {
+        ifName: nextIf, ts: Date.now(), running: false,
+        disabled: false, unavailable: true, pending: true,
+      });
     };
     const onDisconnect = () => this.unbindSocket(socket);
 
@@ -324,6 +361,9 @@ class TrafficCollector {
     const now    = Date.now();
     const rxMbps = bpsToMbps(rxBps);
     const txMbps = bpsToMbps(txBps);
+    const interfaceStatus = { ifName, ts: now, running, disabled, unavailable: false };
+    if (!this._interfaceStatus) this._interfaceStatus = new Map();
+    this._interfaceStatus.set(ifName, interfaceStatus);
 
     // Always update WAN status regardless of idle state (cheap, needed for replay)
     if (ifName === this.defaultIf) {
@@ -348,7 +388,10 @@ class TrafficCollector {
     const sample = { ifName, ts: now, rx_mbps: rxMbps, tx_mbps: txMbps, running, disabled };
 
     for (const { ifName: subIf, socket } of this.subscriptions.values()) {
-      if (subIf === ifName) socket.emit('traffic:update', sample);
+      if (subIf === ifName) {
+        socket.emit('traffic:update', sample);
+        socket.emit('traffic:status', interfaceStatus);
+      }
     }
 
     if (ifName === this.defaultIf) {
@@ -357,13 +400,19 @@ class TrafficCollector {
 
   }
 
+  getInterfaceStatus(ifName) {
+    return this._interfaceStatus ? (this._interfaceStatus.get(ifName) || null) : null;
+  }
+
   start() {
+    this._started = true;
     this._ensureHistory(this.defaultIf);
     this._startAllStream();
     this._startWatchdog();
   }
 
   stop() {
+    this._started = false;
     this._stopAllStream();
     this._stopWatchdog();
     // Release socket listeners/references so a torn-down session can be GC'd.

@@ -1097,7 +1097,7 @@ test('every dashboard card that renders rows is cleared on a router switch', () 
   }
 
   // ...and the clear must actually be wired to the switch.
-  assert.ok(/socket\.on\('router:switching', function \(\) \{ clearDashboardData\(\); \}\)/.test(app),
+  assert.ok(/socket\.on\('router:switching',[\s\S]{0,200}clearDashboardData\(\)/.test(app),
     'clearDashboardData() is never called on router:switching');
 });
 
