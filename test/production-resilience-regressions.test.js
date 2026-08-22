@@ -144,9 +144,10 @@ test('all node-routeros compatibility patches are required at startup', () => {
     'MIKRODASH_PATCHED_EMPTY_REPLY',
     'MIKRODASH_PATCHED_EMPTY_NO_CLOSE',
     'MIKRODASH_PATCHED_UNREGISTEREDTAG',
-    'MIKRODASH_PATCHED_UTF8_ENCODING',
+    'MIKRODASH_PATCHED_RAW_BYTES',
     'MIKRODASH_PATCHED_MULTI_BLOCK',
     'MIKRODASH_PATCHED_MULTI_BLOCK_V2',
+    'MIKRODASH_PATCHED_UTF8_ENCODE',
   ]);
   assert.equal(resolveDistPath('MIKRODASH_PATCHED_MULTI_BLOCK_V2'), 'Channel.js');
   assert.equal(hasExactPatchMarker('// MIKRODASH_PATCHED_MULTI_BLOCK_V2\n',

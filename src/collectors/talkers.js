@@ -12,7 +12,10 @@
  *
  * Error classification:
  *   "unknown command" / "no such" → feature not present on this router;
- *     disable permanently (no retries, empty payload, silent card).
+ *     latch _unavailable, emit { devices: [], available: false } once, and stop.
+ *     The latch is cleared ONLY by a deliberate re-probe — ros 'connected' or
+ *     probe() — never by a later successful tick, and _startStream()/resume()
+ *     both honour it, so an idle wake-up cannot quietly reopen the channel.
  *   "timeout" in stream mode → CHR/VM thread starvation; auto-downgrade to
  *     poll mode and restart. If poll also fails it goes through the poll
  *     handler below.
@@ -67,7 +70,9 @@ class TopTalkersCollector {
     this._commitTimer = null;
     this._backoffTimer = null;
     this._backoffUntil = 0;
-    this._backoffMs    = 60000;
+    this._baseBackoffMs = 60000;
+    this._maxBackoffMs  = 600000;              // 10-minute cap
+    this._backoffMs    = this._baseBackoffMs;  // doubles on each failure
     this._unavailable  = false;
     this._lastFp       = '';
     this._pollTimer    = null;
@@ -88,20 +93,31 @@ class TopTalkersCollector {
       apply: rows => this._replaceAuthoritativeRows(rows),
       onError: (error, classification) => this._handleSnapshotError(error, classification),
     });
+    this._heartbeatTimer = null;
+    this._heartbeatArmedMs = 0;
+    this._silenceTimer = null;
+    this._sawData      = false;
 
     // Register lifecycle listeners once in the constructor so they never
     // accumulate across multiple start() calls (hot-swap safety).
     io.on('connection', () => {
-      if (this.streamMode && !this._stream) this._startStream();
+      if (this._active && this.streamMode && !this._stream && !this._unavailable) this._startStream();
     });
     ros.on('close', () => {
       this._clearConnectionPayload(false);
       this._stopStream();
+      // Stop the re-emit too: replaying a payload from before the disconnect would
+      // keep the card looking live while the router is unreachable.
+      this._stopHeartbeat();
+      this._stopSilenceTimer();
       if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
     });
     ros.on('connected', () => {
       this._backoffUntil = 0;
-      this._backoffMs    = 60000;
+      this._backoffMs    = this._baseBackoffMs;
+      // A reconnect is a deliberate re-probe: the router may have been upgraded
+      // or had the kid-control package added, so the latch is cleared here — and
+      // only here, plus the dormancy probe. Never on an ordinary successful tick.
       this._unavailable  = false;
       this._lastFp       = '';
       this._kidPayload   = null;
@@ -115,8 +131,9 @@ class TopTalkersCollector {
 
   _startStream() {
     if (this._stream) return;
-    if (!this._active || this._connectionPayload) return;
+    if (this._connectionPayload) return;
     if (!this.ros.connected) return;
+    if (this._unavailable) return;
     if (Date.now() < this._backoffUntil) return;
 
     const intervalSec = Math.max(1, Math.round(this.pollMs / 1000));
@@ -135,6 +152,7 @@ class TopTalkersCollector {
       const classified = classifyRStreamPacket(packet);
       if (classified.kind === 'idle') { this._snapshotProbe.onIdle(); return; }
       if (classified.kind !== 'data') return;
+      this._sawData = true;
       this._snapshotProbe.noteRealRow();
       const device = this._normaliseDevice(packet);
       if (!device) return;
@@ -164,11 +182,95 @@ class TopTalkersCollector {
         console.error('%s', this._lbl + ' stream error:', msg);
         this.state.lastTalkersErr = msg;
         clearTimeout(this._backoffTimer);
-        this._backoffTimer = setTimeout(() => { this._backoffTimer = null; this._startStream(); }, this._backoffMs);
+        const delay = this._backoffMs;
+        this._backoffMs = Math.min(this._backoffMs * 2, this._maxBackoffMs);
+        this._backoffTimer = setTimeout(() => { this._backoffTimer = null; this._startStream(); }, delay);
       }
     });
 
     this._stream = stream;
+  }
+
+  // Every other streamed collector re-emits its last payload every 60 s so the
+  // browser's stale timer never fires on a healthy but quiet router. Talkers was
+  // the one that did not, while still advertising a poll interval — so the client
+  // held it to a 23 s threshold that nothing was ever going to meet once the
+  // device list stopped changing.
+  // What the CLIENT is told, not what we schedule on. A streamed collector reports
+  // 0 so the browser keeps its fixed stale threshold and lets the heartbeat set the
+  // cadence; advertising a 3 s interval while streaming is what held this card to a
+  // 23 s deadline nothing was going to meet. (queues/wan idiom.)
+  //
+  // A getter, not a field: the stream-timeout path flips streamMode at runtime, and
+  // a value captured in the constructor would then describe the wrong delivery mode
+  // for the rest of the session.
+  get _reportedPollMs() { return this.streamMode ? 0 : this.pollMs; }
+
+  // The heartbeat only does its job if it beats faster than the deadline this
+  // collector itself advertises. The client sets its threshold to
+  // `pollMs + STALE_GRACE(20 s)` for a polled collector, and keeps a fixed 90 s
+  // for a streamed one (pollMs 0) — so a hardcoded 60 s is right for streaming
+  // and useless for polling, where a 3 s interval means a 23 s deadline. That is
+  // the hAP AC2 case: it runs collection mode "poll", so the card still went
+  // stale ~30 s in, and only recovered when dormancy fired ~20 s after that.
+  get _heartbeatMs() { return this.streamMode ? 60000 : Math.max(5000, this.pollMs); }
+
+  /**
+   * Treat prolonged silence on an open stream as the empty answer.
+   *
+   * RouterOS replies to an empty result set with `!empty`, and patch-routeros.js
+   * deliberately SWALLOWS that on a streaming channel, because there it means
+   * "nothing YET" rather than "nothing" (/interface/wifi/frequency-scan sends it
+   * ~6 ms before delivering real rows ten seconds later). So on a router whose
+   * kid-control table is empty, a stream-mode collector receives no packet at
+   * all — not even the `[]` the data handler above is written for.
+   *
+   * That is why this looked fixed on the hAP AC2 and was not on the cAP AX: the
+   * AC2 runs collection mode "poll", where ros.write() goes down a one-shot
+   * channel and the same patch DOES turn `!empty` into an empty result.
+   *
+   * Silence schedules the same authoritative one-shot confirmation used for an
+   * RStream idle marker. That preserves the Chinese edition's last-good contract:
+   * only a successful ordinary print may clear the final row, while a transient
+   * confirmation error keeps the last known result.
+   */
+  _startSilenceTimer() {
+    if (this._silenceTimer) return;
+    const intervalMs = Math.max(1000, this.pollMs);
+    this._silenceTimer = setInterval(() => {
+      if (!this.streamMode || !this._stream || this._unavailable) return;
+      if (this._sawData) { this._sawData = false; return; }   // rows arrived; nothing to infer
+      if (this._devicesNext.size > 0) return;                 // mid-batch, let the debounce commit
+      this._snapshotProbe.onIdle();
+    }, intervalMs * 3);
+    if (this._silenceTimer.unref) this._silenceTimer.unref();
+  }
+
+  _stopSilenceTimer() {
+    if (this._silenceTimer) { clearInterval(this._silenceTimer); this._silenceTimer = null; }
+    this._sawData = false;
+  }
+
+  _startHeartbeat() {
+    // Re-arm when the cadence changes: the stream-timeout path flips streamMode
+    // and calls _startTalkers() again, which would otherwise hit the early return
+    // below and leave a 60 s beat guarding a 23 s deadline.
+    if (this._heartbeatTimer && this._heartbeatArmedMs !== this._heartbeatMs) this._stopHeartbeat();
+    if (this._heartbeatTimer) return;
+    this._heartbeatArmedMs = this._heartbeatMs;
+    this._heartbeatTimer = setInterval(() => {
+      if (!this.lastPayload) return;
+      // Idle gate, as netwatch does: this re-emit exists only for browser stale
+      // timers, so it has nothing to do when nobody is watching.
+      if (this.io.engine.clientsCount === 0) return;
+      this.io.to('page-dashboard').emit('talkers:update', { ...this.lastPayload, ts: Date.now() });
+    }, this._heartbeatMs);
+    if (this._heartbeatTimer.unref) this._heartbeatTimer.unref();
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) { clearInterval(this._heartbeatTimer); this._heartbeatTimer = null; }
+    this._heartbeatArmedMs = 0;
   }
 
   _stopStream() {
@@ -251,7 +353,8 @@ class TopTalkersCollector {
     this._unavailable = true;
     const now = Date.now();
     this._kidPayload = {
-      ts: now, devices: [], pollMs: this.pollMs, unavailable: true, reason,
+      ts: now, devices: [], pollMs: this._reportedPollMs, available: false,
+      unavailable: true, reason,
       source: 'kid-control', basis: 'kid-control-stats', status: 'error',
       stale: false, emptyText: null,
     };
@@ -272,8 +375,11 @@ class TopTalkersCollector {
 
   _commitTick() {
     this._commitTimer  = null;
-    this._backoffMs    = 60000;
-    this._unavailable  = false;
+    // Reset the retry backoff on success, but NOT the _unavailable latch: a
+    // successful tick means the stream recovered, never that a router which
+    // answered "unknown command" has grown a kid-control menu. Clearing it here
+    // un-latched the feature probe almost immediately.
+    this._backoffMs    = this._baseBackoffMs;
     const now = Date.now();
 
     if (this.io.engine.clientsCount === 0) {
@@ -297,7 +403,7 @@ class TopTalkersCollector {
     const fp = JSON.stringify(devices.map(d => ({ key: d.key, tx: d.tx_mbps, rx: d.rx_mbps })));
     const publicDevices = devices.map(({ key: _key, ...device }) => device);
     this._kidPayload = {
-      ts: now, devices: publicDevices, pollMs: this.pollMs,
+      ts: now, devices: publicDevices, pollMs: this._reportedPollMs, available: true,
       unavailable: false, reason: null, source: 'kid-control', basis: 'kid-control-stats',
       status: 'ok', stale: false, emptyText: null,
       _fp: fp,
@@ -317,7 +423,7 @@ class TopTalkersCollector {
       this._clearConnectionPayload(true);
       return;
     }
-    if (!this._active || !Array.isArray(payload.devices)) return;
+    if (!Array.isArray(payload.devices)) return;
 
     const byIdentity = new Map();
     for (const row of payload.devices) {
@@ -349,7 +455,7 @@ class TopTalkersCollector {
     const ts = Number.isFinite(payload.ts) && payload.ts > 0 ? payload.ts : Date.now();
     const pollMs = Number.isFinite(payload.pollMs) && payload.pollMs > 0 ? payload.pollMs : 5000;
     this._connectionPayload = {
-      ts, devices: publicDevices, pollMs, unavailable: false, reason: null,
+      ts, devices: publicDevices, pollMs, available: true, unavailable: false, reason: null,
       source: 'connections', basis: 'connection-byte-delta', status: 'ok',
       stale: false, emptyText: 'No active LAN devices',
       _fp: JSON.stringify(selected.map(d => ({ key: d._key, rx: d.rx_mbps, tx: d.tx_mbps }))),
@@ -361,6 +467,7 @@ class TopTalkersCollector {
     // disappears, replaying that payload would make stale devices look current.
     this._kidPayload = null;
     this._stopStream();
+    this._stopSilenceTimer();
     if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
     clearTimeout(this._connectionTimer);
     const staleMs = this._connectionStaleMs || Math.max(20000, pollMs * 4 + 5000);
@@ -380,7 +487,7 @@ class TopTalkersCollector {
     if (hadConnection && restartFallback) {
       const now = Date.now();
       this._kidPayload = {
-        ts: now, devices: [], pollMs: this.pollMs, unavailable: true,
+        ts: now, devices: [], pollMs: this._reportedPollMs, available: true, unavailable: true,
         reason: 'Device traffic is unavailable', source: 'fallback-pending',
         basis: null, status: 'error', stale: true, emptyText: null,
       };
@@ -451,10 +558,14 @@ class TopTalkersCollector {
   }
 
   _startTalkers() {
-    if (!this._active || this._connectionPayload) return;
+    if (!this._active) return;
+    this._startHeartbeat();
+    if (this._connectionPayload) return;
     if (this.streamMode) {
+      this._startSilenceTimer();
       this._startStream();
     } else {
+      this._stopSilenceTimer();
       console.log('%s', this._lbl + ' poll mode — polling /ip/kid-control/device/print every', this.pollMs + 'ms');
       this._pollTalkersOnce();
       this._scheduleTalkersNext();
@@ -470,23 +581,40 @@ class TopTalkersCollector {
     this._active = false;
     this._clearConnectionPayload(false);
     this._stopStream();
+    this._stopHeartbeat();
+    this._stopSilenceTimer();
     if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
   }
   resume() {
     if (!this.ros.connected) return;
     this._active = true;
+    // Latched off: resume() is an idle/page-gate wake-up, not a feature re-probe.
+    // Without this, every socket reconnect re-opened the stream on a router that
+    // had already answered "unknown command".
+    if (this._unavailable) return;
     // Same trap as ping: suspend() clears _pollTimer, so a resume that only
     // restarts the stream strands poll mode permanently once the last viewer
     // has ever gone away — which is why the Top Talkers card stayed stale.
-    if (this.streamMode) { this._startStream(); return; }
-    this._pollTalkersOnce();
-    this._scheduleTalkersNext();
+    this._startTalkers();
+  }
+
+  // Deliberate feature re-probe, as opposed to resume()'s idle wake-up: clears
+  // the unsupported latch and the retry backoff, then reopens the channel. The
+  // dormancy supervisor calls this on backoff expiry and on page focus.
+  probe() {
+    this._unavailable  = false;
+    this._backoffUntil = 0;
+    this._backoffMs    = this._baseBackoffMs;
+    this._lastFp       = '';
+    this.resume();
   }
 
   stop() {
     this._active = false;
     this._clearConnectionPayload(false);
     this._stopStream();
+    this._stopHeartbeat();
+    this._stopSilenceTimer();
     if (this._pollTimer) { clearTimeout(this._pollTimer); this._pollTimer = null; }
   }
 }

@@ -2,6 +2,30 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.32-cn.1] — Simplified Chinese edition on upstream v0.7.32
+
+- Upgraded the Chinese edition from upstream v0.7.25 to the complete v0.7.32
+  feature set: configuration backups and restore, scheduled email reports,
+  editable WiFi networks, CAPsMAN configuration, and the expanded router-write
+  resource engine.
+- Preserved the fork's connection-derived Top Talkers, authoritative RouterOS
+  snapshot reconciliation, interface recovery, multi-router isolation, and
+  fail-closed dependency patch verification while adopting upstream collector
+  dormancy and heartbeat behavior.
+- Fixed Dashboard Top Talkers after the upgrade so ordinary LAN clients remain
+  visible without Kid Control, stale rows clear only after an authoritative
+  result, and an unavailable source is not mislabeled as an empty device list.
+- Added complete Simplified Chinese coverage for the v0.7.30-v0.7.32 pages,
+  forms, warnings, accessibility labels, document titles, dynamic CAPsMAN/WiFi
+  guard messages, and the standalone topology and dashboard-grid scripts.
+- The translation audit now inspects every first-party browser script, includes
+  explicit translation calls joined with runtime values, and reports unmatched
+  locale entries as cleanup leads. The document-wide mutation observer now runs
+  only while a translated language is active.
+- Updated the v0.7.8 database-upgrade regression through schema v14 and retained
+  the local status-handler fixes for successful WAN, Queues, and Router Users
+  actions that still fail in the current upstream client.
+
 ## [0.7.25-cn.1] — Simplified Chinese edition on upstream v0.7.25
 
 - Upgraded the Chinese edition from upstream v0.7.8 to the complete v0.7.25
@@ -140,6 +164,232 @@ confirmed root cause; this release does not claim to have fixed it.
 - Restricted signed-out translation assets to three exact paths.
 - Added reviewed upstream-sync and two-platform GHCR release workflows. The
   immutable version image is verified before the same digest becomes `latest`.
+## [0.7.32] — Wireless you can change, not just watch
+
+MikroDash could see wireless in detail and change none of it. Every SSID edit, every passphrase
+rotation, every provisioning tweak still meant opening WinBox. Two new surfaces close that: a **Wifi
+Networks** page for a standalone router, and a **CAPsMAN configuration card** for a fleet.
+
+Both are built on the resource engine that already serves routes, VLANs, bridges and firewall rules,
+so they inherit its stale-row protection, undo, audit trail and permission gates rather than growing
+a second way to write to a router.
+
+**Passphrases are never read back.** `/interface/wifi/print` and the legacy security-profiles menu
+both return the key in clear text, so every read is proplist-scoped and no proplist names a
+credential field. The edit form leaves the box empty, where blank means "leave the current one
+alone", and the audit trail records SET or UNSET rather than a value.
+
+Four bugs surfaced only by running against real hardware, two of them only when a write was actually
+executed against a router. They are listed under Fixed because that is what they were.
+
+### Added
+- **Wifi Networks page.** Every radio and SSID the router broadcasts, one row per interface grouped
+  under the radio carrying it, with colour-coded SSID pills, band, security mode, VLAN and live
+  client count. Works on **both** RouterOS wireless stacks — modern `/interface/wifi` and legacy
+  `/interface/wireless` — and offers exactly the one the router has.
+- **Editing, in place.** Change an SSID, passphrase, band, width, hidden flag or VLAN; enable and
+  disable as one-click row actions; add an extra SSID to an existing radio and remove it again. A
+  physical radio is editable but never removable, because it is hardware.
+- **CAPsMAN configuration card.** Five RouterOS menus behind one tab strip — Provisioning,
+  Configuration, Security, Channel and Datapath — all editable, with provisioning reorderable because
+  the first matching rule wins.
+- **Two new write guards.** Changing an SSID or passphrase on the interface MikroDash is reached
+  through now warns before it drops every client on that radio. Overriding a
+  `/interface/wifi/configuration` profile that more than one radio shares asks first, because the
+  override silently splits two things that had been moving together — and it stays quiet when the
+  profile is used by only one radio, since a warning that fires on the innocent case is one people
+  learn to click through.
+- **A CAPsMAN edit says what it will reach.** Saving a profile a live provisioning rule references
+  warns that it is pushed to every CAP the moment you save, naming the rules and the CAP count. It is
+  silent for a profile nothing enabled references.
+
+### Changed
+- **The Wireless pages are now Wifi Clients and Wifi Networks.** Display names only: every key,
+  permission and saved setting is untouched, so no role grant or per-router override moves. The
+  reasoning, and what a future key rename would have to migrate, is written up in `AI_CONTEXT.md`.
+- **A resource may declare more than one guard.** They answer different questions and one write can
+  trip several; the first warning wins, so a save never raises two dialogs in a row.
+- **CAPsMAN and Wifi Networks reset on a router switch.** The CAPsMAN page had no such handler and
+  could have offered an edit form against another device's rows once it became editable.
+
+### Fixed
+- **A router provisioning its own radios showed twelve uneditable rows and no reason.** RouterOS
+  reports those interfaces as `dynamic` with **no** `configuration.manager`, so keying the badge on
+  the manager alone left every row read-only in silence. Rows now say whether they are CAP-managed or
+  locally provisioned.
+- **Band and channel width were empty on every row.** Both live on the channel *profile* rather than
+  on the interface. They are now resolved profile-first, then inferred from the frequency, then from
+  the interface name.
+- **Every edit of a wireless network failed**, whether or not it touched the VLAN. A field marked
+  clearable emits an empty value on save, and RouterOS refuses an empty value for a typed integer:
+  `invalid value for datapath.vlan-id, an integer required`.
+- **An empty RouterOS menu answers with one nameless junk row**, which would have been read as a
+  profile named `''` — exactly what an interface naming no profile looks up.
+
+## [0.7.31] — Collectors that know when to stop, and a Backups page you can work in
+
+A collector with nothing to report now **stops holding a channel open**, and says so on the card
+instead of counting down to a fault it does not have. Concurrent open channels, not data volume, are
+what strain small hardware, so a router with no WireGuard peers and no NetWatch hosts stops paying for
+both. It wakes on its own: the moment you open the page, when the router reconnects, or on a slow
+re-probe that backs off to ten minutes.
+
+Chasing that turned up three real bugs on the smallest hardware, all the same shape. **An empty result
+looked identical to a dead one.** On a streaming channel RouterOS answers an empty table with `!empty`,
+which MikroDash deliberately swallows because on a stream it means "nothing yet" rather than "nothing".
+The cost was that a cAP AX with connection tracking off restarted its Connections stream every 20
+seconds, forever, and reported the stream degraded while doing it.
+
+### Added
+- **Collector dormancy.** A collector whose data is empty, or whose menu the router does not have,
+  suspends itself and the card says "nothing to report" rather than going stale. Unsupported and
+  merely-empty are treated differently: a command error is durable and sleeps for ten times as long as
+  an empty table, which is transient. Nothing is hidden and nothing is dimmed, because an empty card
+  that already reads "No devices" needs no second opinion.
+- **Every collector can be switched off per router.** The Router Settings toggle grid had drifted to
+  11 toggles against 21 disableable collectors, so Topology, VLANs, PPP, Bridges, CAPsMAN, DNS,
+  Packages, WAN, Queues and Router Users could only be turned off by hand-editing `routers.json`. The
+  grid is generated from the collector registry now, so it cannot drift again.
+- **Backup time.** Choose the hour a scheduled backup runs, in your display timezone, instead of
+  whenever the interval happens to elapse. Defaults to 08:00. Clearing the field is a real choice and
+  means "any time", which keeps the old interval behaviour.
+- **Delete restore points.** A selection column on the Backups history, with Delete acting on one or
+  many. Delete removes the files and the row; the Audit page keeps the record of both the backup and
+  its deletion.
+- **The backup ID** is shown in its own column, so the id an audit entry names is readable rather
+  than something to dig out of the page.
+
+### Fixed
+- **Connections restarted its stream forever on a router with an empty connection table.** The
+  watchdog could not tell a quiet stream from a dead one, so an access point with tracking off took a
+  restart every 20 seconds. It now asks the router once, on a one-shot request where an empty answer
+  is unambiguous, before tearing anything down.
+- **Top Talkers went stale on a router with no Kid Control devices.** It only produced a payload when
+  the device list changed, so a table that was empty and stayed empty produced nothing at all. It also
+  had no heartbeat while advertising a poll interval, which held its card to a deadline nothing was
+  going to meet.
+- **A "this router has no Kid Control" verdict never stuck.** Three separate paths cleared it, so the
+  probe reopened on every browser reconnect and every idle wake-up. Its retry backoff was also a flat
+  60 seconds that never grew, despite claiming to be exponential.
+- **The Audit page Target column showed the word "router"** instead of the router's name, and the
+  CSV/PDF export carried a bare uuid in its router column. Both name the device now. A router deleted
+  since the event keeps the generic marker in the table and the id in the export, where a dangling
+  reference still has to be followable.
+- **An empty payload left the previous router's rows on screen.** Top Talkers and the LAN overview
+  both treated "the router reports nothing" as "nothing changed", so after a router switch the card
+  kept showing the other device's data, invisible to the stale timer.
+
+### Changed
+- **The Wireless page is now Wireless Clients**, and no longer shares both its name and its icon with
+  the Wireless section holding it. The section keeps the wifi symbol; the page takes the signal bars,
+  which is what it actually lists. Only labels changed: every key, permission and saved setting is
+  untouched.
+- **Restore moved to the Backups header**, beside Delete and Back Up Now, and is coloured apart from
+  both. It acts on the selection and needs exactly one restore point, since "which of these three?"
+  has no answer.
+- **Dragging a firewall rule leaves its original position open**, tinted, so you can put it back if
+  you change your mind. Dropping onto that gap returns the rule to where it started.
+
+### Upgrading
+Nothing to do. Dormancy is automatic and reversible; a collector wakes as soon as it has data.
+
+Backup time is the one behaviour change worth knowing: a router whose backup schedule predates this
+release has no time recorded, so it moves to **08:00** rather than staying wherever its interval had
+drifted to. Clear the field on the Backups page to keep the old any-time behaviour.
+
+## [0.7.30] — Configuration backups, scheduled email reports, and router writes across the app
+
+MikroDash can now **back up and restore router configurations**, **email reports on a schedule**, and
+**write configuration** from most of the pages that previously only read it.
+
+The **Backups** page keeps a pair per restore point: a gzipped `/export` for diffing and an encrypted
+`.backup` for restoring. A pair is written **only when the configuration actually changed**, so a daily
+schedule costs a short check rather than disk, and drift is shown as a diff naming the exact lines that
+moved. Restore pushes the binary back to the router and reboots it, behind a serial match, a typed
+router name and a version-mismatch warning.
+
+Getting there turned up a **silent data-corruption bug in the RouterOS connection**. The receiver
+decoded every API word as UTF-8, which is right for text and destroys a binary: each invalid byte
+became a replacement character, one per byte, so a file came back the *right length* and the wrong
+content. Encoding is now a property of the connection. The mirror bug was worse in an app that has
+just learned to write: outgoing words were still encoded as win1252, so a Cyrillic comment typed into
+the new editors reached the router as `???????`.
+
+### Added
+- **Scheduled email reports.** A sixth tab on the Reports page schedules a report to be emailed
+  daily, weekly or monthly, to a list of addresses that need no MikroDash account. Each report
+  carries a PDF per section, complete with the same charts and stat boxes the on-screen export
+  produces. Periods are real calendar periods in your timezone, so a monthly report covers *August*
+  rather than a rolling thirty days that shifts every time the container restarts. Recipients go in
+  Bcc, because they are frequently different customers who should not see each other's addresses.
+  Requires the new **Scheduled reports** permission, which a role gets by holding *write* on
+  Reports; anyone who can already export a report can see what is scheduled, because a mail-out
+  nobody can see is the bad case.
+- **Backups page.** Per-router schedule (hourly, daily, weekly, monthly — daily by default), manual
+  runs, retention by count and by age, and a full run history including the checks that found nothing
+  changed. The newest restore point is never pruned, however old it is: a router whose configuration
+  has been stable would otherwise age out its only backup precisely because nothing went wrong.
+- **Drift diffs.** A unified diff between any stored backup and the one before it, with the volatile
+  export header stripped so an unchanged router never reports as drifted.
+- **Restore.** Pushes the encrypted backup back to the router and loads it. Refused outright if the
+  serial does not match the device the backup came from; warns once if the RouterOS version differs,
+  because that is the restore you most want after a bad upgrade; requires the router's name to be
+  typed; audited before the command is sent, because the reboot takes the answer with it.
+- **Write access across the app** (#97). Add, edit and remove routes, static DNS entries, DHCP leases
+  and networks, VLANs, bridges and bridge ports, VETH interfaces and WireGuard peers, each from the
+  card that already showed them.
+- **Firewall writes**, including **drag-and-drop reordering** with undo and redo. Position is recorded
+  as the rule a row sat before, never an index, so an undo still means something after the table has
+  moved on.
+- **Update button** on the Dashboard's System card when a RouterOS update is available, with a typed
+  confirmation and a progress state that stays on screen while the router reboots.
+- Backup notifications for drift and failure. A run that changed nothing is deliberately not
+  notifiable.
+
+### Fixed
+- **Binary files came back corrupted from RouterOS.** `/file/read` returns raw bytes and the receiver
+  decoded them as UTF-8, replacing each invalid byte with U+FFFD. Because that is one character per
+  byte, the reassembled file matched the reported size exactly and looked correct. Verified against a
+  live hAP AX3: a known blob returned with a different sha256 and 177 of its 256 distinct byte values
+  intact. The decode is now per connection, and only the backup transport asks for raw bytes.
+- **Non-ASCII text was mangled on the way to the router.** Outgoing API words were encoded as win1252,
+  which cannot represent Cyrillic, Greek or CJK, so they were substituted with `?` before leaving the
+  process. This only started to matter when MikroDash learned to write.
+- **Traffic kept flowing to a socket whose router access had been revoked.** The revocation sweep
+  stops data by making the socket leave its rooms, which is correct for every collector except
+  traffic — that one emits straight to each subscriber. A revoked session carried on receiving a
+  sample per second until it happened to disconnect.
+- Backups no longer refuse on small routers. A fixed 8 MB free-space threshold, extrapolated from one
+  busy AX3, refused a hAP ac2 whose entire backup is 46 KB. Backup size tracks configuration, not
+  hardware, so the router is asked instead of guessed at.
+- The Audit page's timestamps could keep an ISO `T` separator that the Reports page stripped.
+
+### Changed
+- The Update button sits on the right edge of the update banner and matches its colour, instead of
+  sitting in the middle of it in blue.
+- The upgrade dialog no longer closes the moment the router accepts the command. That was exactly the
+  moment worth explaining, so it now holds a spinner and says the router will be unreachable for a
+  minute or two.
+
+### Upgrading
+Nothing to do. Backups are **off by default** and start no process until enabled per router, and no
+report is scheduled until you create one.
+
+Two things worth knowing if you use the Reports page today. The PDF export now caps its table at
+5,000 rows, with a note in the document saying so: samples are stored one minute apart, so an
+unaggregated month was a thousand-page document rendered on the same event loop that serves your
+live dashboards. The CSV export is unchanged and still uncapped. Scheduled reports also need SMTP
+configured under Settings → Notifications; the page says so when you create one rather than leaving
+you to find out from a failed run.
+
+Enabling them needs the RouterOS user to hold the **`ftp`** policy, which the recommended read-only
+group denies: `/export file=` and `/system/backup/save` write files, and without it a backup fails
+with `not enough permissions (9)`. This does not enable the FTP service. See RouterOS Setup in the
+README.
+
+Backups are stored under `/data/config-backups/<router>/` and are deliberately unreachable from both
+the retention sweep and router deletion. Removing a router is exactly when its last known-good
+configuration matters most.
 
 ## [0.7.25] — Nine new pages, a grouped sidebar, and a full audit trail
 

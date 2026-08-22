@@ -96,6 +96,7 @@ const DEFAULTS = {
   // in hours rather than milliseconds and clamped well away from anything that
   // would look like hammering their update servers.
   updateCheckHours:  parseInt(process.env.UPDATE_CHECK_HOURS || '12',    10),
+  pollWifi:          parseInt(process.env.WIFI_POLL_MS      || '30000', 10),
   pollWireless:      parseInt(process.env.WIRELESS_POLL_MS  || '30000', 10),
   pollVpn:           parseInt(process.env.VPN_POLL_MS       || '10000', 10),
   pollFirewall:      parseInt(process.env.FIREWALL_POLL_MS  || '5000',  10),
@@ -162,6 +163,21 @@ const DEFAULTS = {
   notifPing:         true,
   notifNetwatch:     false,
   notifRouterStatus: false,
+  // Backups notify on two things only: a configuration that drifted, and a run
+  // that failed. "Backed up, nothing changed" is deliberately not notifiable —
+  // on a daily schedule that is a message every day that says nothing, and a
+  // channel that cries wolf daily is one people mute for the other two as well.
+  notifBackupDrift:  true,
+  notifBackupFail:   true,
+  // A scheduled report that silently stops arriving is the worst outcome:
+  // nobody notices an absence. Delivered over the multi-channel send(), so a
+  // broken SMTP host still reaches Telegram or ntfy.
+  notifReportFail:   true,
+  // Where the ROUTER should fetch a backup from during a restore. Normally
+  // derived from the address the router already sees us at (/user/active), so
+  // this is only needed behind a reverse proxy or NAT, where what the router
+  // can reach is not what we can observe.
+  backupBaseUrl:     '',
   // Off by default deliberately: switching a new alert type on for existing
   // installs would fire on upgrade for every router already behind a release.
   notifRouterUpdate: false,
@@ -199,6 +215,7 @@ const DEFAULTS = {
   activeRouterId:  '',
 
   // Page visibility (true = visible)
+  pageWifi:        true,
   pageWireless:    true,
   pageInterfaces:  true,
   pageDhcp:        true,
@@ -222,6 +239,7 @@ const DEFAULTS = {
   // shows everything, and the preset is what narrows it.
   pageRouters:     true,
   pageAudit:       true,
+  pageBackups:     true,
 
   // Set once by the #105 migration, then never read again.
   collectionMigrated: false,
@@ -263,6 +281,7 @@ const ENV_MAP = {
   pollRouting:       ['ROUTING_POLL_MS',      v => parseInt(v, 10)],
   pollSystem:        ['SYSTEM_POLL_MS',       v => parseInt(v, 10)],
   updateCheckHours:  ['UPDATE_CHECK_HOURS',   v => parseInt(v, 10)],
+  pollWifi:          ['WIFI_POLL_MS',         v => parseInt(v, 10)],
   pollWireless:      ['WIRELESS_POLL_MS',     v => parseInt(v, 10)],
   pollVpn:           ['VPN_POLL_MS',          v => parseInt(v, 10)],
   pollFirewall:      ['FIREWALL_POLL_MS',     v => parseInt(v, 10)],
@@ -310,6 +329,7 @@ function _ensureDataDir() {
 const POLL_BOUNDS = Object.freeze({
   pollConns:[1000,60000], pollTalkers:[1000,60000], pollBandwidth:[1000,60000],
   pollRouting:[500,300000], pollSystem:[1000,60000], pollWireless:[10000,600000],
+  pollWifi:[10000,600000],
   pollVpn:[1000,30000], pollFirewall:[1000,30000], pollIfstatus:[1000,60000],
   pollIfaces:[10000,600000], pollPing:[1000,30000], pollArp:[5000,300000],
   pollDhcp:[10000,600000], pollTopology:[10000,600000],
@@ -442,10 +462,10 @@ const VIEWER_FIELDS = [
   'topN', 'topTalkersN', 'firewallTopN', 'vpnDashTopN', 'maxConns', 'historyMinutes',
   'alertCpuThreshold', 'alertPingLoss',
   'activeRouterId',
-  'pageWireless', 'pageInterfaces', 'pageDhcp', 'pageVpn', 'pageConnections',
+  'pageWifi', 'pageWireless', 'pageInterfaces', 'pageDhcp', 'pageVpn', 'pageConnections',
   'pageFirewall', 'pageLogs', 'pageBandwidth', 'pageRouting', 'pageTopology',
   'pageVlans', 'pagePpp', 'pageBridges', 'pageDns', 'pageCapsman', 'pagePackages',
-  'pageRosusers', 'pageQueues', 'pageWan', 'pageRouters', 'pageAudit',
+  'pageRosusers', 'pageQueues', 'pageWan', 'pageRouters', 'pageAudit', 'pageBackups',
   'displayTimezone',
   // Whether the My Alerts tab exists at all. A non-admin is the whole audience
   // for that tab and only ever sees this subset, so leaving it out would hide

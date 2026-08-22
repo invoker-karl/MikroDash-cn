@@ -43,6 +43,21 @@ const { classifyRosError } = require('./routeros/classifyError');
 const selfGuard            = require('./routeros/selfGuard');
 const queueGuard           = require('./routeros/queueGuard');
 const wanGuard             = require('./routeros/wanGuard');
+const selfPath             = require('./routeros/selfPath');
+const fwGuard              = require('./routeros/fwGuard');
+const wifiGuard            = require('./routeros/wifiGuard');
+const capsmanGuard         = require('./routeros/capsmanGuard');
+const history              = require('./routeros/history');
+const Resources            = require('./routeros/resources');
+const Pdf                  = require('./reports/pdf');
+const Format               = require('./reports/format');
+const Reports              = require('./reports/build');
+const ReportSchedules      = require('./reports/schedules');
+const ReportScheduler      = require('./reports/scheduler');
+const crypto               = require('node:crypto');
+const Backups              = require('./backups');
+const BackupStore          = require('./backups/store');
+const BackupDiff           = require('./backups/diff');
 const { scheduleForcedShutdownTimer } = require('./shutdown');
 const { isPublicI18nPath } = require('./i18nAssets');
 const { applySessionInterfaceMetadata } = require('./interfaceMetadata');
@@ -73,6 +88,7 @@ const SystemCollector      = require('./collectors/system');
 const { resolveCollection, collectionFingerprint, planMigration,
         LEGACY_STREAM_KEYS, COLLECTORS: _COLLECTOR_DEFS } = require('./collection');
 const { makeNullCollector } = require('./collectors/nullCollector');
+const { createDormancyState, payloadEmpty } = require('./collectors/util');
 const WirelessCollector    = require('./collectors/wireless');
 const VpnCollector         = require('./collectors/vpn');
 const FirewallCollector    = require('./collectors/firewall');
@@ -91,6 +107,7 @@ const PackagesCollector     = require('./collectors/packages');
 const RosUsersCollector     = require('./collectors/rosusers');
 const QueuesCollector       = require('./collectors/queues');
 const WanCollector          = require('./collectors/wan');
+const WifiCollector         = require('./collectors/wifi');
 const alerter               = require('./alerter');
 const notifier              = require('./notifier');
 const alertSessions         = require('./alertSessions');
@@ -205,6 +222,17 @@ const _MODERN_PUBLIC = new Set([
   '/api/auth/status', '/api/auth/login', '/api/users/setup',
 ]);
 
+/**
+ * Unauthenticated by necessity, not by category: the router fetching its own
+ * backup cannot hold a session cookie. Guarded by a single-use capability token
+ * bound to one backup, one router and one source address — see
+ * _mintRestoreToken. Matched by prefix because the id is in the path.
+ */
+const _MODERN_PUBLIC_PREFIXES = ['/api/backups/'];
+const _isPublicPath = (path) =>
+  _MODERN_PUBLIC.has(path) ||
+  _MODERN_PUBLIC_PREFIXES.some(p => path.startsWith(p) && path.endsWith('/raw'));
+
 // ── Session resolution (single source for all cookie→session lookups) ───────────
 // Resolves the session cookie on a request/socket-request to a *live* auth view:
 // role and allowedRouterIds are re-read from the current user record on every
@@ -243,7 +271,7 @@ function _authMiddleware(req, res, next) {
 }
 
 function _modernAuthMiddleware(req, res, next) {
-  if (_MODERN_PUBLIC.has(req.path) || isPublicI18nPath(req.path) || req.path.startsWith('/vendor/')) return next();
+  if (_isPublicPath(req.path) || isPublicI18nPath(req.path) || req.path.startsWith('/vendor/')) return next();
   const session = _sessionFromReq(req);
   if (session) { req.authSession = session; return next(); }
   if (req.path.startsWith('/api/')) return res.status(401).json({ ok: false, error: 'Not authenticated' });
@@ -296,10 +324,22 @@ function _startSessionSweep() {
       } else {
         socket.request._authSession = live; // refresh live role/grants
         // Revocation used to take effect only on the next page load, so a
-        // socket kept streaming a router its owner had just lost. Room
-        // membership is the actual data boundary, so leaving the rooms is what
-        // stops the data — the notice is only so the page can explain itself.
+        // socket kept streaming a router its owner had just lost. Leaving the
+        // rooms is what stops most of the data — the notice is only so the page
+        // can explain itself.
+        //
+        // "Most", not all: the traffic collector is the one that does NOT
+        // deliver through a room. It emits `traffic:update` straight to each
+        // subscribed socket, once a second, so a socket that has left every
+        // room keeps receiving samples for its selected interface until it
+        // happens to disconnect. Unbinding is what actually stops it, and it
+        // has to run while `socket.routerId` still names the router whose
+        // session owns the subscription.
         if (socket.routerId && !_socketCan(socket, 'router:read', socket.routerId)) {
+          const revoked = _routerSessions.get(socket.routerId);
+          if (revoked && revoked.session && revoked.session.traffic) {
+            revoked.session.traffic.unbindSocket(socket);
+          }
           for (const room of socket.rooms) {
             if (room.startsWith('router-')) socket.leave(room);
           }
@@ -520,12 +560,13 @@ function buildSession(routerCfg, routerIo) {
   // wan borrows rates from ifStatus by reference, so it is constructed after it
   // for the same reason vlans and bridges are.
   const wan          = _on('wan',      () => new WanCollector         ({ros, io:routerIo, pollMs:eff.poll.wan,      state, streamMode:eff.stream.wan, ifStatus}));
-  const allCollectors = [traffic, dhcpLeases, dhcpNetworks, arp, conns, talkers, logs, system, wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology, vlans, ppp, bridges, dns, capsman, packages, rosusers, queues, wan];
+  const wifi         = _on('wifi',     () => new WifiCollector        ({ros, io:routerIo, pollMs:eff.poll.wifi,     state, streamMode:eff.stream.wifi}));
+  const allCollectors = [traffic, dhcpLeases, dhcpNetworks, arp, conns, talkers, logs, system, wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology, vlans, ppp, bridges, dns, capsman, packages, rosusers, queues, wan, wifi];
 
   session = { ros, state, connTableCache, DEFAULT_IF, HISTORY_MINUTES, collection: eff,
            dhcpLeases, dhcpNetworks, arp, traffic, conns, talkers, logs, system,
            wireless, vpn, firewall, ifStatus, ping, bandwidth, routing, netwatch, topology,
-           vlans, ppp, bridges, dns, capsman, packages, rosusers, queues, wan, allCollectors,
+           vlans, ppp, bridges, dns, capsman, packages, rosusers, queues, wan, wifi, allCollectors,
            routerId: routerCfg.id, cachedInterfaces: null, _interfacesRevision: 0 };
   return session;
 }
@@ -542,6 +583,10 @@ async function teardownSession(session, entry) {
   console.log('%s', `[${_tearLabel}] ── session torn down`);
   if (entry) { entry.startupReady = false; entry.collectorsStarted = false; }
   if (entry && entry._diagTimer) { clearInterval(entry._diagTimer); entry._diagTimer = null; }
+  if (entry && entry._dormancyTimer) { clearInterval(entry._dormancyTimer); entry._dormancyTimer = null; }
+  // Dormancy is per-session state: a rebuilt session re-probes everything, which
+  // is what makes a router switch or a settings change a clean slate.
+  if (entry) entry._dormancy = null;
   // Detach collector-registered global io listeners so the dead session can be GC'd.
   if (entry && entry.routerIo && typeof entry.routerIo.removeAllHandlers === 'function') {
     entry.routerIo.removeAllHandlers();
@@ -720,7 +765,12 @@ function wireRosEvents(session, entry) {
     // Restore page-aware streams for any pages still open after the reconnect.
     // Collector reconnect handlers (in constructors) fire before this listener
     // and call suspend() to clear state first.
-    session.conns.resume();
+    //
+    // Dormancy is cleared first, and deliberately: a reconnect may follow the
+    // RouterOS upgrade or package install that turns an "unknown command" into a
+    // working menu, so every verdict from before the disconnect is stale.
+    _resetDormancy(session, entry);
+    _resumeCollector(session, entry, 'conns');
     _updateAllPageStreams(session, entry);
     // Existing browser sockets do not reconnect when only RouterOS does. Push
     // the refreshed, session-scoped topology into this router's room.
@@ -822,12 +872,15 @@ async function startCollectors(session, entry) {
     await session.queues.start();
     await _delay(300);
     await session.wan.start();
+    await _delay(300);
+    await session.wifi.start();
 
     entry.startupReady = true;
     console.log('[MikroDash] All collectors running');
     if (entry.routerIo) {
       entry.routerIo.emit('collection:config', _collectionPayload(session.routerId, session));
     }
+    _startDormancy(entry);
 
     /* Match the collectors to who is actually watching, now that startupReady
        is true.
@@ -1223,6 +1276,78 @@ db.sweepOrphanGrants(
 })();
 
 db.startPruneInterval(() => Settings.load());
+
+/**
+ * A connection dedicated to moving a file off a router.
+ *
+ * `rawBytes` makes the receiver decode losslessly, which is required for the
+ * binary backup and wrong for everything else — so this is deliberately NOT
+ * the session's shared connection. It lives for the length of one backup.
+ */
+function _backupConnect(router) {
+  const ros = new ROS({
+    host: router.host,
+    port: router.port || 8729,
+    tls: router.tls === false ? false : { rejectUnauthorized: !router.tlsInsecure },
+    username: router.username,
+    password: router.password,
+    writeTimeoutMs: 120000,
+    rawBytes: true,
+  });
+  ros.connectLoop();
+  return ros.waitUntilConnected(30000).then(() => ros).catch((e) => {
+    try { ros.stop(); } catch (_) { /* never leave the socket behind */ }
+    throw e;
+  });
+}
+
+Backups.start({
+  db,
+  schedules: Routers.BACKUP_SCHEDULES,
+  // Read per tick rather than captured: the operator can change the display
+  // timezone without restarting, and a schedule anchored to the old one would
+  // then fire an hour out with nothing to explain it.
+  getTimezone: () => Settings.load().displayTimezone || '',
+  getRouters: () => Routers.loadAll(),
+  connect: _backupConnect,
+  queue: (rid, fn) => _routerWriteQueue(rid, fn),
+  log: (msg) => console.log('%s', msg),
+  notify: (kind, title, body) => {
+    const s = Settings.load();
+    const on = kind === 'drift' ? s.notifBackupDrift !== false : s.notifBackupFail !== false;
+    if (!on) return;
+    notifier.send(s, title, body).catch(() => { /* delivery is best effort */ });
+  },
+  onResult: (router, result) => {
+    // Anyone looking at the page sees the run land without reloading.
+    io.to('router-' + router.id + '-page-backups').emit('backups:ran', {
+      routerId: router.id, outcome: result.outcome, error: result.error || null,
+    });
+  },
+});
+
+// Scheduled email reports (#60). Same injected shape as the backup scheduler,
+// so the whole thing is drivable in a test with no database, mail server or
+// clock — see test/report-schedules.test.js.
+ReportScheduler.start({
+  db,
+  settings: () => Settings.load(),
+  isModern: () => _isModern(),
+  getRouter: (rid) => Routers.getById(rid),
+  buildReport: (section, opts) => Reports.build(section, opts),
+  // Re-asked at send time, never trusted from creation time: a report must not
+  // keep emailing a router's history after its creator loses access to it.
+  canRead: (userId, routerId) => Rbac.can({ userId }, 'router:history', routerId),
+  mail: (settings, message) => notifier.sendMail(settings, message),
+  // Deliberately the multi-channel send(), not sendMail(): telling someone over
+  // SMTP that SMTP is broken reaches nobody.
+  notifyFailure: (title, body) => {
+    const cfg = Settings.load();
+    if (cfg.notifReportFail === false) return;
+    notifier.send(cfg, title, body).catch(() => {});
+  },
+  log: (msg) => console.log('%s', msg),
+});
 alerter.init(io, Settings.load());
 alertSessions.init(io);
 
@@ -1382,7 +1507,16 @@ app.post('/api/auth/login', loginLimiter, async (req, res) => {
 });
 
 // GET /api/auth/logout
-app.get('/api/auth/logout', (req, res) => {
+//
+// Rate limiting is real but invisible to CodeQL: authLimiter is applied to
+// every path except /healthz by the app.use() above, inside a callback the
+// analysis cannot follow back to this handler. Measured against the running
+// container: 100 requests answered, the next 10 got 429.
+//
+// A route-level limiter would be the wrong fix, not a belt-and-braces one —
+// it would consume two of the 100/min budget per request, which is exactly
+// what the note above the /login route warns against.
+app.get('/api/auth/logout', (req, res) => { // codeql[js/missing-rate-limiting]
   const token = SessionStore.parseCookieHeader(req.headers.cookie || '')['mikrodash_sid'];
   const session = token ? SessionStore.getSession(token) : null;
   if (token) SessionStore.deleteSession(token);
@@ -1867,7 +2001,7 @@ app.post('/api/settings', Rbac.requireGlobalAdmin, (req, res) => {
     const updates = {};
     const intFields = {
       routerPort:[1,65535], pollConns:[1000,60000], pollTalkers:[1000,60000], pollSystem:[1000,60000],
-      pollWireless:[10000,600000], pollVpn:[1000,30000],  pollFirewall:[1000,30000],
+      pollWifi:[10000,600000], pollWireless:[10000,600000], pollVpn:[1000,30000],  pollFirewall:[1000,30000],
       pollIfstatus:[1000,60000], pollIfaces:[10000,600000], pollPing:[1000,30000], pollArp:[5000,300000],
       pollBandwidth:[1000,60000], pollDhcp:[10000,600000], pollRouting:[500,300000], topN:[1,50], topTalkersN:[1,20],
       firewallTopN:[1,50], vpnDashTopN:[1,50], maxConns:[1000,100000], historyMinutes:[5,120],
@@ -1893,7 +2027,7 @@ app.post('/api/settings', Rbac.requireGlobalAdmin, (req, res) => {
                         'pingEnabled','rosDebug','userNotifyEnabled',
                         'telegramEnabled','pushbulletEnabled','smtpEnabled','smtpSecure','ntfyEnabled',
                         'notifIfaceUpDown','notifVpn','notifCpu','notifPing','notifNetwatch','notifRouterStatus',
-                        'notifRouterUpdate','notifBgp',
+                        'notifRouterUpdate','notifBgp','notifBackupDrift','notifBackupFail','notifReportFail',
                         'notifIfaceEther','notifIfaceWlan','notifIfaceBridge','notifIfaceVlan','notifIfaceOther'];
     const credFields = ['telegramBotToken', 'pushbulletApiKey', 'smtpUser', 'smtpPass', 'ntfyToken'];
 
@@ -1934,7 +2068,8 @@ app.post('/api/settings', Rbac.requireGlobalAdmin, (req, res) => {
     const _pinned = (key) => _ovr[key] !== undefined;
 
     const collectorMap = { conns:s.conns, talkers:s.talkers, system:s.system, wireless:s.wireless, vpn:s.vpn, firewall:s.firewall, ifStatus:s.ifStatus, ping:s.ping, arp:s.arp, dhcpNetworks:s.dhcpNetworks, bandwidth:s.bandwidth, routing:s.routing, vlans:s.vlans, ppp:s.ppp,
-      topology:s.topology, bridges:s.bridges, dns:s.dns, capsman:s.capsman, packages:s.packages, rosusers:s.rosusers, queues:s.queues, wan:s.wan };
+      topology:s.topology, bridges:s.bridges, dns:s.dns, capsman:s.capsman, packages:s.packages, rosusers:s.rosusers, queues:s.queues, wan:s.wan,
+      wifi:s.wifi };
     const pollMap = { pollConns:'conns', pollTalkers:'talkers', pollSystem:'system', pollWireless:'wireless',
       pollVpn:'vpn', pollFirewall:'firewall', pollIfstatus:'ifStatus', pollBandwidth:'bandwidth',
       pollPing:'ping', pollArp:'arp', pollDhcp:'dhcpNetworks', pollRouting:'routing',
@@ -1945,7 +2080,7 @@ app.post('/api/settings', Rbac.requireGlobalAdmin, (req, res) => {
       // have made it four times worse.
       pollTopology:'topology', pollVlans:'vlans', pollPpp:'ppp',
       pollBridges:'bridges', pollDns:'dns', pollCapsman:'capsman', pollPackages:'packages',
-      pollRosusers:'rosusers', pollQueues:'queues', pollWan:'wan' };
+      pollRosusers:'rosusers', pollQueues:'queues', pollWan:'wan', pollWifi:'wifi' };
     for (const [key, name] of Object.entries(pollMap)) {
       if (key in updates && !_pinned(key)) {
         const col = collectorMap[name];
@@ -2203,6 +2338,26 @@ app.post('/api/user-notify/test-notification', _userNotifyTestLimiter, _requireU
 // ── Routers API ───────────────────────────────────────────────────────────────
 
 // GET /api/routers — list all routers (passwords masked); filtered by allowedRouterIds in modern mode
+// The collector registry, for the Router Settings modal's toggle grid.
+//
+// The grid used to be hand-written markup, and drifted: 21 collectors were
+// disableable and only 11 had a toggle, so ten of them could be turned off only
+// by editing routers.json by hand. Serving the registry makes that structurally
+// impossible — a collector added to src/collection.js appears in the modal with
+// no second edit, which is the same reason PAGE_NAV_MAP is derived rather than
+// listed.
+//
+// No permission gate beyond the app's own: this is static metadata about what
+// MikroDash can collect, identical for every router and every user, and it
+// reveals nothing about any configured device.
+app.get('/api/collectors', (_req, res) => {
+  res.json({
+    collectors: _COLLECTOR_DEFS
+      .filter(c => c.disableable)
+      .map(c => ({ key: c.key, label: c.label, requires: c.requires || [] })),
+  });
+});
+
 app.get('/api/routers', (req, res) => {
   const cfg    = Settings.load();
   const active = cfg.activeRouterId || '';
@@ -2326,6 +2481,10 @@ app.delete('/api/routers/:id', Rbac.requirePerm('router:manage', Rbac.fromParam(
       note: 'router-scoped grants and all stored history for this router were deleted with it' });
     if (!deleted) return res.status(404).json({ ok:false, error:'Router not found' });
     db.deleteGrantsForScope('router', deletedId);
+    // A schedule for a router that no longer exists cannot run, and left
+    // behind it is a live outbound email loop. Removed here, where it is
+    // visible, rather than as a side effect of a retention sweep.
+    db.deleteReportSchedulesForRouter(deletedId);
     Rbac.bump(); _broadcastPermsChanged();
 
     // Tear down any live pool session for the deleted router.
@@ -3051,6 +3210,7 @@ app.get('/healthz', (req, res) => {
       rosusers: { ts:st.lastRosusersTs, err:sanitizeErr(st.lastRosusersErr) },
       queues: { ts:st.lastQueuesTs, err:sanitizeErr(st.lastQueuesErr) },
       wan: { ts:st.lastWanTs, err:sanitizeErr(st.lastWanErr) },
+      wifi: { ts:st.lastWifiTs, err:sanitizeErr(st.lastWifiErr) },
     },
   };
   res.status(statusCode).json(body);
@@ -3060,6 +3220,18 @@ app.get('/healthz', (req, res) => {
 
 const _AGG_VALID = new Set(['hour', 'day', 'week', 'month']);
 
+// Moved to src/reports/format.js so the scheduled-report path shares them
+// rather than growing a second copy. Rebound under their original names:
+// the JSON report routes and the audit export still call them, and renaming
+// would touch a dozen call sites for no behaviour change.
+const _toCsv            = Format.toCsv;
+const _tsFmt            = Format.tsFmt;
+const _fmtDuration      = Format.fmtDuration;
+const _fmtDataMB        = Format.fmtDataMB;
+const _bucketNoun       = Format.bucketNoun;
+const _annotateDowntime = Format.annotateDowntime;
+const _maxOf            = Format.maxOf;
+
 function _parseReportParams(query) {
   const routerId  = String(query.routerId || '');
   const from      = parseInt(query.from, 10) || 0;
@@ -3068,268 +3240,267 @@ function _parseReportParams(query) {
   return { routerId, from, to, aggregate };
 }
 
-function _toCsv(rows, columns) {
-  const header = columns.join(',');
-  const body   = rows.map(r => columns.map(c => {
-    const v = r[c];
-    if (v == null) return '';
-    let s = String(v);
-    // Neutralise spreadsheet formula injection: a cell that a router-controlled
-    // string (interface name, ping target, alert subject) could start with
-    // =, +, -, @, tab or CR is executed as a formula by Excel/Sheets. Prefix a
-    // single quote so it's treated as literal text.
-    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
-    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
-  }).join(',')).join('\n');
-  return header + '\n' + body;
-}
 
-// meta: { router, from, to, stats:[{label,value}], chartData:{lines:[{label,color,pts:[{x,y}]}],yLabel} }
-function _toPdf(title, columns, rows, res, meta) {
-  const PDFDocument = require('pdfkit');
-  const L = 40, R = 40;
-  const doc = new PDFDocument({ margin: L, size: 'A4' });
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${title}.pdf"`);
-  doc.pipe(res);
+// The renderer and its two sinks now live in src/reports/pdf.js, so a
+// scheduled report can get a Buffer instead of an HTTP response. Same
+// positional signature, so every call site below is untouched.
+const _toPdf = Pdf.pipe;
 
-  const PW = doc.page.width;
-  const inner = PW - L - R;
-
-  // ── Header bar ────────────────────────────────────────────────────────
-  const hTop = 30;
-  doc.rect(0, 0, PW, 52).fill('#0f172a');
-  // Logo text
-  doc.font('Helvetica-Bold').fontSize(17).fillColor('#38bdf8')
-     .text('Mikro', L, hTop, { continued: true })
-     .fillColor('#f8fafc')
-     .text('Dash', { lineBreak: false });
-  // Report title centred
-  doc.font('Helvetica-Bold').fontSize(13).fillColor('#f8fafc')
-     .text(title, L, hTop + 1, { width: inner, align: 'center', lineBreak: false });
-  doc.fillColor('#000000'); // reset
-
-  let y = 66;
-
-  // ── Meta info row ─────────────────────────────────────────────────────
-  const fmtTs = ts => ts ? _tsFmt(ts) || '—' : '—';
-  const routerLabel = (meta && meta.router) ? meta.router : '';
-  const dateRange   = (meta && meta.from && meta.to)
-    ? `${fmtTs(meta.from)}  →  ${fmtTs(meta.to)}`
-    : '';
-  if (routerLabel || dateRange) {
-    doc.font('Helvetica').fontSize(8).fillColor('#64748b');
-    if (routerLabel) doc.text(`Router: ${routerLabel}`, L, y, { lineBreak: false });
-    if (dateRange)   doc.text(dateRange, L, y, { width: inner, align: 'right', lineBreak: false });
-    doc.fillColor('#000000');
-    y += 16;
-    doc.moveTo(L, y).lineTo(PW - R, y).lineWidth(0.5).strokeColor('#e2e8f0').stroke();
-    doc.lineWidth(1).strokeColor('#000000');
-    y += 10;
-  }
-
-  // ── Stat boxes ────────────────────────────────────────────────────────
-  if (meta && meta.stats && meta.stats.length) {
-    const n     = meta.stats.length;
-    const boxW  = Math.min(110, Math.floor((inner - (n - 1) * 8) / n));
-    const boxH  = 36;
-    const totalW = n * boxW + (n - 1) * 8;
-    const startX = L + Math.floor((inner - totalW) / 2);
-    meta.stats.forEach((s, i) => {
-      const bx = startX + i * (boxW + 8);
-      doc.roundedRect(bx, y, boxW, boxH, 4).lineWidth(0.75).strokeColor('#cbd5e1').stroke();
-      doc.font('Helvetica-Bold').fontSize(11).fillColor('#0f172a')
-         .text(String(s.value), bx + 4, y + 5, { width: boxW - 8, align: 'center', lineBreak: false });
-      doc.font('Helvetica').fontSize(7).fillColor('#64748b')
-         .text(s.label, bx + 4, y + 20, { width: boxW - 8, align: 'center', lineBreak: false });
-    });
-    doc.fillColor('#000000');
-    y += boxH + 14;
-  }
-
-  // ── Chart ─────────────────────────────────────────────────────────────
-  if (meta && meta.chartData && meta.chartData.lines && meta.chartData.lines.length) {
-    const cd      = meta.chartData;
-    const lines   = cd.lines.filter(l => l.pts && l.pts.length > 1);
-    if (lines.length) {
-      const CH = 110, yAxisW = 38, xAxisH = 16;
-      const cLeft = L + yAxisW, cRight = PW - R;
-      const cW    = cRight - cLeft;
-      const cTop  = y, cBot = y + CH;
-
-      // Compute y-range across all lines
-      let yMin = Infinity, yMax = -Infinity;
-      lines.forEach(l => l.pts.forEach(p => { if (p.y < yMin) yMin = p.y; if (p.y > yMax) yMax = p.y; }));
-      if (yMin === yMax) { yMin = 0; yMax = yMax || 1; }
-      if (yMin > 0) yMin = 0;
-      const yRange = yMax - yMin;
-      const xMin = lines[0].pts[0].x;
-      const xMax = lines[0].pts[lines[0].pts.length - 1].x;
-      const xRange = xMax - xMin || 1;
-
-      const toX = xv => cLeft + ((xv - xMin) / xRange) * cW;
-      const toY = yv => cBot  - ((yv - yMin) / yRange) * CH;
-
-      // Grid lines + Y labels (5 steps)
-      doc.font('Helvetica').fontSize(7).fillColor('#94a3b8');
-      for (let step = 0; step <= 4; step++) {
-        const yv  = yMin + (yRange / 4) * step;
-        const gy  = toY(yv);
-        doc.moveTo(cLeft, gy).lineTo(cRight, gy).lineWidth(0.3).strokeColor('#e2e8f0').stroke();
-        const lbl = yv >= 1000 ? (yv / 1000).toFixed(1) + 'k' : yv.toFixed(1);
-        doc.text(lbl, L, gy - 4, { width: yAxisW - 4, align: 'right', lineBreak: false });
-      }
-      if (cd.yLabel) {
-        doc.text(cd.yLabel, L, y + CH / 2 - 4, { width: yAxisW - 4, align: 'right', lineBreak: false });
-      }
-
-      // X axis time labels (5 ticks) — format adapts to span; respects displayTimezone
-      const _tz      = Settings.load().displayTimezone || '';
-      const HOUR     = 3600000, DAY = 86400000;
-      const spanMs   = xRange;
-      const labelW   = spanMs <= 12 * HOUR ? 28 : spanMs <= 3 * DAY ? 54 : 28;
-      const _pdfTick = ts => {
-        if (_tz) {
-          let opts;
-          if (spanMs <= 12 * HOUR) opts = { timeZone:_tz, hour:'2-digit', minute:'2-digit', hour12:false };
-          else if (spanMs <= 3 * DAY) opts = { timeZone:_tz, month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false };
-          else opts = { timeZone:_tz, month:'2-digit', day:'2-digit' };
-          return new Intl.DateTimeFormat('sv-SE', opts).format(new Date(ts));
-        }
-        const d = new Date(ts), p = n => String(n).padStart(2, '0');
-        if (spanMs <= 12 * HOUR)  return `${p(d.getHours())}:${p(d.getMinutes())}`;
-        if (spanMs <= 3  * DAY)   return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-        return `${p(d.getMonth()+1)}-${p(d.getDate())}`;
-      };
-      for (let ti = 0; ti <= 4; ti++) {
-        const ts  = xMin + (xRange / 4) * ti;
-        const tx  = toX(ts);
-        const lbl = _pdfTick(ts);
-        doc.text(lbl, tx - labelW / 2, cBot + 3, { width: labelW, align: 'center', lineBreak: false });
-      }
-      doc.fillColor('#000000');
-
-      // Border
-      doc.rect(cLeft, cTop, cW, CH).lineWidth(0.5).strokeColor('#cbd5e1').stroke();
-      doc.lineWidth(1);
-
-      // Lines
-      lines.forEach(line => {
-        const pts = line.pts;
-        doc.save();
-        doc.rect(cLeft, cTop, cW, CH).clip();
-        doc.moveTo(toX(pts[0].x), toY(pts[0].y));
-        for (let i = 1; i < pts.length; i++) doc.lineTo(toX(pts[i].x), toY(pts[i].y));
-        doc.lineWidth(1.2).strokeColor(line.color || '#38bdf8').stroke();
-        doc.restore();
-      });
-
-      // Legend
-      let legX = cLeft;
-      lines.forEach(line => {
-        doc.rect(legX, cBot + xAxisH + 2, 10, 6).fill(line.color || '#38bdf8');
-        doc.font('Helvetica').fontSize(7).fillColor('#334155')
-           .text(line.label, legX + 13, cBot + xAxisH + 1, { lineBreak: false });
-        legX += 13 + doc.widthOfString(line.label) + 16;
-      });
-      doc.fillColor('#000000');
-
-      y = cBot + xAxisH + 18;
-    }
-  }
-
-  // ── Table ─────────────────────────────────────────────────────────────
-  const colW = Math.floor(inner / columns.length);
-  const _drawTableHeader = yh => {
-    doc.rect(L, yh, inner, 14).fill('#f1f5f9');
-    doc.font('Helvetica-Bold').fontSize(8).fillColor('#0f172a');
-    columns.forEach((col, i) => doc.text(col, L + i * colW + 3, yh + 3, { width: colW - 4, lineBreak: false }));
-    doc.fillColor('#000000');
-  };
-  _drawTableHeader(y);
-  y += 14;
-
-  doc.font('Helvetica').fontSize(7.5);
-  let rowIdx = 0;
-  for (const row of rows) {
-    if (y > doc.page.height - 50) {
-      doc.addPage();
-      y = 40;
-      _drawTableHeader(y);
-      doc.font('Helvetica').fontSize(7.5);
-      y += 14; rowIdx = 0;
-    }
-    if (rowIdx % 2 === 1) doc.rect(L, y, inner, 12).fill('#f8fafc').stroke();
-    doc.fillColor('#334155');
-    columns.forEach((col, i) => {
-      const v = row[col] != null ? String(row[col]) : '';
-      doc.text(v, L + i * colW + 3, y + 2, { width: colW - 4, lineBreak: false });
-    });
-    doc.fillColor('#000000');
-    y += 12;
-    rowIdx++;
-  }
-
-  doc.end();
-}
-
-// Math.max(...arr) overflows the call stack above ~65k arguments — report
-// queries default to a 100k row limit, so reduce instead of spreading.
-const _maxOf = (arr) => arr.reduce((m, v) => (v > m ? v : m), -Infinity);
-
-// Format a stored bandwidth_usage MB value for display. Decimal thresholds are
-// deliberate: rx_mb is written as Mbps/8, i.e. 10^6-based, so rendering it
-// against 1024-based thresholds overstated every total by ~4.9%. Decimal is
-// also the right convention here — ISP quotas are quoted decimal.
-// A volume peak is per bucket, so the label has to say which bucket. Without an
-// aggregation the stored granularity is one minute.
-function _bucketNoun(agg) {
-  return agg === 'hour' ? 'Hour' : agg === 'day' ? 'Day'
-       : agg === 'week' ? 'Week' : agg === 'month' ? 'Month' : 'Minute';
-}
-
-function _fmtDataMB(mb) {
-  const n = +mb || 0;
-  if (n >= 1e6)  return (n / 1e6).toFixed(2) + ' TB';
-  if (n >= 1000) return (n / 1000).toFixed(2) + ' GB';
-  if (n >= 1)    return n.toFixed(1) + ' MB';
-  return (n * 1000).toFixed(0) + ' KB';
-}
-
-// Pair each Offline row with the next Online row to compute outage duration.
-// Single backward pass (rows are ts-ASC); null downtime = still offline.
-function _annotateDowntime(rows) {
-  let nextOnlineTs = null;
-  for (let i = rows.length - 1; i >= 0; i--) {
-    if (rows[i].connected) { nextOnlineTs = rows[i].ts; rows[i].downtime_ms = null; }
-    else rows[i].downtime_ms = nextOnlineTs != null ? nextOnlineTs - rows[i].ts : null;
-  }
-  return rows;
-}
-
-function _tsFmt(ts) {
-  if (!ts) return '';
-  const tz = Settings.load().displayTimezone;
-  if (tz) {
-    return new Intl.DateTimeFormat('sv-SE', {
-      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-    }).format(new Date(ts)).replace('T', ' ');
-  }
-  return new Date(ts).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-}
-function _fmtDuration(ms) {
-  if (!ms || ms < 0) return '';
-  const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h > 0) return h + 'h ' + m + 'm';
-  if (m > 0) return m + 'm ' + sec + 's';
-  return sec + 's';
-}
 
 // GET /api/reports/ping
+// ── Restore capability tokens ────────────────────────────────────────────────
+//
+// A restore is the one direction that still needs the ROUTER to reach US:
+// `/tool/fetch upload=yes` refuses anything but [s]ftp, so the file has to be
+// pulled by the router over HTTP. It cannot present a session cookie, so
+// `/api/backups/:id/raw` sits in _MODERN_PUBLIC — the same allow-list that
+// holds /api/users/setup, and CLAUDE.md is explicit about why that one is
+// dangerous.
+//
+// So it is constrained on every axis available. A token is:
+//   - 32 random bytes, minted only by an operator-initiated restore
+//   - bound to ONE backup id and ONE router
+//   - single use: redeemed on first read, whether or not the read succeeds
+//   - valid for 120 seconds
+//   - checked against the router's configured host, so a token that leaks off
+//     the box cannot be redeemed from anywhere else
+//
+// It can only ever READ one specific file. Nothing mints one on a schedule.
+const _RESTORE_TOKEN_TTL_MS = 120000;
+const _restoreTokens = new Map();
+
+function _mintRestoreToken(backupId, router) {
+  const token = crypto.randomBytes(32).toString('hex');
+  _restoreTokens.set(token, {
+    backupId: Number(backupId),
+    routerId: router.id,
+    host: router.host,
+    expires: Date.now() + _RESTORE_TOKEN_TTL_MS,
+  });
+  // Never let a failed restore leave a live token behind.
+  setTimeout(() => _restoreTokens.delete(token), _RESTORE_TOKEN_TTL_MS).unref();
+  return token;
+}
+
+/**
+ * Redeem a token, or explain why not.
+ *
+ * Deleted on the FIRST attempt regardless of outcome: a token that survives a
+ * rejected read is a token an attacker may keep guessing conditions against.
+ */
+function _redeemRestoreToken(token, remoteIp) {
+  const entry = _restoreTokens.get(String(token || ''));
+  if (!entry) return { ok: false, reason: 'unknown-token' };
+  _restoreTokens.delete(String(token));
+  if (Date.now() > entry.expires) return { ok: false, reason: 'expired' };
+  const ip = String(remoteIp || '').replace(/^::ffff:/, '');
+  if (ip !== entry.host) return { ok: false, reason: 'wrong-source' };
+  return { ok: true, entry };
+}
+
+/**
+ * The only unauthenticated backup route, and the only one the router itself
+ * calls. It serves one binary, once, to one address.
+ */
+app.get('/api/backups/:id/raw', (req, res) => {
+  const verdict = _redeemRestoreToken(req.query.t, req.ip || (req.socket && req.socket.remoteAddress));
+  if (!verdict.ok) {
+    audit.system().record({ action: 'backup.raw.denied', targetType: 'backup',
+      targetId: String(req.params.id), outcome: 'denied',
+      extra: { reason: verdict.reason } });
+    return res.status(403).json({ ok: false, error: 'forbidden' });
+  }
+  const row = db.getBackup(Number(req.params.id));
+  if (!row || row.id !== verdict.entry.backupId || row.router_id !== verdict.entry.routerId ||
+      !row.stem || row.pruned_at) {
+    return res.status(404).json({ ok: false, error: 'not found' });
+  }
+  try {
+    const buf = BackupStore.readBackup(row.dir, row.stem);
+    audit.system().record({ action: 'backup.raw', targetType: 'backup', scope: 'router',
+      routerId: row.router_id, targetId: String(row.id), extra: { bytes: buf.length } });
+    res.setHeader('Content-Type', 'application/octet-stream');
+    return res.send(buf);
+  } catch (e) {
+    console.error('%s', '[backup] raw read failed:', (e && e.message) || e);
+    return res.status(500).json({ ok: false, error: sanitizeErr(e) });
+  }
+});
+
+// ── Backup downloads ─────────────────────────────────────────────────────────
+//
+// Both halves need `router:write`, not read. An export describes the entire
+// network, and the binary carries every key on the device — so handing either
+// to a browser is closer to taking a copy of the router than to reading a page.
+//
+// The row is looked up by id and its router is read from the ROW, never from
+// the query: that is what makes Rbac.fromQuery('routerId') meaningful here,
+// because a caller who names a router they may write cannot then be handed a
+// backup belonging to a different one.
+function _sendBackupPart(req, res, part) {
+  const id = Number(req.params.id);
+  const row = db.getBackup(id);
+  if (!row || !row.stem || row.pruned_at) {
+    return res.status(404).json({ ok: false, error: 'not found' });
+  }
+  if (row.router_id !== String(req.query.routerId || '')) {
+    return res.status(404).json({ ok: false, error: 'not found' });
+  }
+  const router = Routers.getById(row.router_id);
+  const name = (router ? BackupStore.slugFor(router.label) : 'router') + '-' + row.stem;
+  try {
+    if (part === 'rsc') {
+      const text = BackupStore.readRsc(row.dir, row.stem);
+      audit.fromReq(req).record({ action: 'backup.download', targetType: 'backup',
+        scope: 'router', routerId: row.router_id, targetId: String(row.id),
+        extra: { part: 'rsc' } });
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="' + name + '.rsc"');
+      return res.send(text);
+    }
+    const buf = BackupStore.readBackup(row.dir, row.stem);
+    audit.fromReq(req).record({ action: 'backup.download', targetType: 'backup',
+      scope: 'router', routerId: row.router_id, targetId: String(row.id),
+      extra: { part: 'backup' } });
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + name + '.backup"');
+    return res.send(buf);
+  } catch (e) {
+    console.error('%s', '[backup] download failed:', (e && e.message) || e);
+    return res.status(500).json({ ok: false, error: sanitizeErr(e) });
+  }
+}
+
+app.get('/api/backups/:id/rsc',
+  Rbac.requirePerm('router:write', Rbac.fromQuery('routerId')),
+  (req, res) => _sendBackupPart(req, res, 'rsc'));
+
+app.get('/api/backups/:id/backup',
+  Rbac.requirePerm('router:write', Rbac.fromQuery('routerId')),
+  (req, res) => _sendBackupPart(req, res, 'backup'));
+
+// ── Scheduled report schedules (#60) ─────────────────────────────────────────
+//
+// Reading the list is router:history: anyone who can already export a report
+// may see what is scheduled, and visibility is itself a control — a mail-out
+// nobody can see is the bad case.
+//
+// Creating one is router:schedule, a write-level grant, because a schedule
+// mails router history to arbitrary third-party addresses indefinitely without
+// anyone signing in again. Not router:write, which WRITE_CONFERS_ALWAYS would
+// leak in from any write page at all.
+//
+// Every route that names a schedule reads its router from the ROW and 404s if
+// it does not match the query, the pattern _sendBackupPart establishes: naming
+// a router you may write must never reach a record belonging to another.
+
+const _scheduleLimiter = rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false });
+const _sendNowLimiter  = rateLimit({ windowMs: 60_000, max: 5,  standardHeaders: true, legacyHeaders: false });
+
+function _scheduleRow(req, res) {
+  const row = db.getReportSchedule(req.params.id);
+  if (!row || row.router_id !== String(req.query.routerId || '')) {
+    res.status(404).json({ ok: false, error: 'not found' });
+    return null;
+  }
+  return row;
+}
+
+app.get('/api/reports/schedules',
+  Rbac.requirePerm('router:history', Rbac.fromQuery('routerId')), (req, res) => {
+    const routerId = String(req.query.routerId || '');
+    if (!routerId) return res.status(400).json({ ok: false, error: 'routerId required' });
+    const cfg = Settings.load();
+    res.json({
+      ok: true,
+      schedules: db.listReportSchedulesFor(routerId).map((row) => {
+        const pub = ReportSchedules.toPublic(row);
+        // The page shows when each last ran, so the list is useful without
+        // opening the history for every row in turn.
+        const last = db.listReportRuns(row.id, 1)[0];
+        pub.lastRun = last ? { ran_at: last.ran_at, outcome: last.outcome } : null;
+        return pub;
+      }),
+      // So the page can say "this will never send" at creation time rather than
+      // in a run row a month later.
+      smtpReady: !!(cfg.smtpHost && cfg.smtpFrom),
+      permitted: Rbac.can(req.authSession, 'router:schedule', routerId),
+      sections: Reports.SECTIONS,
+      needsInterface: Reports.NEEDS_INTERFACE,
+    });
+  });
+
+app.post('/api/reports/schedules', _scheduleLimiter,
+  Rbac.requirePerm('router:schedule', Rbac.fromBody('routerId')), (req, res) => {
+    const routerId = String((req.body && req.body.routerId) || '');
+    if (!Routers.getById(routerId)) return res.status(404).json({ ok: false, error: 'not found' });
+    try {
+      const row = ReportSchedules.validate(req.body, {
+        id: crypto.randomUUID(),
+        routerId,
+        createdBy: req.authSession ? req.authSession.userId : null,
+      });
+      const saved = db.upsertReportSchedule(row);
+      audit.fromReq(req).record({ action: 'report.schedule.create', targetType: 'report-schedule',
+        scope: 'router', routerId, targetId: row.id, targetName: row.name,
+        extra: { frequency: row.frequency, sections: row.sections, recipients: row.recipients } });
+      res.json({ ok: true, schedule: ReportSchedules.toPublic(saved) });
+    } catch (e) {
+      res.status(400).json({ ok: false, error: sanitizeErr(e) });
+    }
+  });
+
+app.put('/api/reports/schedules/:id', _scheduleLimiter,
+  Rbac.requirePerm('router:schedule', Rbac.fromQuery('routerId')), (req, res) => {
+    const row = _scheduleRow(req, res);
+    if (!row) return undefined;
+    try {
+      const next = ReportSchedules.validate(req.body, {
+        id: row.id, routerId: row.router_id,
+        createdBy: row.created_by, createdAt: row.created_at,
+      });
+      const saved = db.upsertReportSchedule(next);
+      audit.fromReq(req).record({ action: 'report.schedule.update', targetType: 'report-schedule',
+        scope: 'router', routerId: row.router_id, targetId: row.id, targetName: next.name,
+        extra: { frequency: next.frequency, sections: next.sections, recipients: next.recipients,
+                 enabled: next.enabled } });
+      res.json({ ok: true, schedule: ReportSchedules.toPublic(saved) });
+    } catch (e) {
+      res.status(400).json({ ok: false, error: sanitizeErr(e) });
+    }
+  });
+
+app.delete('/api/reports/schedules/:id', _scheduleLimiter,
+  Rbac.requirePerm('router:schedule', Rbac.fromQuery('routerId')), (req, res) => {
+    const row = _scheduleRow(req, res);
+    if (!row) return undefined;
+    db.deleteReportSchedule(row.id);
+    audit.fromReq(req).record({ action: 'report.schedule.delete', targetType: 'report-schedule',
+      scope: 'router', routerId: row.router_id, targetId: row.id, targetName: row.name });
+    res.json({ ok: true });
+  });
+
+app.post('/api/reports/schedules/:id/run', _sendNowLimiter,
+  Rbac.requirePerm('router:schedule', Rbac.fromQuery('routerId')), async (req, res) => {
+    const row = _scheduleRow(req, res);
+    if (!row) return undefined;
+    const actor = req.authSession ? req.authSession.username : null;
+    const result = await ReportScheduler.runNow(row, { actor });
+    audit.fromReq(req).record({ action: 'report.schedule.send', targetType: 'report-schedule',
+      scope: 'router', routerId: row.router_id, targetId: row.id, targetName: row.name,
+      outcome: result.outcome === 'sent' ? 'ok' : 'error',
+      extra: { outcome: result.outcome, bytes: result.bytes, sections: result.sections } });
+    res.json({ ok: result.outcome === 'sent', outcome: result.outcome,
+               error: result.error || null });
+  });
+
+app.get('/api/reports/schedules/:id/runs',
+  Rbac.requirePerm('router:history', Rbac.fromQuery('routerId')), (req, res) => {
+    const row = _scheduleRow(req, res);
+    if (!row) return undefined;
+    res.json({ ok: true, runs: db.listReportRuns(row.id, 20) });
+  });
+
 app.get('/api/reports/ping', Rbac.requirePerm('router:history', Rbac.fromQuery('routerId')), (req, res) => {
   const { routerId, from, to, aggregate } = _parseReportParams(req.query);
   if (!routerId) return res.status(400).json({ ok: false, error: 'routerId required' });
@@ -3343,41 +3514,14 @@ app.get('/api/reports/ping', Rbac.requirePerm('router:history', Rbac.fromQuery('
 app.get('/api/reports/ping/export', Rbac.requirePerm('router:history', Rbac.fromQuery('routerId')), (req, res) => {
   const { routerId, from, to, aggregate } = _parseReportParams(req.query);
   if (!routerId) return res.status(400).json({ ok: false, error: 'routerId required' });
-  const rows = aggregate
-    ? db.queryPingSamplesAgg(routerId, from, to, aggregate)
-    : db.queryPingSamples(routerId, from, to);
-  const fmt  = (req.query.format || 'csv').toLowerCase();
-  const cols  = ['ts', 'target', 'rtt_ms', 'loss_pct'];
-  const label = rows.map(r => ({ ...r, ts: _tsFmt(r.ts) }));
+  const fmt = (req.query.format || 'csv').toLowerCase();
+  const built = Reports.build('ping', { routerId, from, to, aggregate });
   if (fmt === 'pdf') {
-    const rtts   = rows.filter(r => r.rtt_ms != null).map(r => r.rtt_ms);
-    const losses = rows.map(r => r.loss_pct);
-    const avgRtt = rtts.length   ? (rtts.reduce((a,b)=>a+b,0)/rtts.length).toFixed(1) : '—';
-    const maxRtt = rtts.length   ? _maxOf(rtts).toFixed(1) : '—';
-    const avgLoss= losses.length ? (losses.reduce((a,b)=>a+b,0)/losses.length).toFixed(1) : '—';
-    const uptime = losses.length ? ((losses.filter(l=>l<1).length/losses.length)*100).toFixed(1)+'%' : '—';
-    const step   = rows.length > 150 ? Math.ceil(rows.length / 150) : 1;
-    const sub    = rows.filter((_,i)=>i%step===0);
-    const rtr    = Routers.getById(routerId);
-    return _toPdf('Ping Stability Report', ['Timestamp', 'Target', 'RTT (ms)', 'Loss (%)'],
-      label.map(r => ({ Timestamp: r.ts, Target: r.target, 'RTT (ms)': r.rtt_ms ?? '', 'Loss (%)': r.loss_pct })), res, {
-        router: rtr ? (rtr.label || rtr.host) : routerId, from, to,
-        stats: [
-          { label: 'Uptime',   value: uptime },
-          { label: 'Avg RTT',  value: avgRtt !== '—' ? avgRtt+' ms' : '—' },
-          { label: 'Max RTT',  value: maxRtt !== '—' ? maxRtt+' ms' : '—' },
-          { label: 'Avg Loss', value: avgLoss !== '—' ? avgLoss+'%' : '—' },
-          { label: 'Samples',  value: rows.length.toLocaleString() },
-        ],
-        chartData: { yLabel: 'ms / %', lines: [
-          { label: 'RTT ms',  color: '#38bdf8', pts: sub.filter(r=>r.rtt_ms!=null).map(r=>({ x:r.ts, y:r.rtt_ms })) },
-          { label: 'Loss %',  color: '#f87171', pts: sub.map(r=>({ x:r.ts, y:r.loss_pct })) },
-        ]},
-      });
+    return _toPdf(built.title, built.pdf.columns, built.pdf.rows, res, built.pdf.meta);
   }
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="ping-report.csv"');
-  res.send(_toCsv(label, cols));
+  res.setHeader('Content-Disposition', `attachment; filename="${built.csvFilename}"`);
+  res.send(_toCsv(built.csv.rows, built.csv.columns));
 });
 
 // GET /api/reports/traffic
@@ -3394,21 +3538,8 @@ app.get('/api/reports/ping/export', Rbac.requirePerm('router:history', Rbac.from
 // Utilisation is deliberately NOT clamped to 100. The live dashboard card does
 // clamp, which is what hides a misconfigured capacity — a link reporting 151%
 // is telling you the configured figure is wrong, and that is worth seeing.
-function _ifaceSummary(routerId, iface, from, to) {
-  const t = db.queryTrafficSummary(routerId, iface, from, to, 95);
-  const b = db.queryBandwidthSummary(routerId, iface, from, to);
-  const r = Routers.getById(routerId);
-  const capDown = Math.max(1, parseInt(r && r.bwDownMbps, 10) || 1000);
-  const capUp   = Math.max(1, parseInt(r && r.bwUpMbps,   10) || 1000);
-  const pct = (v, cap) => (v == null ? null : +((v / cap) * 100).toFixed(1));
-  return {
-    ...t, ...b,
-    capacityDownMbps: capDown,
-    capacityUpMbps:   capUp,
-    rxPeakPct: pct(t.rxMaxMbps, capDown), txPeakPct: pct(t.txMaxMbps, capUp),
-    rxP95Pct:  pct(t.rxP95Mbps, capDown), txP95Pct:  pct(t.txP95Mbps, capUp),
-  };
-}
+// Moved to src/reports/build.js, where the export path needs it too.
+const _ifaceSummary = Reports.ifaceSummary;
 
 app.get('/api/reports/traffic', Rbac.requirePerm('router:history', Rbac.fromQuery('routerId')), (req, res) => {
   const { routerId, from, to, aggregate } = _parseReportParams(req.query);
@@ -3429,48 +3560,14 @@ app.get('/api/reports/traffic/export', Rbac.requirePerm('router:history', Rbac.f
   if (!routerId) return res.status(400).json({ ok: false, error: 'routerId required' });
   const iface = req.query.interface || '';
   if (!iface) return res.status(400).json({ ok: false, error: 'interface required for export' });
-  const rows  = aggregate
-    ? db.queryTrafficSamplesAgg(routerId, iface, from, to, aggregate)
-    : db.queryTrafficSamples(routerId, iface, from, to);
-  const fmt   = (req.query.format || 'csv').toLowerCase();
-  const cols  = ['ts', 'interface', 'rx_mbps', 'tx_mbps'];
-  const label = rows.map(r => ({ ...r, ts: _tsFmt(r.ts), rx_mbps: +r.rx_mbps.toFixed(1), tx_mbps: +r.tx_mbps.toFixed(1) }));
+  const fmt = (req.query.format || 'csv').toLowerCase();
+  const built = Reports.build('traffic', { routerId, iface, from, to, aggregate });
   if (fmt === 'pdf') {
-    // Shared summary rather than reducing `rows`: those are averages once an
-    // aggregation is selected, so a max over them is a peak of averages, and
-    // they are capped by the query LIMIT.
-    const s     = _ifaceSummary(routerId, iface, from, to);
-    const n1    = (v) => (v == null ? '—' : v.toFixed(1));
-    const avgRx = n1(s.rxAvgMbps);
-    const avgTx = n1(s.txAvgMbps);
-    const peakRx= n1(s.rxMaxMbps);
-    const peakTx= n1(s.txMaxMbps);
-    const step  = rows.length > 150 ? Math.ceil(rows.length / 150) : 1;
-    const sub   = rows.filter((_,i)=>i%step===0);
-    const rtr   = Routers.getById(routerId);
-    return _toPdf('Traffic History Report', ['Timestamp', 'Interface', 'RX (Mbps)', 'TX (Mbps)'],
-      label.map(r => ({ Timestamp: r.ts, Interface: r.interface, 'RX (Mbps)': r.rx_mbps, 'TX (Mbps)': r.tx_mbps })), res, {
-        router: rtr ? (rtr.label || rtr.host) : routerId, from, to,
-        stats: [
-          { label: 'Peak RX',   value: peakRx !== '—' ? peakRx+' Mbps' : '—' },
-          { label: 'Peak TX',   value: peakTx !== '—' ? peakTx+' Mbps' : '—' },
-          { label: 'Avg RX',    value: avgRx  !== '—' ? avgRx +' Mbps' : '—' },
-          { label: 'Avg TX',    value: avgTx  !== '—' ? avgTx +' Mbps' : '—' },
-          { label: '95th RX',   value: n1(s.rxP95Mbps) !== '—' ? n1(s.rxP95Mbps)+' Mbps' : '—' },
-          // Utilisation against the router's configured line capacity, not
-          // clamped at 100 — over-capacity is the signal worth seeing.
-          { label: 'Peak Util', value: s.rxPeakPct == null ? '—'
-                                  : Math.round(s.rxPeakPct)+'% / '+Math.round(s.txPeakPct)+'%' },
-        ],
-        chartData: { yLabel: 'Mbps', lines: [
-          { label: 'RX Mbps', color: '#38bdf8', pts: sub.map(r=>({ x:r.ts, y:r.rx_mbps })) },
-          { label: 'TX Mbps', color: '#4ade80', pts: sub.map(r=>({ x:r.ts, y:r.tx_mbps })) },
-        ]},
-      });
+    return _toPdf(built.title, built.pdf.columns, built.pdf.rows, res, built.pdf.meta);
   }
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="traffic-report.csv"');
-  res.send(_toCsv(label, cols));
+  res.setHeader('Content-Disposition', `attachment; filename="${built.csvFilename}"`);
+  res.send(_toCsv(built.csv.rows, built.csv.columns));
 });
 
 // GET /api/reports/bandwidth
@@ -3493,43 +3590,14 @@ app.get('/api/reports/bandwidth/export', Rbac.requirePerm('router:history', Rbac
   if (!routerId) return res.status(400).json({ ok: false, error: 'routerId required' });
   const iface = req.query.interface || '';
   if (!iface) return res.status(400).json({ ok: false, error: 'interface required for export' });
-  const rows  = aggregate
-    ? db.queryBandwidthSamplesAgg(routerId, iface, from, to, aggregate)
-    : db.queryBandwidthSamples(routerId, iface, from, to);
-  const fmt   = (req.query.format || 'csv').toLowerCase();
-  const cols  = ['ts', 'interface', 'rx_mb', 'tx_mb'];
-  const label = rows.map(r => ({ ...r, ts: _tsFmt(r.ts), rx_mb: +r.rx_mb.toFixed(1), tx_mb: +r.tx_mb.toFixed(1) }));
+  const fmt = (req.query.format || 'csv').toLowerCase();
+  const built = Reports.build('bandwidth', { routerId, iface, from, to, aggregate });
   if (fmt === 'pdf') {
-    // Same summary the on-screen cards use, so the two cannot disagree. Totals
-    // come from SQL over the whole range rather than from `rows`, which is
-    // capped by the query LIMIT. Volume only here — rates belong to the traffic
-    // report, so that the two reports stay about different things.
-    const s      = _ifaceSummary(routerId, iface, from, to);
-    const step   = rows.length > 150 ? Math.ceil(rows.length / 150) : 1;
-    const sub    = rows.filter((_,i)=>i%step===0);
-    const rtr    = Routers.getById(routerId);
-    return _toPdf('Bandwidth Usage Report', ['Timestamp', 'Interface', 'Download (MB)', 'Upload (MB)'],
-      label.map(r => ({ Timestamp: r.ts, Interface: r.interface, 'Download (MB)': r.rx_mb, 'Upload (MB)': r.tx_mb })), res, {
-        router: rtr ? (rtr.label || rtr.host) : routerId, from, to,
-        // Six boxes maximum — _toPdf renders them with lineBreak:false, so a
-        // seventh starts truncating values rather than wrapping.
-        stats: [
-          { label: 'Total Download', value: _fmtDataMB(s.rxTotalMb) },
-          { label: 'Total Upload',   value: _fmtDataMB(s.txTotalMb) },
-          { label: 'Total',          value: _fmtDataMB((s.rxTotalMb || 0) + (s.txTotalMb || 0)) },
-          { label: 'Busiest ' + _bucketNoun(aggregate) + ' ↓', value: s.rxMaxMb == null ? '—' : _fmtDataMB(s.rxMaxMb) },
-          { label: 'Busiest ' + _bucketNoun(aggregate) + ' ↑', value: s.txMaxMb == null ? '—' : _fmtDataMB(s.txMaxMb) },
-          { label: aggregate ? 'Buckets' : 'Samples', value: s.samples.toLocaleString() },
-        ],
-        chartData: { yLabel: 'MB/min', lines: [
-          { label: 'Download MB', color: '#38bdf8', pts: sub.map(r=>({ x:r.ts, y:r.rx_mb })) },
-          { label: 'Upload MB',   color: '#4ade80', pts: sub.map(r=>({ x:r.ts, y:r.tx_mb })) },
-        ]},
-      });
+    return _toPdf(built.title, built.pdf.columns, built.pdf.rows, res, built.pdf.meta);
   }
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="bandwidth-report.csv"');
-  res.send(_toCsv(label, cols));
+  res.setHeader('Content-Disposition', `attachment; filename="${built.csvFilename}"`);
+  res.send(_toCsv(built.csv.rows, built.csv.columns));
 });
 
 // GET /api/reports/alerts
@@ -3655,38 +3723,16 @@ app.get('/api/reports/alerts', Rbac.requirePerm('router:history', Rbac.fromQuery
 
 // GET /api/reports/alerts/export
 app.get('/api/reports/alerts/export', Rbac.requirePerm('router:history', Rbac.fromQuery('routerId')), (req, res) => {
-  const { routerId, from, to } = _parseReportParams(req.query);
+  const { routerId, from, to, aggregate } = _parseReportParams(req.query);
   if (!routerId) return res.status(400).json({ ok: false, error: 'routerId required' });
-  const rows  = db.queryAlertEvents(routerId, from, to);
-  const fmt   = (req.query.format || 'csv').toLowerCase();
-  const cols  = ['fired_at', 'alert_type', 'subject', 'detail', 'resolved_at', 'down_time'];
-  const label = rows.map(r => ({
-    ...r,
-    fired_at:    _tsFmt(r.fired_at),
-    resolved_at: _tsFmt(r.resolved_at),
-    down_time:   r.resolved_at ? _fmtDuration(r.resolved_at - r.fired_at) : '',
-  }));
+  const fmt = (req.query.format || 'csv').toLowerCase();
+  const built = Reports.build('alerts', { routerId, from, to, aggregate });
   if (fmt === 'pdf') {
-    const open     = rows.filter(r => !r.resolved_at).length;
-    const resolved = rows.filter(r =>  r.resolved_at).length;
-    const typeCounts = {};
-    rows.forEach(r => { typeCounts[r.alert_type] = (typeCounts[r.alert_type]||0)+1; });
-    const topEntry = Object.entries(typeCounts).sort((a,b)=>b[1]-a[1])[0];
-    const rtr = Routers.getById(routerId);
-    return _toPdf('Alert Events Report', ['Fired At', 'Type', 'Subject', 'Detail', 'Resolved At', 'Down Time'],
-      label.map(r => ({ 'Fired At': r.fired_at, Type: r.alert_type, Subject: r.subject || '', Detail: r.detail || '', 'Resolved At': r.resolved_at, 'Down Time': r.down_time || '—' })), res, {
-        router: rtr ? (rtr.label || rtr.host) : routerId, from, to,
-        stats: [
-          { label: 'Total',    value: rows.length.toLocaleString() },
-          { label: 'Open',     value: open.toLocaleString() },
-          { label: 'Resolved', value: resolved.toLocaleString() },
-          { label: 'Top Type', value: topEntry ? topEntry[0] : '—' },
-        ],
-      });
+    return _toPdf(built.title, built.pdf.columns, built.pdf.rows, res, built.pdf.meta);
   }
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="alerts-report.csv"');
-  res.send(_toCsv(label, cols));
+  res.setHeader('Content-Disposition', `attachment; filename="${built.csvFilename}"`);
+  res.send(_toCsv(built.csv.rows, built.csv.columns));
 });
 
 // GET /api/reports/connectivity
@@ -3700,38 +3746,16 @@ app.get('/api/reports/connectivity', Rbac.requirePerm('router:history', Rbac.fro
 
 // GET /api/reports/connectivity/export
 app.get('/api/reports/connectivity/export', Rbac.requirePerm('router:history', Rbac.fromQuery('routerId')), (req, res) => {
-  const { routerId, from, to } = _parseReportParams(req.query);
+  const { routerId, from, to, aggregate } = _parseReportParams(req.query);
   if (!routerId) return res.status(400).json({ ok: false, error: 'routerId required' });
-  const rows = _annotateDowntime(db.queryConnectivityEvents(routerId, from, to));
-  const fmt  = (req.query.format || 'csv').toLowerCase();
-  const cols = ['ts', 'status', 'down_duration'];
-  const label = rows.map(r => ({
-    ts:           _tsFmt(r.ts),
-    status:       r.connected ? 'Online' : 'Offline',
-    down_duration: (!r.connected && r.downtime_ms != null) ? _fmtDuration(r.downtime_ms)
-                 : (!r.connected)                          ? 'Ongoing'
-                 : '',
-  }));
+  const fmt = (req.query.format || 'csv').toLowerCase();
+  const built = Reports.build('connectivity', { routerId, from, to, aggregate });
   if (fmt === 'pdf') {
-    const offlineRows   = rows.filter(r => !r.connected);
-    const resolvedMs    = offlineRows.filter(r => r.downtime_ms != null).map(r => r.downtime_ms);
-    const totalDownMs   = resolvedMs.reduce((a, b) => a + b, 0);
-    const longestDownMs = resolvedMs.length ? _maxOf(resolvedMs) : null;
-    const rtr = Routers.getById(routerId);
-    return _toPdf('Connectivity Report', ['Timestamp', 'Status', 'Down Duration'],
-      label.map(r => ({ Timestamp: r.ts, Status: r.status, 'Down Duration': r.down_duration || '—' })), res, {
-        router: rtr ? (rtr.label || rtr.host) : routerId, from, to,
-        stats: [
-          { label: 'Total Events',   value: rows.length.toLocaleString() },
-          { label: 'Offline Events', value: offlineRows.length.toLocaleString() },
-          { label: 'Total Downtime', value: totalDownMs ? _fmtDuration(totalDownMs) : '—' },
-          { label: 'Longest Outage', value: longestDownMs != null ? _fmtDuration(longestDownMs) : '—' },
-        ],
-      });
+    return _toPdf(built.title, built.pdf.columns, built.pdf.rows, res, built.pdf.meta);
   }
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="connectivity-report.csv"');
-  res.send(_toCsv(label, cols));
+  res.setHeader('Content-Disposition', `attachment; filename="${built.csvFilename}"`);
+  res.send(_toCsv(built.csv.rows, built.csv.columns));
 });
 
 // ── Historical data cleanup ───────────────────────────────────────────────────
@@ -3816,9 +3840,37 @@ function _auditQuery(req) {
 // Any signed-in user may reach the page; what they SEE is decided per row, and a
 // session with neither global administration nor router history gets an empty
 // list rather than a 403 — the page is legitimately empty for them.
+/**
+ * Router ids on audit rows, resolved to the labels an operator recognises.
+ *
+ * Built once per request rather than per row: a page is 200 events and most of
+ * them name the same handful of routers.
+ *
+ * Discloses nothing new. Every row here has already passed the permission scope
+ * in _auditQuery, and each one already carries the router id — this only turns
+ * an opaque uuid into the name that identifies the same device.
+ *
+ * A deleted router resolves to nothing, and the caller decides what that means:
+ * the table keeps the old generic "router" marker, the export keeps the id,
+ * because an export is the place where a dangling reference still has to be
+ * traceable.
+ */
+function _auditRouterNames(rows) {
+  const names = new Map();
+  for (const r of rows) {
+    const id = r.router_id;
+    if (!id || names.has(id)) continue;
+    const router = Routers.getById(id);
+    names.set(id, router ? (router.label || router.host || '') : '');
+  }
+  return names;
+}
+
 app.get('/api/audit', (req, res) => {
   try {
     const out = db.queryAuditEvents(_auditQuery(req));
+    const names = _auditRouterNames(out.rows || []);
+    out.rows = (out.rows || []).map(r => ({ ...r, router_name: names.get(r.router_id) || '' }));
     res.json({ ok: true, ...out, facets: db.auditFacets() });
   } catch (e) {
     console.error('[audit] query failed:', sanitizeErr(e));
@@ -3832,9 +3884,14 @@ app.get('/api/audit/export', (req, res) => {
     // Export is a snapshot of the filtered view, not the page — but still
     // bounded, because a PDF has no row cap of its own.
     const { rows } = db.queryAuditEvents({ ...q, limit: 1000, offset: 0 });
+    const names = _auditRouterNames(rows);
     const flat = rows.map(r => ({
       ts: _tsFmt(r.ts), actor: r.actor_name, ip: r.actor_ip || '', action: r.action,
-      target: r.target_name || r.target_id || '', router: r.router_id || '',
+      target: r.target_name || r.target_id || '',
+      // The name where the router still exists, the id where it does not — a
+      // bare uuid told the reader nothing, but a dangling reference still has to
+      // be followable, which is exactly what an export is for.
+      router: names.get(r.router_id) || r.router_id || '',
       outcome: r.outcome, detail: r.detail || '',
     }));
     const cols = ['ts', 'actor', 'ip', 'action', 'target', 'router', 'outcome', 'detail'];
@@ -4073,6 +4130,7 @@ async function sendInitialState(socket, entry) {
   // Before any replay: a card for a disabled collector must be marked as such
   // before it would otherwise start its stale countdown.
   socket.emit('collection:config', _collectionPayload(entry.session.routerId, entry.session));
+  socket.emit('collection:status', _dormancyPayload(entry));
 
   socket.emit('traffic:history', {
     ifName: s.DEFAULT_IF,
@@ -4227,6 +4285,7 @@ async function sendInitialState(socket, entry) {
   if (s.rosusers.lastPayload && _mayReplay(socket, 'rosusers')) socket.emit('rosusers:update', s.rosusers.lastPayload);
   if (s.queues.lastPayload   && _mayReplay(socket, 'queues'))   socket.emit('queues:update',   s.queues.lastPayload);
   if (s.wan.lastPayload      && _mayReplay(socket, 'wan'))      socket.emit('wan:update',      s.wan.lastPayload);
+  if (s.wifi.lastPayload     && _mayReplay(socket, 'wifi'))     socket.emit('wifi:update',     s.wifi.lastPayload);
 
   socket.emit('settings:pages', _pageSettings(_ps));
 
@@ -4242,6 +4301,155 @@ async function sendInitialState(socket, entry) {
 
   const logHistory = s.logs.getHistory();
   if (logHistory.length && _mayReplay(socket, 'logs')) socket.emit('logs:history', logHistory);
+}
+
+// ── Collector dormancy ────────────────────────────────────────────────────────
+/*
+ * A collector with nothing to report should stop holding a channel open, and the
+ * card should say so rather than render a blank table that reads as a fault.
+ *
+ * One supervisor per session rather than a backoff loop inside each collector:
+ * emptiness is declared once in the registry (`emptyKey`), so the judgement reads
+ * `lastPayload` generically and no collector grows an emptiness hook.
+ *
+ * Three gates now decide whether a collector runs — idle (nobody on this router),
+ * page rooms (nobody on its page) and dormancy. They are layered, not competing:
+ * dormancy is a VETO consulted inside _resumeCollector(), which is the only place
+ * anything is resumed. _idleResume() calling resume() directly is precisely what
+ * would wake a dormant collector on the next socket join.
+ */
+const _DORMANCY_TICK_MS = 15000;
+const _DORMANCY_DEFS    = _COLLECTOR_DEFS.filter(c => c.emptyKey && c.disableable);
+
+function _dormancyState(entry, key) {
+  if (!entry._dormancy) entry._dormancy = new Map();
+  let st = entry._dormancy.get(key);
+  if (!st) { st = createDormancyState(); entry._dormancy.set(key, st); }
+  return st;
+}
+
+function _isDormant(entry, key) {
+  const st = entry && entry._dormancy && entry._dormancy.get(key);
+  return !!(st && st.dormant);
+}
+
+/**
+ * The one place a collector is resumed. Every caller — _idleResume,
+ * _updatePageStream, the reconnect handler — goes through here so a gate that
+ * knows nothing about dormancy cannot undo it.
+ */
+function _resumeCollector(session, entry, key) {
+  const coll = session && session[key];
+  if (!coll || typeof coll.resume !== 'function') return;
+  if (_isDormant(entry, key)) return;
+  coll.resume();
+}
+
+/**
+ * Look again at a collector we put to sleep. probe() where one exists — it clears
+ * a capability latch that resume() deliberately honours — otherwise resume plus
+ * refreshNow() where that exists, so the answer arrives on this tick rather than
+ * one poll interval later.
+ */
+function _probeCollector(coll) {
+  if (!coll) return;
+  if (typeof coll.probe === 'function') { coll.probe(); return; }
+  if (typeof coll.resume === 'function') coll.resume();
+  if (typeof coll.refreshNow === 'function') {
+    Promise.resolve(coll.refreshNow()).catch(() => { /* the collector reports its own errors */ });
+  }
+}
+
+function _dormancyPayload(entry) {
+  const dormant = [];
+  if (entry._dormancy) for (const [k, st] of entry._dormancy) if (st.dormant) dormant.push(k);
+  return { routerId: entry.session.routerId, dormant };
+}
+
+function _emitDormancy(entry) {
+  if (entry.routerIo) entry.routerIo.emit('collection:status', _dormancyPayload(entry));
+}
+
+function _dormancyTick(entry) {
+  const session = entry && entry.session;
+  if (!session || !entry.startupReady || session._destroyed) return;
+  // Judge only while somebody is watching this router. A suspended collector
+  // emits nothing, so an idle session would otherwise read as universally empty
+  // and put the whole set to sleep for a reason that has nothing to do with the
+  // router.
+  const rid = session.routerId;
+  if ((io.sockets.adapter.rooms.get('router-' + rid)?.size || 0) === 0) return;
+
+  const now = Date.now();
+  let changed = false;
+
+  for (const def of _DORMANCY_DEFS) {
+    if (!session.collection.enabled[def.key]) continue;   // the user turned it off
+    const coll = session[def.sessionProp];
+    if (!coll) continue;
+    const st = _dormancyState(entry, def.key);
+    const p  = coll.lastPayload;
+
+    if (p) {
+      const verdict = st.observe({
+        ts:          p.ts,
+        empty:       payloadEmpty(p, def.emptyKey),
+        unsupported: p.available === false,
+      }, now);
+      if (verdict === 'sleep') {
+        changed = true;
+        if (typeof coll.suspend === 'function') coll.suspend();
+        console.log('%s', `[${session.ros.routerLabel}][dormancy] ${def.key} asleep — ` +
+          (p.available === false ? 'not supported on this router' : 'nothing to report'));
+      } else if (verdict === 'wake') {
+        changed = true;
+        console.log('%s', `[${session.ros.routerLabel}][dormancy] ${def.key} awake`);
+        _resumeCollector(session, entry, def.key);
+      }
+    }
+
+    if (st.dueForProbe(now)) { st.markProbed(now); _probeCollector(coll); }
+  }
+
+  if (changed) _emitDormancy(entry);
+}
+
+function _startDormancy(entry) {
+  if (entry._dormancyTimer) return;
+  entry._dormancyTimer = setInterval(() => {
+    try { _dormancyTick(entry); }
+    catch (e) { console.error('%s', '[dormancy] tick failed:', (e && e.message) || e); }
+  }, _DORMANCY_TICK_MS);
+  if (entry._dormancyTimer.unref) entry._dormancyTimer.unref();
+}
+
+/**
+ * Clear every verdict and wake whatever was asleep. A reconnect may follow a
+ * RouterOS upgrade or a package install, which is exactly the event that turns an
+ * "unknown command" into a working menu.
+ */
+function _resetDormancy(session, entry) {
+  if (!entry || !entry._dormancy) return;
+  let had = false;
+  for (const [key, st] of entry._dormancy) {
+    if (st.dormant) { had = true; _probeCollector(session && session[key]); }
+    st.reset();
+  }
+  if (had) _emitDormancy(entry);
+}
+
+/**
+ * Somebody just opened the page this collector feeds. That is the cheapest and
+ * most timely re-probe there is — a user who has just added a netwatch host opens
+ * the NetWatch page next — so it pre-empts the backoff entirely.
+ */
+function _wakeForFocus(session, entry, key) {
+  if (!_isDormant(entry, key)) return false;
+  const st = entry._dormancy.get(key);
+  st.reset();
+  _probeCollector(session && session[key]);
+  _emitDormancy(entry);
+  return true;
 }
 
 function _idleSuspend(session, entry) {
@@ -4263,6 +4471,7 @@ function _idleSuspend(session, entry) {
   session.rosusers.suspend();
   session.queues.suspend();
   session.wan.suspend();
+  session.wifi.suspend();
   session.ping.suspend();
   session.talkers.suspend();
   session.dhcpNetworks.suspend();
@@ -4270,9 +4479,12 @@ function _idleSuspend(session, entry) {
 
 function _idleResume(session, entry) {
   if (!session || !entry.startupReady) return;
-  session.conns.resume();
-  session.ifStatus.resume();
-  session.system.resume();
+  // Every resume goes through _resumeCollector so dormancy can veto it. Calling
+  // resume() directly here is what would wake a collector we had just put to
+  // sleep, on the next socket join, forever.
+  _resumeCollector(session, entry, 'conns');
+  _resumeCollector(session, entry, 'ifStatus');
+  _resumeCollector(session, entry, 'system');
   // Every page-scoped collector is resumed HERE and only here, from room
   // occupancy — so a collector whose page nobody is looking at stays suspended
   // even though a browser is connected. Resuming vlans/ppp/bridges/dns/capsman/
@@ -4282,9 +4494,9 @@ function _idleResume(session, entry) {
   // These three genuinely have no page of their own: ping feeds the dashboard
   // gauge and the alerter, talkers and dhcpNetworks feed dashboard cards. They
   // are suspended by name above and must be resumed by name.
-  session.ping.resume();
-  session.talkers.resume();
-  session.dhcpNetworks.resume();
+  _resumeCollector(session, entry, 'ping');
+  _resumeCollector(session, entry, 'talkers');
+  _resumeCollector(session, entry, 'dhcpNetworks');
 }
 
 // Room-driven suspend/resume for the page-aware collectors: each keeps
@@ -4340,7 +4552,7 @@ function _updatePageStream(session, entry, which) {
   const rid = session.routerId;
   const viewers = _PAGE_STREAM_ROOMS[which].reduce(
     (n, room) => n + (io.sockets.adapter.rooms.get('router-' + rid + '-' + room)?.size || 0), 0);
-  if (viewers > 0) session[which].resume(); else session[which].suspend();
+  if (viewers > 0) _resumeCollector(session, entry, which); else session[which].suspend();
 }
 
 function _updateAllPageStreams(session, entry) {
@@ -4380,6 +4592,10 @@ function _emitDiagnostics(session, rid, socket) {
     // they mark the tables stale and the tick reads them.
     { name: 'queues',       streams: (s.queues._listens || []).filter(l => l && l.open).length },
     { name: 'wan',          streams: s.wan._listen && s.wan._listen.open ? 1 : 0 },
+    // One channel when streaming, and only if this build offers /listen on the
+    // stack it latched — the wifi menu does not advertise one, so it may be 0
+    // on a router that is streaming everything else.
+    { name: 'wifi',         streams: s.wifi._listen && s.wifi._listen.open ? 1 : 0 },
   ];
   const total = collectors.reduce((sum, c) => sum + c.streams, 0);
   // Geo availability rides along here so a failed geoip-lite load is visible in
@@ -4493,6 +4709,12 @@ io.on('connection', (socket) => {
     const e = rid ? _routerSessions.get(rid) : null;
     if (!e || !e.session) return;
     const s = e.session;
+    // Opening a page is the cheapest re-probe available and by far the most
+    // timely: somebody who has just configured a netwatch host opens NetWatch
+    // next. It pre-empts the backoff entirely, which is what lets the backoff be
+    // slow enough to be free. Cleared BEFORE _updatePageStream, or the veto would
+    // still be in place when it tries to resume.
+    for (const ck of Pages.collectorsFor(name)) _wakeForFocus(s, e, ck);
     if (_PAGE_STREAM_ROOMS[name]) {
       _updatePageStream(s, e, name);
       if (s[name] && s[name].lastPayload)
@@ -4551,6 +4773,9 @@ io.on('connection', (socket) => {
     const e = rid ? _routerSessions.get(rid) : null;
     if (!e || !e.session) return;
     const s = e.session;
+    // Same re-probe as page:focus, via the page the card borrows its data from —
+    // a dashboard card is the only view some collectors get.
+    for (const ck of Pages.collectorsFor(src)) _wakeForFocus(s, e, ck);
     if (key === 'firewall' || key === 'vpn') {
       _updatePageStream(s, e, key);
       if (s[key] && s[key].lastPayload)
@@ -4756,6 +4981,77 @@ io.on('connection', (socket) => {
       else _pkgErr(code, { message: sanitizeErr(e) });
     }
   });
+
+
+  /**
+   * Upgrade RouterOS — the Update button on the Dashboard's System card.
+   *
+   * `/system/package/update/install` downloads the new packages AND reboots, in
+   * one command. It is the single most consequential thing this app can do to a
+   * router, so it carries the same second gate apply-changes does: the browser
+   * must send back the router's own name. A misclick cannot reach it, and
+   * neither can a click on the router you thought you were looking at.
+   *
+   * Gated on the PACKAGES page rather than the dashboard. The button lives on
+   * the dashboard, but the authority it needs is the one that can already
+   * reboot this router from the Packages page — inventing a second permission
+   * for the same power would mean two answers to one question.
+   *
+   * Queued and rid-captured, unlike its three siblings above: they were written
+   * before _routerWriteQueue existed. A reboot landing on the wrong router
+   * because of a router:switch mid-flight is exactly what the capture prevents.
+   */
+  socket.on('packages:upgrade', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const entry   = rid ? _routerSessions.get(rid) : null;
+    const session = entry && entry.session;
+    // Deliberately not gated on the collector being enabled: the write goes
+    // through session.ros, so an install works on a router whose Packages
+    // collector is switched off (#105). Only the refresh afterwards needs it,
+    // and the router is rebooting anyway.
+    if (!rid || !session) return _pkgErr('unavailable');
+
+    if (!_pageAllowed(socket, 'packages', 'write') || !_socketCan(socket, 'router:write', rid)) {
+      audit.fromSocket(socket).denied({ action: 'package.upgrade', targetType: 'router',
+        targetId: rid, routerId: rid });
+      return _pkgErr('denied');
+    }
+
+    const routerName = (Routers.getById(rid) || {}).label || '';
+    const confirm    = req && typeof req.confirm === 'string' ? req.confirm.trim() : '';
+    if (!routerName || confirm.toLowerCase() !== routerName.toLowerCase())
+      return _pkgErr('confirm-mismatch', { routerName });
+
+    try {
+      // Read fresh rather than trusting the payload the button was drawn from:
+      // an update that has already been installed by somebody else must not
+      // reboot the router a second time for nothing.
+      const row = ((await session.ros.write('/system/package/update/print', []) || [])[0]) || {};
+      const installed = row['installed-version'] || '';
+      const latest    = row['latest-version'] || '';
+      if (!latest || (installed && latest === installed))
+        return _pkgErr('nothing-to-update', { installed, latest });
+
+      console.log('%s', `[packages] upgrade on ${routerName} — ${installed || '?'} to ${latest}, router will reboot`);
+      socket.emit('packages:applying', { routerName, count: 1, upgrade: true });
+
+      // Recorded BEFORE the call, as apply-changes is: the router reboots while
+      // the command is in flight, so writing the row afterwards would lose the
+      // record of the most consequential action in the app.
+      audit.fromSocket(socket).record({ action: 'package.upgrade', targetType: 'router',
+        targetId: rid, targetName: routerName, routerId: rid,
+        extra: { from: installed, to: latest, channel: row.channel || '' },
+        note: 'downloaded the RouterOS update and rebooted the router' });
+
+      await session.ros.write('/system/package/update/install', []);
+      socket.emit('packages:ok', { action: 'upgrade', routerName, latest });
+    } catch (e) {
+      // A lost connection here is the expected outcome, not a failure — the
+      // router is rebooting as it answers.
+      const code = _rosWriteFail(e);
+      if (code === 'failed') socket.emit('packages:ok', { action: 'upgrade', routerName, rebooting: true });
+      else _pkgErr(code, { message: sanitizeErr(e) });
+    }
+  }));
 
 
   // ── Router Users (RouterOS /user) ─────────────────────────────────────────
@@ -5580,6 +5876,1219 @@ io.on('connection', (socket) => {
   socket.on('wan:renew',   (req) => _routerWriteQueue(socket.routerId, (rid) => _wanLeaseAction('renew', req, rid)));
   socket.on('wan:release', (req) => _routerWriteQueue(socket.routerId, (rid) => _wanLeaseAction('release', req, rid)));
 
+  // ── Generic resource writes (issue #97) ───────────────────────────────────
+  //
+  // One set of handlers for every resource in src/routeros/resources.js. The
+  // three write features above are hand-written because they came first and
+  // each has something genuinely its own — Router Users can lock us out, Queues
+  // can throttle us, WAN can cut the uplink. Everything after them is the same
+  // seven steps with different field names, so the seven steps live here once
+  // and the field names live in the registry.
+  //
+  // Every property the Router Users block documents at length applies here, and
+  // for the same reasons:
+  //
+  //  1. A FRESH READ in the same tick as the write. `lastPayload` appears
+  //     nowhere below, and a test asserts it — the payload is exactly what goes
+  //     stale in the dangerous direction.
+  //  2. THE NAME IS ROUND-TRIPPED. The browser sends the `.id` and the identity
+  //     value it displayed. A `.id` survives a rename, which makes it the right
+  //     key to address a row with and the wrong one to identify it by.
+  //  3. SERIALISED PER ROUTER, with `rid` captured at enqueue so a router:switch
+  //     mid-flight cannot land the write on the router the operator is now
+  //     looking at rather than the one they pressed the button on.
+  //
+  // Both gates on every path: the install-wide page toggle and the role, via
+  // _pageAllowed, and `router:write` via _socketCan. Named separately so
+  // `router:write` stays greppable.
+
+  const _resErr = (code, extra) =>
+    socket.emit('res:error', Object.assign({ code }, extra || {}));
+
+  /**
+   * The session, and the collector that owns this resource's view.
+   *
+   * The write goes through `session.ros`, never the collector, so it works on a
+   * router whose collector is switched off (#105) — there is simply nothing to
+   * refresh afterwards, which is a missing page rather than a missing
+   * capability.
+   */
+  const _resSession = (rid, resource) => {
+    const e = rid ? _routerSessions.get(rid) : null;
+    const session = e && e.session;
+    const def = _COLLECTOR_DEFS.find(c => c.key === resource.collector);
+    const coll = (session && def) ? session[def.sessionProp] : null;
+    return { session, coll: (coll && !coll.disabled) ? coll : null };
+  };
+
+  const _resMayWrite = (rid, resource) =>
+    _pageAllowed(socket, resource.page, 'write') && _socketCan(socket, 'router:write', rid);
+
+  /** Every row in the menu, read now. No proplist: the guards and readOnlyWhen
+   *  need fields no page asked for, and this runs once per write, not per tick. */
+  const _resRead = async (session, resource) =>
+    (await session.ros.write(resource.menu + '/print', []) || []).filter(r => r && r['.id']);
+
+  /** Address by id, identify by the resource's own identity field. */
+  const _resFind = (rows, resource, id, expected) => {
+    const row = (rows || []).find(r => r['.id'] === id);
+    if (!row) return null;
+    if (expected !== undefined && expected !== null && expected !== '' &&
+        Resources.identityOf(resource, row) !== String(expected)) return null;
+    return row;
+  };
+
+  /**
+   * Where the router sees us from, and on which interface — for selfPath.
+   *
+   * Both reads are allowed to fail: `/user/active` is denied to the read-only
+   * API user the README recommends, and that is the common case. The guard
+   * fails open, so a denied read means no warning rather than no write.
+   */
+  const _resSelfPath = async (session, rid) => {
+    let active = [], addrs = [];
+    try { active = (await session.ros.write('/user/active/print', []) || []).filter(r => r && r.name); }
+    catch (_) { /* denied or unsupported — fails open, by design */ }
+    try { addrs = (await session.ros.write('/ip/address/print', []) || []); }
+    catch (_) { /* same */ }
+    const cfg = Routers.getById(rid) || {};
+    return selfPath.resolveManagementInterfaces({
+      activeRows: active,
+      usernames: [(session.ros.cfg || {}).username, cfg.username],
+      addressRows: addrs,
+    });
+  };
+
+  /**
+   * The interface names a write is about — or none, when the edit is harmless.
+   *
+   * A comment or an MTU change on the bridge we are reachable through is not
+   * worth a warning, and warning about it is how a warning becomes furniture
+   * (queueGuard.js says the same thing at more length). So an update only
+   * counts when it disables the row or changes one of the interface fields
+   * themselves. A delete always counts.
+   */
+  const _resGuardTargets = (resource, action, values, before) => {
+    const names = resource.guardInterfaceFields || [];
+    const of = (row, name) => {
+      const f = resource.fields.find(x => x.name === name);
+      return (f && row) ? String(row[f.ros] == null ? '' : row[f.ros]) : '';
+    };
+    const after = names.map(n => String(values[n] == null ? '' : values[n])).filter(Boolean);
+    if (action === 'delete') return names.map(n => of(before, n)).filter(Boolean);
+    if (!before) return [];                                   // a create cuts nothing that exists
+    const wasEnabled = before.disabled !== 'true';
+    const nowDisabled = values.disabled === 'yes' || values.disabled === true;
+    const renamed = names.some(n => of(before, n) !== String(values[n] == null ? '' : values[n]));
+    // Renaming and disabling are not the only edits that cut a link. Changing a
+    // wireless SSID or passphrase drops every client on the radio, management
+    // path included, while leaving the interface named and enabled — so a
+    // resource may name the fields whose change is disruptive in its own terms.
+    // A `secret` never reads back, so any value submitted for one is a change.
+    const disruptive = (resource.guardDisruptiveFields || []).some(n => {
+      if (!Object.prototype.hasOwnProperty.call(values, n)) return false;
+      const f = resource.fields.find(x => x.name === n);
+      const next = String(values[n] == null ? '' : values[n]);
+      if (f && f.type === 'secret') return !!next;
+      return next !== of(before, n);
+    });
+    if (!renamed && !disruptive && !(wasEnabled && nowDisabled)) return [];
+    return after.concat(names.map(n => of(before, n))).filter(Boolean);
+  };
+
+  /**
+   * Run whichever guard the resource declares, for one write.
+   *
+   * `null` when it declares none, or when the guard has nothing to say. The two
+   * guards ask different questions — selfPath asks which interface carries us,
+   * fwGuard asks whether a rule could match us — but they answer in the same
+   * shape, which is what lets the acknowledgement below be written once.
+   *
+   * `before` is the RAW freshly-read row throughout; each guard converts it to
+   * whatever it needs.
+   */
+  const _resVerdict = async (resource, session, rid, what, values, before, rows) => {
+    if (!resource.guard) return null;
+    // A resource may declare more than one guard, because they answer different
+    // questions: selfPath asks whether an edit cuts the path we reach the
+    // router by, wifiInherit asks whether it quietly overrides a profile two
+    // radios share. Both can be true of one write. The FIRST warn wins — one
+    // prompt per write, because a second dialog after the first is answered is
+    // how somebody learns to click both without reading either.
+    const kinds = Array.isArray(resource.guard) ? resource.guard : [resource.guard];
+    for (const kind of kinds) {
+      const v = await _resVerdictOne(kind, resource, session, rid, what, values, before, rows);
+      if (v && v.level === 'warn') return v;
+    }
+    return null;
+  };
+
+  const _resVerdictOne = async (kind, resource, session, rid, what, values, before, rows) => {
+    // wifiInherit needs no /user/active read: it is answered entirely from the
+    // rows the caller already has, so the path lookup is skipped for it.
+    if (kind === 'wifiInherit') {
+      return wifiGuard.checkInherit({
+        values: values || {}, before, siblings: rows || [],
+        action: what === 'delete' ? 'delete' : what,
+      });
+    }
+
+    // A CAPsMAN profile edit reaches every CAP following it the moment it is
+    // saved. Answering that needs two menus this write is not about, so the
+    // guard reads them here, in the same tick as the write is checked — the
+    // collector's copy can be two minutes old. Both reads FAIL SOFT: a menu the
+    // API user cannot see costs the warning, never the write.
+    if (kind === 'capsmanPush') {
+      const menus = require('./routeros/wifiMenus').MENUS;
+      const read = async (m) => {
+        try { return (await session.ros.write(m[0], [m[1]])) || []; }
+        catch (_) { return []; }
+      };
+      const [configRows, provRows, capRows] = await Promise.all([
+        read(menus.configuration), read(menus.provisioning),
+        // The CAP count is read here rather than taken from the collector's
+        // payload — deliberately, and not only because the engine may not touch
+        // lastPayload. A number in a warning about what is about to happen
+        // should describe the router now, not the last config tick two minutes
+        // ago.
+        read(['/interface/wifi/capsman/remote-cap/print', '=.proplist=.id']),
+      ]);
+      return capsmanGuard.checkPush({
+        resourceKey: resource.key,
+        action: what === 'delete' ? 'delete' : what,
+        values: values || {}, before, configRows, provRows,
+        capCount: capRows.length,
+      });
+    }
+
+    const path = await _resSelfPath(session, rid);
+
+    if (kind === 'selfPath') {
+      const targets = _resGuardTargets(resource, what, values || {}, before);
+      if (!targets.length) return null;
+      return selfPath.checkInterfaceEdit({
+        path, targets, action: what === 'delete' ? 'delete' : 'update' });
+    }
+
+    if (kind === 'fwGuard') {
+      // The API port is the one this router is actually reached on, not a
+      // guess: a rule that spares 8729 still locks us out of a router we talk
+      // to on 8728.
+      const cfg = Routers.getById(rid) || {};
+      return fwGuard.checkRule({
+        menu: resource.menu, values, what,
+        before: before ? Resources.rowValues(resource, before) : null,
+        ctx: { resolved: path.resolved, addresses: path.addresses || [],
+               interfaces: path.interfaces, apiPort: Number(cfg.port) || 8728 },
+      });
+    }
+    return null;
+  };
+
+  /**
+   * The prompt, and the acknowledgement of it — one implementation for every
+   * guard.
+   *
+   * Nothing is written and nothing is audited on the first pass: this is a
+   * question, not a refusal, and a denial row would make the trail lie about
+   * what was attempted. The retry carries the fingerprint, recomputed here from
+   * a fresh read, so an acknowledgement cannot be carried from one row to
+   * another or replayed against a later write.
+   *
+   * Returns the error payload to send, or null to proceed.
+   */
+  const _resAckGate = (verdict, ack) => {
+    if (!verdict || verdict.level !== 'warn') return null;
+    const detail = { warning: verdict.detail, fingerprint: verdict.fingerprint };
+    if (!ack) return Object.assign({ code: verdict.code }, detail);
+    if (ack !== verdict.fingerprint) return Object.assign({ code: 'stale-warning' }, detail);
+    return null;
+  };
+
+  /**
+   * The values as the audit trail should see them.
+   *
+   * A `secret` field's VALUE never reaches a row. audit.js masks on field NAME
+   * and `presharedKey` does not match its pattern, so relying on that would put
+   * a pre-shared key in the one table that is deliberately hard to delete.
+   * Keying on the declared type instead means a future secret field is covered
+   * the moment it is declared.
+   */
+  const _resAuditValues = (resource, values) => {
+    const out = {};
+    for (const f of resource.fields) {
+      if (!Object.prototype.hasOwnProperty.call(values, f.name)) continue;
+      out[f.name] = f.type === 'secret'
+        ? (values[f.name] ? audit.SET : audit.UNSET)
+        : values[f.name];
+    }
+    return out;
+  };
+
+  /**
+   * The choices a form's pickers offer, read from the router now.
+   *
+   * "Which DHCP server?" has a right answer the router already knows, and
+   * making somebody type it from memory is how you get a typo in a
+   * reservation. Each menu is read once per form open and cached across the
+   * fields that share it — /interface backs both the VLAN parent and the bridge
+   * port, and reading it twice would be silly.
+   *
+   * EVERY READ FAILS SOFT. A menu the API user cannot see, or that does not
+   * exist on this RouterOS version (/routing/table is not on every build), just
+   * yields no options, and the field renders as the text box it always was. A
+   * picker is a convenience; it must never be the thing that stops a write.
+   */
+  const _resOptions = async (session, resource) => {
+    // Fixed vocabularies — firewall chains and actions — need no read at all.
+    const out = Resources.staticOptions(resource);
+    const menus = new Map();
+    for (const src of Resources.optionSources(resource)) {
+      if (!menus.has(src.menu)) {
+        try { menus.set(src.menu, (await session.ros.write(src.menu + '/print', [])) || []); }
+        catch (_) { menus.set(src.menu, null); }
+      }
+      const rows = menus.get(src.menu);
+      if (!rows) continue;
+      const vals = [];
+      for (const r of rows) {
+        const v = String((r && r[src.value]) || '').trim();
+        if (v && vals.indexOf(v) === -1) vals.push(v);
+      }
+      if (vals.length) out[src.field] = vals.sort();
+    }
+    return out;
+  };
+
+  // ── Undo / redo ────────────────────────────────────────────────────────────
+  //
+  // Per socket, per resource, in memory, dying with the connection. "Undo" here
+  // means "undo what I just did", which is what anyone pressing the button
+  // expects — a stack shared between operators would let one silently revert
+  // another's work, and a stack that outlived the session would offer to
+  // reverse something from last week.
+  //
+  // Per RESOURCE, not one global stack: undo on the Firewall card must never
+  // reach into DNS.
+
+  const _HIST_DEPTH = 20;
+
+  const _histFor = (key) => {
+    socket._resHist = socket._resHist || {};
+    socket._resHist[key] = socket._resHist[key] || { undo: [], redo: [] };
+    return socket._resHist[key];
+  };
+
+  const _histEmit = (key) => {
+    const h = _histFor(key);
+    socket.emit('res:history', {
+      resource: key,
+      canUndo: h.undo.length > 0, canRedo: h.redo.length > 0,
+      undoLabel: h.undo.length ? h.undo[h.undo.length - 1].label : '',
+      redoLabel: h.redo.length ? h.redo[h.redo.length - 1].label : '',
+    });
+  };
+
+  const _histPush = (resource, entry) => {
+    if (!entry) return;
+    const h = _histFor(resource.key);
+    h.undo.push(entry);
+    if (h.undo.length > _HIST_DEPTH) h.undo.shift();
+    // A fresh action forks the timeline: what was undone can no longer be
+    // redone on top of something else.
+    h.redo.length = 0;
+    _histEmit(resource.key);
+  };
+
+  /** The history no longer describes this router, so none of it can be trusted. */
+  const _histDrop = (key) => {
+    const h = _histFor(key);
+    h.undo.length = 0; h.redo.length = 0;
+    _histEmit(key);
+  };
+
+  /**
+   * Where a row sits, as the id of the row AFTER it — or null for the end.
+   *
+   * An anchor rather than an index, because an index is wrong the moment
+   * anything else in the table moves, and undo exists precisely because time
+   * has passed.
+   */
+  const _anchorAt = (rows, at) => (rows[at + 1] ? rows[at + 1]['.id'] : null);
+
+  /** Move `id` so it sits immediately before `anchor`; null sends it to the end. */
+  const _resMoveTo = async (session, resource, id, anchor) => {
+    const args = ['=numbers=' + id];
+    if (anchor) args.push('=destination=' + anchor);
+    await session.ros.write(resource.menu + '/move', args);
+  };
+
+  /** What a recorded operation is, in the vocabulary the guards speak. */
+  const _OP_MEANS = Object.freeze({ add: 'create', set: 'update', remove: 'delete',
+                                    move: 'move', enable: 'enable', disable: 'disable' });
+
+  /**
+   * Apply one recorded operation, and answer with the id the row now has.
+   *
+   * An `add` is the awkward one: RouterOS assigns the id, so the row is found
+   * by diffing the table against itself rather than by assuming the new row is
+   * last. It usually is last — but "usually" is not a thing to build an undo on.
+   */
+  const _applyOp = async (session, resource, op) => {
+    if (op.op === 'add') {
+      const validated = Resources.validate(resource, op.values, { editing: false });
+      if (!validated.ok) return { error: 'invalid', errors: validated.errors };
+      const seen = new Set((await _resRead(session, resource)).map(r => r['.id']));
+      await session.ros.write(resource.menu + '/add', Resources.buildArgs(resource, validated));
+      const rows = await _resRead(session, resource);
+      const made = rows.find(r => !seen.has(r['.id']));
+      if (!made) return { error: 'failed' };
+      if (resource.ordered) await _resMoveTo(session, resource, made['.id'], op.anchor || null);
+      return { id: made['.id'] };
+    }
+
+    if (op.op === 'set') {
+      const validated = Resources.validate(resource, op.values, { editing: true });
+      if (!validated.ok) return { error: 'invalid', errors: validated.errors };
+      await session.ros.write(resource.menu + '/set',
+        ['=.id=' + op.id].concat(Resources.buildArgs(resource, validated)));
+      return { id: op.id };
+    }
+
+    if (op.op === 'move') {
+      await _resMoveTo(session, resource, op.id, op.anchor || null);
+      return { id: op.id };
+    }
+
+    // remove, enable, disable — RouterOS has a verb for each.
+    await session.ros.write(resource.menu + '/' + op.op, ['=.id=' + op.id]);
+    return { id: op.op === 'remove' ? null : op.id };
+  };
+
+  /**
+   * Undo or redo the top of a stack.
+   *
+   * Everything the ordinary write handlers do, this does too: both gates, a
+   * fresh read, a staleness check, the guard, an audit row, a refresh. An undo
+   * is a write like any other — undoing the deletion of a `drop` rule puts that
+   * rule back, and it can lock us out exactly as the original did.
+   */
+  const _histRun = (dir) => (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const resource = _resolve(req);
+    if (!resource) return;
+    const { session, coll } = _resSession(rid, resource);
+    if (!rid || !session) return _resErr('unavailable', { resource: resource.key });
+    const action = resource.key + '.' + dir;
+    const r = req || {};
+
+    if (!_resMayWrite(rid, resource)) {
+      audit.fromSocket(socket).denied({ action, targetType: resource.key, routerId: rid });
+      return _resErr('denied', { resource: resource.key });
+    }
+
+    const h = _histFor(resource.key);
+    const stack = dir === 'undo' ? h.undo : h.redo;
+    const entry = stack[stack.length - 1];
+    if (!entry) return _resErr('nothing-to-' + dir, { resource: resource.key });
+    const op = dir === 'undo' ? entry.reverse : entry.forward;
+
+    try {
+      const rows = await _resRead(session, resource);
+
+      // The row this entry is about must still be the row it was about. If it
+      // is not, everything below it on the stack is suspect too, so the whole
+      // history goes rather than leaving a trap for the next click.
+      if (op.op !== 'add') {
+        const row = rows.find(x => x['.id'] === op.id);
+        if (!row || Resources.identityOf(resource, row) !== entry.identity) {
+          _histDrop(resource.key);
+          return _resErr('stale-history', { resource: resource.key });
+        }
+      }
+      // An anchor that has been deleted cannot put anything back where it was.
+      if (op.anchor && !rows.some(x => x['.id'] === op.anchor)) {
+        _histDrop(resource.key);
+        return _resErr('stale-history', { resource: resource.key });
+      }
+
+      const beforeRow = op.op === 'add' ? null : rows.find(x => x['.id'] === op.id);
+      const gate = _resAckGate(
+        await _resVerdict(resource, session, rid, _OP_MEANS[op.op],
+                          op.values || (beforeRow ? Resources.rowValues(resource, beforeRow) : {}),
+                          beforeRow), r.ack);
+      if (gate) return _resErr(gate.code, { resource: resource.key, name: entry.label,
+        warning: gate.warning, fingerprint: gate.fingerprint });
+
+      const out = await _applyOp(session, resource, op);
+      if (out.error) return _resErr(out.error, { resource: resource.key, errors: out.errors });
+
+      // Keep the entry pointing at the row that now exists, and at what it now
+      // looks like, so the opposite direction can check it in turn.
+      history.rebind(entry, out.id);
+      if (out.id) {
+        const nowRow = (await _resRead(session, resource)).find(x => x['.id'] === out.id);
+        if (nowRow) entry.identity = Resources.identityOf(resource, nowRow);
+      }
+
+      stack.pop();
+      (dir === 'undo' ? h.redo : h.undo).push(entry);
+      _histEmit(resource.key);
+
+      audit.fromSocket(socket).record({ action, targetType: resource.key,
+        targetId: out.id ? String(out.id) : null, targetName: entry.identity || null,
+        routerId: rid, note: dir + ': ' + entry.label,
+        extra: Object.assign({ [dir]: true, op: op.op },
+                             r.ack ? { selfLockoutAcknowledged: true } : null) });
+
+      if (coll && typeof coll.refreshNow === 'function') await coll.refreshNow();
+      socket.emit('res:ok', { resource: resource.key, action: dir,
+                              name: entry.identity || '', movedId: out.id || null });
+    } catch (e) {
+      _resErr(_rosWriteFail(e), { resource: resource.key, message: sanitizeErr(e) });
+    }
+  });
+
+  socket.on('res:undo', _histRun('undo'));
+  socket.on('res:redo', _histRun('redo'));
+
+  /** Resolve the resource named on the wire, or answer why not. */
+  // ── Configuration backups ────────────────────────────────────────────────
+  //
+  // Read shows the history and the diffs; WRITE is required to take a backup,
+  // change the schedule, or download either half of a pair. Downloading is a
+  // write-level act deliberately: an export describes the whole network, and
+  // the binary carries every key on the device.
+
+  const _bkErr = (code, extra) =>
+    socket.emit('backups:error', Object.assign({ code }, extra || {}));
+
+  const _bkMayRead  = () => _pageAllowed(socket, 'backups', 'read');
+  const _bkMayWrite = (rid) =>
+    _pageAllowed(socket, 'backups', 'write') && _socketCan(socket, 'router:write', rid);
+
+  /** The router this socket is looking at, or null. */
+  const _bkRouter = (rid) => (rid ? Routers.getById(rid) : null);
+
+  /** A row the caller is allowed to touch: it must belong to THIS router. */
+  const _bkRow = (id, rid) => {
+    const row = db.getBackup(id);
+    // Not "not found" for a row on another router — the two are the same answer
+    // from outside, and distinguishing them would confirm the id exists.
+    if (!row || row.router_id !== rid) return null;
+    return row;
+  };
+
+  const _bkPayload = (rid) => {
+    const router = _bkRouter(rid);
+    const backup = (router && router.backup) || {};
+    return {
+      routerId: rid,
+      label: router ? router.label : '',
+      settings: {
+        enabled: !!backup.enabled,
+        schedule: backup.schedule || Routers.BACKUP_DEFAULTS.schedule,
+        time: backup.time === undefined ? Routers.BACKUP_DEFAULTS.time : backup.time,
+        // So the card can say which clock 02:00 means. Empty is the server's own.
+        timezone: Settings.load().displayTimezone || '',
+        keepCount: backup.keepCount == null ? Routers.BACKUP_DEFAULTS.keepCount : backup.keepCount,
+        keepDays: backup.keepDays == null ? Routers.BACKUP_DEFAULTS.keepDays : backup.keepDays,
+      },
+      summary: db.backupSummary(rid),
+      running: Backups._running.has(rid),
+      permitted: _bkMayWrite(rid),
+      rows: db.listBackups(rid, 200).map(r => ({
+        id: r.id, takenAt: r.taken_at, outcome: r.outcome, source: r.source,
+        actor: r.actor, stem: r.stem, pruned: !!r.pruned_at,
+        bytes: (r.rsc_bytes || 0) + (r.backup_bytes || 0),
+        osVersion: r.os_version, model: r.model, serial: r.serial,
+        ms: r.ms, error: r.error,
+      })),
+    };
+  };
+
+  socket.on('backups:list', () => {
+    const rid = socket.routerId;
+    if (!rid || !_bkMayRead()) return _bkErr('denied');
+    socket.emit('backups:state', _bkPayload(rid));
+  });
+
+  socket.on('backups:settings', async (req) => {
+    const rid = socket.routerId;
+    if (!rid || !_bkMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'backup.settings', targetType: 'router',
+        routerId: rid });
+      return _bkErr('denied');
+    }
+    const r = req || {};
+    try {
+      Routers.update(rid, { backup: {
+        enabled: !!r.enabled, schedule: r.schedule, time: r.time,
+        keepCount: r.keepCount, keepDays: r.keepDays,
+      } });
+      audit.fromSocket(socket).record({ action: 'backup.settings', targetType: 'router',
+        scope: 'router', routerId: rid,
+        extra: { enabled: !!r.enabled, schedule: r.schedule, time: r.time || '' } });
+      socket.emit('backups:state', _bkPayload(rid));
+    } catch (e) {
+      _bkErr('failed', { message: sanitizeErr(e) });
+    }
+  });
+
+  socket.on('backups:run', () => _routerWriteQueue(socket.routerId, async (rid) => {
+    if (!rid || !_bkMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'backup.run', targetType: 'router',
+        routerId: rid });
+      return _bkErr('denied');
+    }
+    const router = _bkRouter(rid);
+    if (!router) return _bkErr('unavailable');
+    if (!router.backup || !router.backup.password) {
+      // Enabling generates the password; without one there is nothing to
+      // encrypt the binary with, and an unencrypted backup is not an option.
+      return _bkErr('not-configured');
+    }
+    socket.emit('backups:running', { routerId: rid });
+    try {
+      const result = await Backups.runFor(router,
+        { source: 'manual', actor: socket.request?._authSession?.username || null });
+      audit.fromSocket(socket).record({ action: 'backup.run', targetType: 'router',
+        scope: 'router', routerId: rid, outcome: result.outcome === 'failed' ? 'error' : 'ok',
+        extra: { outcome: result.outcome, changed: !!result.changed } });
+      socket.emit('backups:state', _bkPayload(rid));
+    } catch (e) {
+      _bkErr('failed', { message: sanitizeErr(e) });
+    }
+  }));
+
+  /**
+   * The difference between two stored exports, or between one and the newest.
+   *
+   * Both ids are checked against this router before either file is opened, so
+   * a diff cannot be used to read another router's configuration.
+   */
+  socket.on('backups:diff', (req) => {
+    const rid = socket.routerId;
+    if (!rid || !_bkMayRead()) return _bkErr('denied');
+    const r = req || {};
+    const newer = _bkRow(r.id, rid);
+    if (!newer || !newer.stem || newer.pruned_at) return _bkErr('not-found');
+
+    // Default comparison is against the previous stored pair, which is what
+    // "what changed in this backup" means.
+    let older = null;
+    if (r.against) {
+      older = _bkRow(r.against, rid);
+      if (!older || !older.stem || older.pruned_at) return _bkErr('not-found');
+    } else {
+      older = db.storedBackups(rid).find(x => x.taken_at < newer.taken_at) || null;
+    }
+
+    try {
+      const result = older ? Backups.diffOf(older, newer)
+                           : BackupDiff.diff('', Backups.readExport(newer));
+      socket.emit('backups:diff', {
+        id: newer.id, against: older ? older.id : null,
+        baseline: !older,
+        added: result.added, removed: result.removed,
+        truncated: result.truncated, hunks: result.hunks,
+      });
+    } catch (e) {
+      _bkErr('failed', { message: sanitizeErr(e) });
+    }
+  });
+
+  /**
+   * Restore a stored configuration.
+   *
+   * `/system/backup/load` REPLACES the entire configuration and reboots. Per
+   * MikroTik's own documentation a backup carries the device's MAC addresses
+   * and belongs to one device, so:
+   *
+   *   - the recorded serial must equal the router's serial NOW, or refuse
+   *     outright. A backup from a different device is never right, and this is
+   *     checked before anything is sent.
+   *   - a RouterOS version mismatch WARNS but does not block. MikroTik
+   *     recommend matching versions, and blocking would stop the restore you
+   *     most want after a bad upgrade.
+   *   - the operator types the router's name, as packages:upgrade requires.
+   *   - the row is audited BEFORE the call, because the connection drops
+   *     mid-flight and there may be no "after".
+   */
+  /**
+   * Delete stored restore points: the files, and the row that listed them.
+   *
+   * Deliberately NOT markBackupPruned, which is retention's half. The two are
+   * different acts: retention aging a pair out is something MikroDash did on its
+   * own, so a row left behind reading "pruned" explains where the backup went.
+   * Pressing Delete is somebody saying "I do not want this listed", and a
+   * tombstone answers a question they did not ask.
+   *
+   * The evidence is not erased with it. audit_events independently holds the
+   * backup.run that created each one and the backup.delete below, and the audit
+   * table is the one place deliberately hard to clear — so the record of a backup
+   * having been taken outlives its row.
+   *
+   * Every id goes through _bkRow, so it must belong to the router this socket is
+   * on — a caller cannot reach another router's backups by guessing ids.
+   */
+  socket.on('backups:delete', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    if (!rid || !_bkMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'backup.delete', targetType: 'backup',
+        routerId: rid });
+      return _bkErr('denied');
+    }
+    const router = _bkRouter(rid);
+    if (!router) return _bkErr('not-found');
+
+    // Bounded and de-duplicated: one message must not be able to ask for
+    // unbounded filesystem work.
+    const raw = (req && Array.isArray(req.ids)) ? req.ids : [];
+    const ids = [...new Set(raw.map(Number).filter(Number.isInteger))].slice(0, 200);
+    if (!ids.length) return _bkErr('not-found');
+
+    const fallbackDir = BackupStore.dirFor(BackupStore.slugFor(router.label));
+    const removed = [];
+    let failed = 0;
+    for (const id of ids) {
+      const row = _bkRow(id, rid);
+      // Not ours, or already gone: skip silently. A selection that raced a
+      // retention sweep is not an error worth showing.
+      if (!row) continue;
+      try {
+        // A row with no files is still the operator's to remove — a run that
+        // stored nothing because the configuration was unchanged, or one whose
+        // pair retention already took. Now that Delete clears the row, the
+        // History table is a list somebody curates rather than an append-only
+        // log, and refusing those would leave rows nothing can ever clear.
+        // Files first: drop the row first and fail the unlink, and several MB
+        // are orphaned on disk with nothing left pointing at them.
+        if (row.stem && !row.pruned_at) BackupStore.removePair(row.dir || fallbackDir, row.stem);
+        db.deleteBackup(row.id);
+        removed.push(row.id);
+      } catch (e) {
+        failed++;
+        console.error('%s', '[backups] could not delete ' + row.stem + ':', (e && e.message) || e);
+      }
+    }
+
+    if (removed.length) {
+      audit.fromSocket(socket).record({ action: 'backup.delete', targetType: 'backup',
+        scope: 'router', routerId: rid, targetId: removed.join(','),
+        note: removed.length + ' restore point(s) deleted, rows removed; '
+            + 'this audit entry is the surviving record' });
+    }
+
+    socket.emit('backups:state', _bkPayload(rid));
+    // Everyone else on this router's Backups page re-requests their OWN payload:
+    // _bkPayload carries `permitted`, computed for the calling socket, so
+    // broadcasting it would tell a viewer they may write.
+    socket.to('router-' + rid + '-page-backups').emit('backups:ran', { routerId: rid });
+    if (failed) return _bkErr('failed', { message: 'Some restore points could not be removed.' });
+  }));
+
+  socket.on('backups:restore', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    if (!rid || !_bkMayWrite(rid)) {
+      audit.fromSocket(socket).denied({ action: 'backup.restore', targetType: 'backup',
+        routerId: rid });
+      return _bkErr('denied');
+    }
+    const r = req || {};
+    const router = _bkRouter(rid);
+    const row = _bkRow(r.id, rid);
+    if (!router || !row || !row.stem || row.pruned_at) return _bkErr('not-found');
+
+    // Typed confirmation, compared to the label the operator can see.
+    if (String(r.confirm || '').trim() !== String(router.label || '').trim()) {
+      return _bkErr('confirm-mismatch');
+    }
+
+    const entry = _routerSessions.get(rid);
+    const session = entry && entry.session;
+    if (!session || !session.ros || !session.ros.connected) return _bkErr('unavailable');
+
+    // ── Identity, read fresh from the device ────────────────────────────────
+    let serialNow = '', versionNow = '';
+    try {
+      const rb = ((await session.ros.write('/system/routerboard/print',
+        ['=.proplist=serial-number'])) || [])[0] || {};
+      serialNow = rb['serial-number'] || '';
+      const res = ((await session.ros.write('/system/resource/print',
+        ['=.proplist=version'])) || [])[0] || {};
+      versionNow = String(res.version || '').split(' ')[0];
+    } catch (e) {
+      return _bkErr('failed', { message: sanitizeErr(e) });
+    }
+
+    if (row.serial && serialNow && row.serial !== serialNow) {
+      audit.fromSocket(socket).denied({ action: 'backup.restore', targetType: 'backup',
+        scope: 'router', routerId: rid, targetId: String(row.id), note: 'serial-mismatch' });
+      return _bkErr('serial-mismatch', { was: row.serial, now: serialNow });
+    }
+
+    // A version difference is a question, asked once, not a refusal.
+    if (row.os_version && versionNow && row.os_version !== versionNow && !r.acceptVersion) {
+      return _bkErr('version-mismatch', { was: row.os_version, now: versionNow });
+    }
+
+    // ── The address the ROUTER can reach us at ──────────────────────────────
+    let base = String(Settings.load().backupBaseUrl || '').trim().replace(/\/+$/, '');
+    if (!base) {
+      let active = [];
+      try { active = (await session.ros.write('/user/active/print', []) || []).filter(x => x && x.name); }
+      catch (_) { /* falls through to the error below */ }
+      const self = queueGuard.resolveSelfAddresses(active,
+        [(session.ros.cfg || {}).username, router.username]);
+      const addr = (self && (self.address || (self.addresses || [])[0])) || '';
+      if (!addr) return _bkErr('no-route-back');
+      base = 'http://' + addr + ':' + (process.env.PORT || 3081);
+    }
+
+    // Audited BEFORE the call: the reboot may take the answer with it.
+    audit.fromSocket(socket).record({ action: 'backup.restore', targetType: 'backup',
+      scope: 'router', routerId: rid, targetId: String(row.id),
+      targetName: row.stem,
+      extra: { stem: row.stem, serial: row.serial, fromVersion: row.os_version,
+               toVersion: versionNow, acceptedVersionMismatch: !!r.acceptVersion } });
+
+    const token = _mintRestoreToken(row.id, router);
+    const dst = 'mikrodash-restore.backup';
+    try {
+      socket.emit('backups:restoring', { routerId: rid, id: row.id });
+      await session.ros.write('/tool/fetch',
+        ['=url=' + base + '/api/backups/' + row.id + '/raw?t=' + token, '=dst-path=' + dst]);
+
+      // The load reboots, so this call is not expected to answer. A rejection
+      // here is normal and must not be reported as a failed restore.
+      session.ros.write('/system/backup/load',
+        ['=name=' + dst, '=password=' + (router.backup && router.backup.password) || ''])
+        .catch(() => { /* the connection drops as the router reboots */ });
+
+      socket.emit('backups:restored', { routerId: rid, id: row.id });
+    } catch (e) {
+      _bkErr('failed', { message: sanitizeErr(e) });
+    }
+  }));
+
+  const _resolve = (req) => {
+    const r = req || {};
+    const resource = Resources.byKey(typeof r.resource === 'string' ? r.resource : '');
+    if (!resource) { _resErr('unknown-resource'); return null; }
+    return resource;
+  };
+
+  socket.on('res:schema', async (req) => {
+    const resource = _resolve(req);
+    if (!resource) return;
+    const rid = socket.routerId;
+    const { session } = _resSession(rid, resource);
+    if (!rid) return _resErr('unavailable', { resource: resource.key });
+    // Read access to see the page at all; write access is reported separately,
+    // because the page draws its Add button from `permitted` rather than from
+    // the payload, which every viewer of this router shares.
+    if (!_pageAllowed(socket, resource.page, 'read')) return _resErr('denied', { resource: resource.key });
+
+    // A resource whose menu ships with an optional package — VETH comes with
+    // containers — is only offered where the menu answers. Reading it is the
+    // only way to know: the package list would say the package is installed
+    // without saying the menu is reachable by THIS API user. One read, once
+    // per connect, for the one resource that asks for it.
+    let unsupported = false;
+    if (resource.requiresMenu && session) {
+      try { await session.ros.write(resource.requiresMenu + '/print', ['=.proplist=.id']); }
+      catch (_) { unsupported = true; }
+    }
+
+    socket.emit('res:schema', Object.assign(Resources.describe(resource), {
+      permitted: !unsupported && _resMayWrite(rid, resource),
+      unsupported,
+      ordered: !!resource.ordered,
+    }));
+    // So the undo and redo buttons start out grey rather than absent.
+    _histEmit(resource.key);
+  });
+
+  /**
+   * Opening a blank Add form.
+   *
+   * Its only job is the pickers: they are read when a form opens rather than
+   * shipped with the schema, because the schema is requested for all eight
+   * resources on every connect and that would be eight bursts of router reads
+   * nobody asked for.
+   */
+  socket.on('res:new', async (req) => {
+    const resource = _resolve(req);
+    if (!resource) return;
+    const rid = socket.routerId;
+    const { session } = _resSession(rid, resource);
+    if (!rid || !session) return _resErr('unavailable', { resource: resource.key });
+    if (!_resMayWrite(rid, resource)) return _resErr('denied', { resource: resource.key });
+    let options = {};
+    try { options = await _resOptions(session, resource); }
+    catch (_) { /* fails soft — every field falls back to a text box */ }
+    socket.emit('res:new', { resource: resource.key, options });
+  });
+
+  /**
+   * The current values of one row, read fresh, for the edit form.
+   *
+   * Not taken from the collector payload: payload rows carry collector-shaped
+   * field names and are as stale as the last tick, and a form filled from stale
+   * values would write them back. Gated on write because opening the edit form
+   * is the first half of an edit.
+   */
+  socket.on('res:row', async (req) => {
+    const resource = _resolve(req);
+    if (!resource) return;
+    const rid = socket.routerId;
+    const { session } = _resSession(rid, resource);
+    if (!rid || !session) return _resErr('unavailable', { resource: resource.key });
+    if (!_resMayWrite(rid, resource)) return _resErr('denied', { resource: resource.key });
+    const id = (req || {}).id;
+    if (!id) return _resErr('bad-request', { resource: resource.key });
+    try {
+      const rows = await _resRead(session, resource);
+      const row  = _resFind(rows, resource, id, (req || {}).expectedIdentity);
+      if (!row) return _resErr('stale-row', { resource: resource.key });
+      let options = {};
+      try { options = await _resOptions(session, resource); }
+      catch (_) { /* fails soft — every field falls back to a text box */ }
+      socket.emit('res:row', {
+        resource: resource.key, id,
+        identity: Resources.identityOf(resource, row),
+        readOnly: !!(resource.readOnlyWhen && resource.readOnlyWhen(row)),
+        actions: (resource.actions || []).filter(a => a.when(row)).map(a => a.key),
+        values: Resources.rowValues(resource, row),
+        options,
+      });
+    } catch (e) {
+      _resErr(_rosWriteFail(e), { resource: resource.key, message: sanitizeErr(e) });
+    }
+  });
+
+  /**
+   * The exact sentence a save would send, without sending it (#97 asks for a
+   * preview before apply). Not queued, because it writes nothing.
+   */
+  socket.on('res:preview', (req) => {
+    const resource = _resolve(req);
+    if (!resource) return;
+    const rid = socket.routerId;
+    if (!rid) return _resErr('unavailable', { resource: resource.key });
+    if (!_resMayWrite(rid, resource)) return _resErr('denied', { resource: resource.key });
+    const r = req || {};
+    const validated = Resources.validate(resource, r.values, { editing: !!r.id });
+    if (!validated.ok) return _resErr('invalid', { resource: resource.key, errors: validated.errors });
+    socket.emit('res:preview', {
+      resource: resource.key,
+      command: Resources.previewCommand(resource, validated, r.id || null),
+    });
+  });
+
+  socket.on('res:save', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const resource = _resolve(req);
+    if (!resource) return;
+    const { session, coll } = _resSession(rid, resource);
+    if (!rid || !session) return _resErr('unavailable', { resource: resource.key });
+    const r = req || {};
+    const editing = !!r.id;
+    const action  = resource.key + (editing ? '.update' : '.create');
+
+    if (!_resMayWrite(rid, resource)) {
+      audit.fromSocket(socket).denied({ action, targetType: resource.key, routerId: rid,
+        targetId: editing ? String(r.id) : null,
+        targetName: r.expectedIdentity ? String(r.expectedIdentity) : null });
+      return _resErr('denied', { resource: resource.key });
+    }
+
+    const validated = Resources.validate(resource, r.values, { editing });
+    if (!validated.ok) return _resErr('invalid', { resource: resource.key, errors: validated.errors });
+    const name = String(validated.values[resource.identity] || r.expectedIdentity || '');
+
+    try {
+      const rows   = await _resRead(session, resource);
+      const before = editing ? _resFind(rows, resource, r.id, r.expectedIdentity) : null;
+      if (editing && !before) return _resErr('stale-row', { resource: resource.key, name });
+
+      // Checked on the freshly-read row, never on the browser's claim about it.
+      if (before && resource.readOnlyWhen && resource.readOnlyWhen(before)) {
+        audit.fromSocket(socket).denied({ action, targetType: resource.key, routerId: rid,
+          targetId: String(r.id), targetName: name, note: 'read-only-row' });
+        return _resErr('read-only-row', { resource: resource.key, name });
+      }
+
+      const gate = _resAckGate(
+        await _resVerdict(resource, session, rid, editing ? 'update' : 'create',
+                          validated.values, before, rows), r.ack);
+      if (gate) return _resErr(gate.code, { resource: resource.key, name,
+        warning: gate.warning, fingerprint: gate.fingerprint });
+
+      const args = Resources.buildArgs(resource, validated);
+      if (editing) await session.ros.write(resource.menu + '/set', ['=.id=' + r.id].concat(args));
+      else         await session.ros.write(resource.menu + '/add', args);
+
+      // Recorded for undo. A create needs one extra read: RouterOS assigns the
+      // id, and the row is found by diffing against the read taken before the
+      // write rather than by assuming it landed last.
+      let newId = r.id, anchorAfter;
+      if (!editing) {
+        const seen  = new Set(rows.map(x => x['.id']));
+        const after = await _resRead(session, resource);
+        const made  = after.find(x => !seen.has(x['.id']));
+        newId = made && made['.id'];
+        if (resource.ordered && made) anchorAfter = _anchorAt(after, after.indexOf(made));
+      }
+      if (newId) _histPush(resource, history.buildEntry({
+        resource, what: editing ? 'update' : 'create', id: newId,
+        identity: name,
+        before: before ? Resources.rowValues(resource, before) : null,
+        after: validated.values, anchorAfter }));
+
+      audit.fromSocket(socket).record({ action, targetType: resource.key,
+        targetId: editing ? String(r.id) : null, targetName: name, routerId: rid,
+        before: before ? _resAuditValues(resource, Resources.rowValues(resource, before)) : {},
+        after:  _resAuditValues(resource, validated.values),
+        extra:  r.ack ? { selfCutoffAcknowledged: true } : undefined });
+
+      if (coll && typeof coll.refreshNow === 'function') await coll.refreshNow();
+      socket.emit('res:ok', { resource: resource.key, action: editing ? 'update' : 'create', name });
+    } catch (e) {
+      _resErr(_rosWriteFail(e), { resource: resource.key, name, message: sanitizeErr(e) });
+    }
+  }));
+
+  socket.on('res:remove', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const resource = _resolve(req);
+    if (!resource) return;
+    const { session, coll } = _resSession(rid, resource);
+    if (!rid || !session) return _resErr('unavailable', { resource: resource.key });
+    const r = req || {};
+    const action = resource.key + '.delete';
+
+    if (!_resMayWrite(rid, resource)) {
+      audit.fromSocket(socket).denied({ action, targetType: resource.key, routerId: rid,
+        targetId: r.id ? String(r.id) : null,
+        targetName: r.expectedIdentity ? String(r.expectedIdentity) : null });
+      return _resErr('denied', { resource: resource.key });
+    }
+    if (!r.id) return _resErr('bad-request', { resource: resource.key });
+
+    try {
+      const rows   = await _resRead(session, resource);
+      const before = _resFind(rows, resource, r.id, r.expectedIdentity);
+      if (!before) return _resErr('stale-row', { resource: resource.key });
+      const name = Resources.identityOf(resource, before);
+
+      if (resource.readOnlyWhen && resource.readOnlyWhen(before)) {
+        audit.fromSocket(socket).denied({ action, targetType: resource.key, routerId: rid,
+          targetId: String(r.id), targetName: name, note: 'read-only-row' });
+        return _resErr('read-only-row', { resource: resource.key, name });
+      }
+
+      // Editable but not removable — a wireless radio is hardware, and its row
+      // exists whether or not anyone wants it to. readOnlyWhen cannot say this
+      // because it would block the edit too. Checked on the freshly-read row,
+      // for the same reason readOnlyWhen is.
+      if (resource.removableWhen && !resource.removableWhen(before)) {
+        audit.fromSocket(socket).denied({ action, targetType: resource.key, routerId: rid,
+          targetId: String(r.id), targetName: name, note: 'not-removable' });
+        return _resErr('not-removable', { resource: resource.key, name });
+      }
+
+      const gate = _resAckGate(
+        await _resVerdict(resource, session, rid, 'delete', {}, before, rows), r.ack);
+      if (gate) return _resErr(gate.code, { resource: resource.key, name,
+        warning: gate.warning, fingerprint: gate.fingerprint });
+
+      // Where it sat, so undo can put it back rather than append it.
+      const anchorBefore = resource.ordered
+        ? _anchorAt(rows, rows.findIndex(x => x['.id'] === r.id)) : undefined;
+
+      await session.ros.write(resource.menu + '/remove', ['=.id=' + r.id]);
+
+      _histPush(resource, history.buildEntry({
+        resource, what: 'delete', id: String(r.id), identity: name,
+        before: Resources.rowValues(resource, before), anchorBefore }));
+
+      audit.fromSocket(socket).record({ action, targetType: resource.key,
+        targetId: String(r.id), targetName: name, routerId: rid,
+        before: _resAuditValues(resource, Resources.rowValues(resource, before)), after: {},
+        extra: r.ack ? { selfCutoffAcknowledged: true } : undefined });
+
+      if (coll && typeof coll.refreshNow === 'function') await coll.refreshNow();
+      socket.emit('res:ok', { resource: resource.key, action: 'delete', name });
+    } catch (e) {
+      _resErr(_rosWriteFail(e), { resource: resource.key, message: sanitizeErr(e) });
+    }
+  }));
+
+  /**
+   * A named verb a resource declares — make-static on a DHCP lease today.
+   *
+   * Kept separate from save because it is not a form: it takes no fields, and
+   * its `when` decides which rows may receive it. That `when` is evaluated
+   * against the fresh read, so the browser offering the button is a hint, never
+   * a permission.
+   */
+  socket.on('res:action', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const resource = _resolve(req);
+    if (!resource) return;
+    const { session, coll } = _resSession(rid, resource);
+    if (!rid || !session) return _resErr('unavailable', { resource: resource.key });
+    const r   = req || {};
+    const def = (resource.actions || []).find(a => a.key === r.action);
+    if (!def) return _resErr('bad-request', { resource: resource.key });
+    const action = resource.key + '.' + def.key;
+
+    if (!_resMayWrite(rid, resource)) {
+      audit.fromSocket(socket).denied({ action, targetType: resource.key, routerId: rid,
+        targetId: r.id ? String(r.id) : null,
+        targetName: r.expectedIdentity ? String(r.expectedIdentity) : null });
+      return _resErr('denied', { resource: resource.key });
+    }
+    if (!r.id) return _resErr('bad-request', { resource: resource.key });
+
+    try {
+      const rows = await _resRead(session, resource);
+      const row  = _resFind(rows, resource, r.id, r.expectedIdentity);
+      if (!row) return _resErr('stale-row', { resource: resource.key });
+      const name = Resources.identityOf(resource, row);
+      if (!def.when(row)) {
+        audit.fromSocket(socket).denied({ action, targetType: resource.key, routerId: rid,
+          targetId: String(r.id), targetName: name, note: 'not-applicable' });
+        return _resErr('not-applicable', { resource: resource.key, name });
+      }
+
+      // A named verb is still a write. Enabling a firewall rule has exactly the
+      // blast radius of creating it, and disabling the accept that lets us in
+      // is how the other half of a lockout happens.
+      const gate = _resAckGate(
+        await _resVerdict(resource, session, rid, def.key,
+                          Resources.rowValues(resource, row), row), r.ack);
+      if (gate) return _resErr(gate.code, { resource: resource.key, name,
+        warning: gate.warning, fingerprint: gate.fingerprint });
+
+      await session.ros.write(resource.menu + '/' + def.verb, ['=.id=' + r.id]);
+
+      // enable and disable invert each other, so they are recorded. A verb with
+      // no inverse — make-static, say — yields no entry and buildEntry says so
+      // by returning null.
+      _histPush(resource, history.buildEntry({
+        resource, what: def.key, id: String(r.id), identity: name }));
+
+      audit.fromSocket(socket).record({ action, targetType: resource.key,
+        targetId: String(r.id), targetName: name, routerId: rid, note: def.note });
+
+      if (coll && typeof coll.refreshNow === 'function') await coll.refreshNow();
+      socket.emit('res:ok', { resource: resource.key, action: def.key, name });
+    } catch (e) {
+      _resErr(_rosWriteFail(e), { resource: resource.key, message: sanitizeErr(e) });
+    }
+  }));
+
+
+  /**
+   * Reorder a rule in a table where position is meaning.
+   *
+   * Firewall only, today, and `ordered` is what says so. Everywhere else the
+   * router keeps its own order and moving a row would mean nothing.
+   *
+   * THE BROWSER SENDS A DIRECTION, NEVER A POSITION. The neighbour is resolved
+   * here, from a read taken in this same tick, so an operator clicking twice
+   * quickly — or two operators at once — cannot move a rule to an index
+   * computed against a table that has already changed underneath them. It is
+   * the same reasoning as the fresh read everywhere else in this block, applied
+   * to ordering instead of to values.
+   */
+  socket.on('res:move', (req) => _routerWriteQueue(socket.routerId, async (rid) => {
+    const resource = _resolve(req);
+    if (!resource) return;
+    if (!resource.ordered) return _resErr('bad-request', { resource: resource.key });
+    const { session, coll } = _resSession(rid, resource);
+    if (!rid || !session) return _resErr('unavailable', { resource: resource.key });
+    const r      = req || {};
+    // A drag says WHERE, an arrow says WHICH WAY. Both refuse to name an index:
+    // `anchor` is the id the row should land before (or '' for the end), which
+    // stays correct if the table shifts, and a direction is resolved against a
+    // read taken here.
+    const anchored = Object.prototype.hasOwnProperty.call(r, 'anchor');
+    const up       = r.direction === 'up';
+    const action   = resource.key + '.move';
+
+    if (!_resMayWrite(rid, resource)) {
+      audit.fromSocket(socket).denied({ action, targetType: resource.key, routerId: rid,
+        targetId: r.id ? String(r.id) : null,
+        targetName: r.expectedIdentity ? String(r.expectedIdentity) : null });
+      return _resErr('denied', { resource: resource.key });
+    }
+    if (!r.id || (!anchored && r.direction !== 'up' && r.direction !== 'down'))
+      return _resErr('bad-request', { resource: resource.key });
+
+    try {
+      const rows = await _resRead(session, resource);
+      const at   = rows.findIndex(x => x['.id'] === r.id);
+      if (at === -1) return _resErr('stale-row', { resource: resource.key });
+      const row  = rows[at];
+      const name = Resources.identityOf(resource, row);
+      if (r.expectedIdentity !== undefined && r.expectedIdentity !== null &&
+          r.expectedIdentity !== '' && name !== String(r.expectedIdentity))
+        return _resErr('stale-row', { resource: resource.key });
+      if (anchored) {
+        // The row the drag aimed at must still be there. If it has gone, the
+        // table the operator was looking at is not the table on the router, and
+        // dropping the rule somewhere approximate is worse than saying so.
+        if (r.anchor && !rows.some(x => x['.id'] === r.anchor))
+          return _resErr('stale-row', { resource: resource.key, name });
+        // Dropped exactly where it already was.
+        if (_anchorAt(rows, at) === (r.anchor || null))
+          return _resErr('at-end', { resource: resource.key, name });
+      } else if (up ? at === 0 : at === rows.length - 1) {
+        // Already where it is going. Not an error worth a banner, but the page
+        // should stop drawing an arrow that does nothing.
+        return _resErr('at-end', { resource: resource.key, name });
+      }
+
+      const gate = _resAckGate(
+        await _resVerdict(resource, session, rid, 'move',
+                          Resources.rowValues(resource, row), row), r.ack);
+      if (gate) return _resErr(gate.code, { resource: resource.key, name,
+        warning: gate.warning, fingerprint: gate.fingerprint });
+
+      // RouterOS inserts the moved rule BEFORE `destination`. So moving up
+      // means "before the rule currently above me", and moving down means
+      // "before the rule two below" — with no destination at all when there is
+      // nothing below, which sends it to the end.
+      //
+      // A drag names its destination directly, as the id it should land before
+      // (`anchor`), which is still not an index: an anchor survives the table
+      // shifting underneath it and an ordinal does not.
+      const anchorBefore = _anchorAt(rows, at);
+      const dest = anchored ? r.anchor
+                 : up      ? rows[at - 1]['.id']
+                           : (rows[at + 2] ? rows[at + 2]['.id'] : null);
+      await _resMoveTo(session, resource, r.id, dest);
+
+      const moved = await _resRead(session, resource);
+      const nowAt = moved.findIndex(x => x['.id'] === r.id);
+      _histPush(resource, history.buildEntry({
+        resource, what: 'move', id: String(r.id), identity: name,
+        anchorBefore, anchorAfter: _anchorAt(moved, nowAt) }));
+
+      audit.fromSocket(socket).record({ action, targetType: resource.key,
+        targetId: String(r.id), targetName: name, routerId: rid,
+        before: { position: at }, after: { position: nowAt },
+        extra: Object.assign({ how: anchored ? 'drag' : (up ? 'up' : 'down') },
+                             r.ack ? { selfLockoutAcknowledged: true } : null) });
+
+      if (coll && typeof coll.refreshNow === 'function') await coll.refreshNow();
+      // `movedId` is what the page pulses, so the eye can find the row that
+      // just changed places in a table of thirty near-identical ones.
+      socket.emit('res:ok', { resource: resource.key, action: 'move', name, movedId: String(r.id) });
+    } catch (e) {
+      _resErr(_rosWriteFail(e), { resource: resource.key, message: sanitizeErr(e) });
+    }
+  }));
+
+
   // ── WiFi frequency analyzer ───────────────────────────────────────────────
   //
   // The only disruptive action in the app: it takes the radio off the air and
@@ -5669,6 +7178,9 @@ io.on('connection', (socket) => {
 
   // Per-user router switching (modern auth only).
   socket.on('router:switch', (newRouterId) => {
+    // Every undo entry names a row on the router being left, so none of it
+    // means anything on the next one. Dropped rather than carried.
+    socket._resHist = {};
     // Re-resolve live role/perms (don't trust the ≤60s-stale cached view) so a
     // just-revoked viewer can't switch into a router they no longer have access to.
     const authSession = socket.request ? _sessionFromReq(socket.request) : null;

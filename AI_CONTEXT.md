@@ -296,6 +296,121 @@ When RouterOS sends a packet for a tag that `node-routeros` has already cleaned 
 
 ---
 
+## Writing to RouterOS — the resource engine
+
+Issue #97. Four write surfaces were built by hand (Queues, Router Users, WAN lease actions,
+Packages) and each carries its own copy of the same seven steps: check both gates, read fresh, match
+the row, validate, build the sentence, write, audit, refresh. **Anything after those four is a
+registry entry, not a handler.**
+
+- `src/routeros/resources.js` — the registry. A resource is a *description*: `page`, `collector`,
+  `menu`, `identity`, `readOnlyWhen`, optional `actions` and `guard`, and a list of fields.
+- `src/index.js` — six generic handlers (`res:schema`, `res:row`, `res:save`, `res:remove`,
+  `res:action`, `res:preview`) that execute every resource.
+- `public/app.js` — one dialog, built from the schema the server sends.
+
+**A field's `type` does three jobs from one declaration:** it picks the server-side validator, it
+picks the browser's input widget, and it is the allow-list — `buildArgs()` can only ever emit
+`=<field.ros>=`, so a key the registry does not name cannot reach a RouterOS sentence. Be precise
+about what that does and does not buy: the binary API length-prefixes every word, so a `=` inside a
+*value* cannot forge a second argument the way it could on a CLI. What the allow-list stops is an
+unnamed *key* being set.
+
+**Rules for a new resource:**
+
+- **The browser gets `describe()`, never a copy of the fields.** app.js already carries five
+  hand-maintained mirrors of server-side lists; a sixth would be a sixth thing to drift. Nothing in
+  app.js knows a field name.
+- **`identity` names the field that is round-tripped.** A `.id` survives a rename, which makes it the
+  right key to *address* a row with and the wrong one to *identify* it by. If the freshly-read row no
+  longer carries the identity the operator was looking at, the write is refused as `stale-row`.
+- **`readOnlyWhen` is evaluated against the fresh read, never the browser's claim** — same for an
+  action's `when()`. The browser offering a button is a hint, never a permission.
+- **The collector a resource names must feed the page it names.** A test enforces it: otherwise a
+  save refreshes a view nobody is looking at, and the page in front of the operator keeps the old
+  row. That collector needs a `refreshNow()`.
+- **A secret field must declare `type: 'secret'`.** It is never read back into the form, never sent
+  to the browser, skipped rather than cleared when blank, and masked in the audit trail by
+  `_resAuditValues()` — which keys on the declared **type**, not on the field name, because
+  `audit.js`'s `CRED_PATTERN` does not match `presharedKey`.
+- **A card opts in with two attributes in `index.html` and nothing else:** `data-res-add="<key>"`
+  for the + Add button, `data-res-rows="<key>"` for the rows that open the edit form. Rows carry
+  `data-id` and `data-identity` via `resRow()`. A row with nothing to edit carries no `data-id` and
+  is simply not clickable.
+
+### Guards — five of them now, and they do not agree on purpose
+
+|  | verdict | on failure | question |
+|---|---|---|---|
+| `selfGuard` | **refuses** | fails **closed** | may this `/user` row be touched |
+| `queueGuard` | warns | fails open | would this queue throttle us |
+| `wanGuard` | warns | fails open | is the management path local or remote |
+| `selfPath` | warns | fails open | which **interface** are we reachable on |
+| `fwGuard` | warns | fails open | could this **rule** block our session |
+
+Only `selfGuard` refuses, because breaking the login is unrecoverable from inside the app — the fix
+is WinBox. The other three warn: their mistakes are recoverable from the very row that caused them.
+All three fail **open** because `/user/active` is denied to the read-only API user the README
+recommends, so an unreadable answer is the common case, not an edge one.
+
+A guard's verdict shape is `{ level, code, detail, fingerprint }` everywhere, so the acknowledgement
+dance is shared: the server describes the consequence and writes nothing, the browser confirms, the
+retry carries the fingerprint, a mismatch is `stale-warning`. Recomputing the fingerprint from a
+fresh read is what stops an ack being carried from one row to another or replayed against a later
+write.
+
+**Do not make a warning fire on the innocent case.** `selfPath` skips an update that only changes a
+comment or an MTU, and a VLAN names only itself rather than its parent — an address on `bridge` would
+otherwise make every VLAN riding that bridge warn. Every false alarm trains the operator to click
+through the one that mattered.
+
+### Declined from #97, deliberately
+
+- **A per-router "management enabled" toggle.** RBAC is the gate, consistent with the four write
+  surfaces already shipped.
+- **A backup before each write.** `/system/backup/save` writes to router flash, and a hAP ac2 has
+  ~16 MB.
+- **Safe mode.** Not reachable over the API at all — it is a console/WinBox session feature, there is
+  no `/system/safe-mode` node anywhere in the tracked command tree (7.9 to 7.24rc2), and
+  `/system/history` exposes only find/get/print, so there is no undo verb either.
+### Ordering, and the rest of the registry vocabulary
+
+The firewall is the one place where **position is meaning** — a rule below the final drop never runs,
+and the same rule above an accept blocks everything. Four declarations exist for it, and each is
+general rather than firewall-specific:
+
+- **`ordered: true`** puts ↑/↓ on the rows and lets `res:move` address the menu. The browser sends a
+  **direction, never a position**: the server resolves the neighbour from a read taken in the same
+  tick, so two quick clicks cannot land a rule at an index computed against a table that has already
+  changed. RouterOS `move` accepts `.id` for both `=numbers=` and `=destination=` — verified live —
+  and inserts *before* the destination, which is why moving down targets the row two below.
+- **`identity` may be a list of fields.** A firewall rule has no name and nothing unique. The row is
+  *addressed* by `.id` and the composite only has to answer "is this still the rule I clicked" —
+  which matters because **RouterOS reuses `*N` ids after a delete**. `public/app.js` carries the one
+  mirror of this (`fwIdentity`), and a test asserts the two agree field for field.
+- **`optionsFrom: { values: [...] }`** for a fixed vocabulary. The field type stays `text` on purpose:
+  RouterOS has more actions than any list will name, and a `select` validates against its options, so
+  a rule with an exotic action could not be edited at all.
+- **`check(values)`** for a rule spanning two fields. Firewall's is RouterOS's own — *"ports can be
+  specified if proto is tcp,udp,udp-lite,dccp,sctp"* — met during live verification, where the router
+  refuses without naming a field. It runs only after every field passed its own type, so a rejected
+  value does not produce a second complaint about the first.
+- **`requiresMenu`** hides a resource whose menu ships with an optional package (VETH and containers).
+
+**What fwGuard does not model, and must keep saying so:** ORDER. Whether a rule takes effect depends
+on every rule above it, and evaluating that means a firewall simulator whose bugs would be invisible.
+So it asks two narrower questions it can actually answer — *could this rule match our management
+traffic*, and *does the accept being removed currently match it* — and the browser prints "rule order
+is not taken into account" on every prompt. Also unmodelled: address lists, `jump` targets, layer7,
+time windows and negated matches.
+
+Two consequences worth knowing: the firewall collector now emits **disabled rules** (a rule you
+cannot see is a rule you cannot re-enable), and the Action Breakdown and Chain Count cards filter them
+out in `app.js` so they still mean "what is in force" — while Rule Counts keeps them, which is what
+its long-dead "N off" badge was always for.
+
+---
+
 ## Collector pattern
 
 **Streaming-first, with a per-router opt-out:** always prefer a `/listen` stream over a poll interval
@@ -543,6 +658,32 @@ therefore means:
 - `settings.isMasked(v)` returns true if the value is the mask sentinel — used to ignore unchanged password fields in POST body
 - `settings.save(updates)` merges updates, re-encrypts, writes to disk, updates in-memory cache
 - Most settings changes take effect immediately without restart. Router connection changes (`routerHost`, `routerPort`, `routerTls`, `routerUser`, `routerPass`) require restart — the API returns `{ requiresRestart: true }`.
+
+### Deferred: renaming the wireless keys (noted 2026-08-20, not done)
+
+The two wireless pages were renamed to **Wifi Clients** and **Wifi Networks**, but only their
+DISPLAY strings changed. The keys still read `wireless`:
+
+| Key | Where it is persisted | Renaming it breaks |
+|---|---|---|
+| `wireless` (page key) | `role_pages.page` rows in SQLite | every role granting the page loses that grant — fails closed, silently, on upgrade |
+| `pageWireless` | `settings.json` | the install-wide visibility toggle resets to default |
+| `pollWireless` / `streamWireless` | `settings.json`, and each router's `collection.overrides` | per-router interval and stream overrides are lost |
+| `wireless` (collector key) | each router's `collection.off` array in `routers.json` | a collector deliberately switched off comes back on |
+| `page-wireless` (room) | nothing persisted — derived | nothing, but it must move with the page key |
+
+A migration is perfectly possible and would need to, in one startup step: rewrite `role_pages.page`
+`'wireless'` → `'wificlients'`; rename the three `settings.json` keys; and rewrite `collection.off`
+and `collection.overrides` in every `routers.json` entry. It must be idempotent and must tolerate a
+half-migrated file, because a rollback to an earlier binary would read the NEW keys and find none of
+them — which for `pageWireless` means the page silently disappears rather than failing loudly.
+
+Whether it is worth doing is a judgement call: the keys are invisible to users, and the only cost of
+leaving them is that a reader has to know `wireless` means Wifi Clients. That is what this note is
+for. `src/pages.js` and `src/collection.js` carry the same warning at the point of use.
+
+Note the asymmetry: **Wifi Networks needs no migration at all.** Its key has been `wifi` since it
+was written, so only its title changed.
 
 ---
 

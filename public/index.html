@@ -256,8 +256,45 @@
     .sbtn:active{transform:scale(.97)}
     .sbtn-primary{background:rgba(56,189,248,.15);color:var(--accent-rx);border:1px solid rgba(56,189,248,.3)}
     .sbtn-primary:hover{background:rgba(56,189,248,.25)}
+    /* For a button sitting ON a warn surface — the RouterOS update banner.
+       Its background is rgba(245,159,0,.10), so this is deliberately a step
+       stronger in both fill and border, or the button dissolves into the
+       banner it is standing on. */
+    /* Sized for a button and drawn in currentColor, so it matches whichever
+       .sbtn variant it lands in rather than pinning one accent. */
+    .sbtn-spin{width:12px;height:12px;flex:0 0 auto;border:2px solid currentColor;
+      border-top-color:transparent;border-radius:50%;opacity:.85;animation:spin .7s linear infinite}
+    .sbtn:disabled{opacity:.75;cursor:default}
+    .sbtn:disabled:active{transform:none}
+    .sbtn-warn{background:rgba(245,159,0,.18);color:var(--accent-warn);border:1px solid rgba(245,159,0,.45)}
+    .sbtn-warn:hover{background:rgba(245,159,0,.30)}
     .sbtn-danger{background:rgba(248,113,113,.12);color:rgba(248,113,113,.9);border:1px solid rgba(248,113,113,.25)}
     .sbtn-danger:hover{background:rgba(248,113,113,.22)}
+    /* Restore. Purple because it is neither an ordinary action nor a deletion:
+       it replaces the entire configuration and reboots the router, so it should
+       not share the danger red that Delete uses two buttons along. Built to the
+       same fill/border recipe as the variants above rather than a new palette. */
+    .sbtn-purple{background:rgba(167,139,250,.15);color:rgba(196,181,253,.95);border:1px solid rgba(167,139,250,.35)}
+    .sbtn-purple:hover{background:rgba(167,139,250,.26)}
+    /* Bulk actions dim rather than vanish when nothing is selected: a button that
+       disappears makes the header jump, and the operator loses the affordance
+       telling them selection is what unlocks it. */
+    .sbtn-purple:disabled,.sbtn-danger:disabled{opacity:.45;cursor:not-allowed}
+    .sbtn-purple:disabled:hover{background:rgba(167,139,250,.15)}
+    .sbtn-danger:disabled:hover{background:rgba(248,113,113,.12)}
+    /* Selection column. Sized and coloured to match .stoggle rather than left as
+       browser chrome, which is the reason the rest of this page was reworked. */
+    /* The row's database id. Mono and cyan rather than a Tabler bg-*-lt badge,
+       because the Result column two along already uses those and a second
+       badge in the same language would read as a second status. One colour for
+       every id on purpose: tinting them per-row would imply a grouping that
+       does not exist. */
+    .bk-id-pill{display:inline-block;font-family:var(--font-mono);font-size:.68rem;font-weight:600;
+      padding:.1rem .45rem;border-radius:4px;background:rgba(56,189,248,.13);
+      color:var(--accent-rx);border:1px solid rgba(56,189,248,.28);line-height:1.5;white-space:nowrap}
+    .bk-pick{width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--accent-rx);vertical-align:middle}
+    .bk-pick:disabled{opacity:.35;cursor:not-allowed}
+    tr.bk-row-picked{background:rgba(56,189,248,.07)}
     /* .sbtn-outline shares the ghost treatment. It was referenced in a dozen
        places but never defined, so those buttons fell through to the bare .sbtn
        — which sets border:none and no background — and picked up the browser's
@@ -490,6 +527,14 @@
     .card.is-collector-off{opacity:.5}
     .card.is-collector-off .stale-overlay{opacity:1;pointer-events:auto;
       background:rgba(7,9,15,.62);color:rgba(148,163,190,.75)}
+    /* Dormant deliberately has NO visual treatment. The card already says what it
+       needs to from inside its own body — "No devices", "No active peers" — and a
+       scrim on top made an otherwise ordinary empty card stand out against its
+       neighbours, which reads as a fault rather than as "there is nothing here".
+       .is-dormant is therefore a state marker for the stale sweep and for QA, not
+       a style hook. Contrast is-collector-off, which keeps its scrim: that one IS
+       worth announcing, because the operator switched it off and would otherwise
+       have no way to tell a disabled card from an empty one. */
     /* traffic */
     .chart-wrap{position:relative;height:200px;width:100%}
     .chart-legend{display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap}
@@ -1040,6 +1085,11 @@
     html[data-theme="light"] .log-time{color:rgba(80,100,140,.45)}
     /* update */
     .ros-update-row{display:flex;align-items:center;gap:.5rem;margin-top:.7rem;padding:.45rem .6rem;border-radius:6px;font-family:var(--font-mono);font-size:.72rem}
+    /* The Update button is the last flex item in the row; auto pushes it to
+       the right edge rather than leaving it tucked against the version text.
+       Harmless when the span is empty, which it is for anyone who may not
+       reboot the router. */
+    .ros-update-row #sysUpdateAction{margin-left:auto;display:inline-flex;align-items:center}
     .ros-update-row.ok{background:rgba(74,222,128,.07);border:1px solid rgba(74,222,128,.18);color:var(--accent-ok)}
     .ros-update-row.warn{background:rgba(245,159,0,.10);border:1px solid rgba(245,159,0,.3);color:var(--accent-warn)}
     .ros-update-row.pending{background:rgba(99,130,190,.06);border:1px solid var(--border);color:var(--text-muted)}
@@ -1322,6 +1372,125 @@
        direction inside the value, matching the rate cells in the table. */
     #wanSumActive{color:var(--accent-warn)}
     #wanSumPublic{color:var(--accent-pink)}
+    /* Rows the resource engine can open. The cursor is a rule rather than an
+       inline style because several of these rows already carry one, and a row
+       cannot have two style attributes. Rows with nothing to edit carry no
+       data-id and so keep the default cursor. */
+    [data-res-rows] [data-id]{cursor:pointer}
+    [data-res-rows] tr[data-id]:hover{background:rgba(127,127,127,.06)}
+
+    /* The + Add button is pinned to the top right corner of its card. The auto
+       margin absorbs the free space before justify-content can distribute it,
+       so whatever else is in the header packs to the left and the button sits
+       hard against the right edge — the same place on every card. */
+    /* gap, because a slot may hold more than one button — the Routes card has
+       two, one per address family, and they read as one control without it. */
+    /* Not scoped to .card-header: the firewall card has none — its tabs and
+       search sit straight in the body — and the button belongs in that card's
+       top right corner like every other. `data-res-add` appears nowhere else,
+       so dropping the ancestor widens nothing in practice. */
+    [data-res-add]{margin-left:auto;display:flex;align-items:center;gap:.45rem}
+    /* Position, and the reorder arrows. Only the firewall has these: it is the
+       one table where where a row SITS is what it does. */
+    .fw-pos{font-family:var(--font-mono);font-size:.66rem;color:var(--text-muted);
+      text-align:right;width:2.2rem;padding-right:.2rem}
+    .fw-movecell{width:2.6rem;white-space:nowrap}
+    /* Tabler pads every cell 12px each side via `.table > :not(caption) > * > *`,
+       which outranks a bare class — so a plain `padding:0` here did nothing and
+       24px of it was most of these columns' width. Matched on td/th to win. */
+    .table td.fw-dragcell,.table th.fw-dragcell{padding-left:.3rem;padding-right:.35rem}
+    .table td.fw-movecell,.table th.fw-movecell{padding-left:.25rem;padding-right:.25rem}
+    /* Bigger glyph, original padding — the size was the ask, the padding was me
+       widening the column on the way past. */
+    .fw-move{background:none;border:none;cursor:pointer;color:var(--text-muted);
+      font-size:.78rem;line-height:1;padding:.12rem .14rem;border-radius:4px}
+    .fw-move:hover:not(:disabled){color:var(--accent-rx);background:rgba(56,189,248,.12)}
+    .fw-move:disabled{opacity:.22;cursor:default}
+    /* A viewer who cannot write has no use for either control, and two empty
+       columns on every row are dead space. app.js sets this on the table when
+       the schema comes back unpermitted. */
+    table.fw-noedit .fw-dragcell,
+    table.fw-noedit .fw-movecell{display:none}
+    /* The drag handle. `grab` rather than `move`, because it is the handle that
+       is grabbed and the row that travels. Sized to be an easy target: a grip
+       you have to aim at is worse than no grip. */
+    .fw-dragcell{width:1.5rem;padding-right:0;text-align:center}
+    .fw-drag{cursor:grab;color:var(--text-muted);font-size:1.15rem;line-height:1;
+      user-select:none;touch-action:none;display:inline-block;padding:0 .1rem;
+      border-radius:4px}
+    .fw-drag:hover{color:var(--accent-rx);background:rgba(56,189,248,.12)}
+    tr.res-dragging{cursor:grabbing;background:rgba(56,189,248,.10);
+      box-shadow:0 0 0 1px rgba(56,189,248,.3) inset}
+    tr.res-dragging .fw-drag{cursor:grabbing}
+    /* While a row is travelling, the pointer would otherwise paint a text
+       selection across everything it crosses. */
+    body.res-dragging-body{user-select:none;cursor:grabbing}
+    /* Where the dragged row came from. The engine moves the actual <tr> through
+       the DOM, so without this the origin is simply gone the moment you move and
+       there is no way to change your mind. Red rather than the cyan the dragged
+       row wears: the two must not read as the same thing, and this one is the
+       slot you are about to leave. Dashed, because it is a gap and not a row.
+       Its height is set inline from the row it replaced, so the gap is exactly
+       the size of the hole and nothing below it shifts by a stray pixel. */
+    /* Borrowed verbatim from the drop/reject/tarpit pill in the Action column:
+       actionBadge() builds those from rgba(248,113,113,.9), filling at 0.1 and
+       bordering at 0.25. Same red, same translucency, so the gap belongs to the
+       page rather than introducing a second red. Dashed rather than the pill's
+       solid edge is the one deliberate difference — it is a hole, not a chip. */
+    /* Colour alone, no outline: the wash IS the marker. Same red as the
+       drop/reject pill in the Action column — rgb(248,113,113), so the page
+       carries one red — but far more translucent, because this is an absence and
+       the pills are values. The cell keeps the table's ordinary grey rule top and
+       bottom, so the gap reads as an empty row rather than a boxed callout. */
+    tr.res-drag-origin{background:rgba(248,113,113,.09)}
+    tr.res-drag-origin td{padding:0}
+    /* Home again. The engine cannot put the row INSIDE the gap — a row is either
+       above it or below it — so as you dragged back the rule ended up beside its
+       own marker and the slot never looked reoccupied. Collapsing the gap while
+       the row sits home makes the table read exactly as it did before the drag,
+       which is what "drop it back where it was" is supposed to look like. It
+       reappears the moment the row leaves again. */
+    tr.res-drag-origin.is-home{display:none}
+    /* A reorder moves a row among thirty near-identical ones. Without a cue the
+       eye has no way to follow it — including when the move came from undo. */
+    @keyframes fwPulse{
+      0%{background:rgba(56,189,248,.34)}
+      100%{background:transparent}
+    }
+    tr.fw-pulse td{animation:fwPulse 1.15s ease-out}
+    @media (prefers-reduced-motion:reduce){tr.fw-pulse td{animation:none;background:rgba(56,189,248,.14)}}
+    /* Undo / redo. Grey until there is something to reverse; the disabled state
+       is the whole affordance, so it must not look clickable. */
+    .res-hist{padding:.24rem .5rem;font-size:.78rem;line-height:1;min-width:1.9rem}
+    .res-hist:disabled{opacity:.38;cursor:default;pointer-events:none}
+    /* The right-hand end of a card header: whatever already lived there, plus
+       the Add button, as ONE group. The auto margin belongs to the group, not
+       to the button — on the button it swallowed all the free space and shoved
+       the search boxes over to the title. Inside the group the button's own
+       auto margin has nothing left to absorb, so it is a harmless no-op.
+       NOT named `card-actions`: Tabler already defines that class with
+       `margin:-8px`, and inheriting it pulled the group into the header's
+       padding. */
+    /* A unified diff reads as columns, so the gutter and the text share one
+       monospaced grid and only the background carries the meaning. */
+    .bk-diff{max-height:60vh;overflow:auto;border:1px solid var(--border);border-radius:6px;
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.74rem;line-height:1.5}
+    .bk-hunk-hdr{background:var(--bg-subtle,rgba(127,127,127,.12));color:var(--text-muted);
+      padding:.2rem .6rem;position:sticky;left:0}
+    .bk-line{display:flex;white-space:pre;padding:0 .6rem}
+    .bk-line .bk-ln{flex:0 0 4.5rem;color:var(--text-muted);opacity:.7;user-select:none;text-align:right;padding-right:.8rem}
+    .bk-add{background:rgba(45,164,78,.14)}
+    .bk-del{background:rgba(248,113,113,.13)}
+    .bk-diff-empty{padding:1rem;color:var(--text-muted);text-align:center}
+    .hdr-actions{margin-left:auto;display:flex;align-items:center;
+      gap:.5rem;flex-wrap:wrap;justify-content:flex-end}
+    /* A viewer who may not write gets an EMPTY span, and an empty span must not
+       be a flex item at all: as a third item in a space-between header it would
+       strand the filters in the middle. Removing it from the layout entirely
+       gives the read-only view back exactly the header it had before, right
+       corner included. Higher specificity than the rule above, so order is not
+       load-bearing. */
+    .card-header [data-res-add]:empty{display:none}
     #faBestChan{color:rgba(74,222,128,.95)}
     .fa-stat-unit{font-size:.62rem;color:var(--text-muted);margin-left:.15rem;font-weight:400}
     .fa-section-title{font-family:var(--font-ui);font-weight:600;font-size:.68rem;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin:0 0 .5rem}
@@ -1358,6 +1527,17 @@
     .wl-group-row td{background:rgba(56,189,248,.04);border-top:1px solid rgba(56,189,248,.15)!important;padding:.3rem .75rem!important}
     .wl-group-label{font-family:var(--font-mono);font-size:.68rem;font-weight:700;color:var(--accent-rx);letter-spacing:.03em}
     .wl-group-sub{font-size:.62rem;color:var(--text-muted);margin-left:.5rem}
+    /* One panel per CAPsMAN configuration tab. `hidden` does the hiding; this
+       only stops the visible one collapsing when its table is empty. */
+    .capstab-panel[hidden]{display:none}
+    .capstab-panel{min-height:2.5rem}
+    /* The SSID pill on the Wifi Networks page. Deliberately a step up in size
+       from the rest of the row: the SSID is what somebody scans the table for,
+       and everything beside it is detail about it. The colour is set inline,
+       from the same palette the Wifi Clients page uses. */
+    .wn-ssid-pill{display:inline-block;font-family:var(--font-mono);font-size:.82rem;font-weight:600;
+      padding:.1rem .5rem;border-radius:5px;white-space:nowrap;
+      border:1px solid currentColor;background:color-mix(in srgb,currentColor 10%,transparent)}
     .wl-band{display:inline-block;font-family:var(--font-mono);font-size:.58rem;font-weight:700;padding:1px 5px;border-radius:3px;white-space:nowrap}
     .wl-band-24{background:rgba(167,139,250,.15);color:rgba(167,139,250,.9);border:1px solid rgba(167,139,250,.25)}
     .wl-band-5{background:rgba(56,189,248,.12);color:var(--accent-rx);border:1px solid rgba(56,189,248,.25)}
@@ -1648,14 +1828,22 @@
 
     <div class="nav-group" data-cat="wireless">
       <button class="nav-group-hdr" type="button" aria-expanded="false" aria-controls="navgrp-wireless">
-        <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 20v-4"/><path d="M9 20v-8"/><path d="M14 20v-12"/><path d="M19 20v-16"/></svg></span>
+        <!-- Swapped with the page below. The classic wifi symbol belongs on the
+             SECTION — it is the one that means "wireless, generally" — while the
+             ascending bars mean signal strength, which is what the page under it
+             actually lists, one row per client. -->
+        <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></svg></span>
         <span class="nav-label">Wireless</span>
         <span class="nav-group-chev"><svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg></span>
       </button>
       <div class="nav-group-body" id="navgrp-wireless" role="group" aria-label="Wireless">
+        <a class="nav-item" data-page="wifi" data-cat="wireless" href="#">
+          <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/><circle cx="18.5" cy="6.5" r="3"/><path d="M18.5 4.9v3.2M16.9 6.5h3.2"/></svg></span>
+          <span class="nav-label">Wifi Networks</span>
+        </a>
         <a class="nav-item" data-page="wireless" data-cat="wireless" href="#">
-          <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></svg></span>
-          <span class="nav-label">Wireless</span>
+          <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 20v-4"/><path d="M9 20v-8"/><path d="M14 20v-12"/><path d="M19 20v-16"/></svg></span>
+          <span class="nav-label">Wifi Clients</span>
         </a>
         <a class="nav-item" data-page="capsman" data-cat="wireless" href="#">
           <span class="nav-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="17" r="2"/><path d="M8.5 13.5a5 5 0 0 1 7 0"/><path d="M5.5 10.5a9 9 0 0 1 13 0"/><rect x="10" y="3" width="4" height="4" rx="1"/></svg></span>
@@ -1773,6 +1961,10 @@
     <a class="nav-item" data-page="audit" href="#">
       <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M9 4H6a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3"/><rect x="9" y="2.5" width="6" height="3.5" rx="1"/><path d="M8 12h5"/><path d="M8 16h8"/></svg></span>
       <span class="nav-label">Audit</span>
+    </a>
+    <a class="nav-item" data-page="backups" href="#">
+      <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></svg></span>
+      <span class="nav-label">Backups</span>
     </a>
     <a class="nav-item" data-page="settings" href="#" id="settingsNavItem">
       <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
@@ -2534,6 +2726,83 @@
   </div>
 
   <!-- WIRELESS -->
+  <!-- Wifi Networks — what this router broadcasts. The configuration side of
+       wireless; who is connected to it lives on #page-wireless below. -->
+  <div class="page-view" id="page-wifi">
+    <div class="wl-summary-row">
+      <!-- fa-stat-val, not a class of this page's own: it is what every other
+           summary tile in the app uses, and inventing a second one is how this
+           row ended up rendering at body size while the rest of the app did not. -->
+      <div class="wl-summary-card">
+        <div class="wl-summary-title">Radios</div>
+        <!-- The primary metric of the page, so it carries the accent colour. -->
+        <div class="fa-stat-val" id="wnRadioCount" style="color:var(--accent-rx)">&mdash;</div>
+        <div class="muted-note" id="wnStackNote" style="margin-top:.3rem"></div>
+      </div>
+      <div class="wl-summary-card">
+        <div class="wl-summary-title">Networks</div>
+        <div class="fa-stat-val" id="wnNetCount">&mdash;</div>
+        <div class="muted-note" id="wnVirtualNote" style="margin-top:.3rem"></div>
+      </div>
+      <div class="wl-summary-card">
+        <div class="wl-summary-title">Connected Clients</div>
+        <div class="fa-stat-val" id="wnClientCount">&mdash;</div>
+        <div class="muted-note" id="wnCapNote" style="margin-top:.3rem"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <!-- d-flex + gap-2 is the house header layout. Without it the title, the
+           count and the note butt up against each other. -->
+      <div class="card-header d-flex align-items-center flex-wrap gap-2">
+        <h3 class="card-title mb-0">Wifi Networks</h3>
+        <span class="card-badge" id="wnBadge">0</span>
+        <span class="muted-note" id="wnNote"></span>
+        <!-- Which resource this means follows the stack the router has. Both are
+             named, and res:schema withholds the one whose menu does not answer
+             (requiresMenu), so exactly one Add button ever renders. -->
+        <div class="hdr-actions" id="wnActions">
+          <span data-res-add="wifiNet,wlNet" data-res-add-dynamic="wifiNet,wlNet"></span>
+        </div>
+      </div>
+      <div class="card-body p-0">
+        <div class="data-scroll">
+          <table class="table table-vcenter mb-0">
+            <!-- Measured, not guessed. At 1186px the SSID cell needs 339px for a
+                 long name plus its Virtual AP / Provisioned badges but had 285,
+                 so it wrapped; Security, Clients and Band were each carrying
+                 ~100px of slack for a badge, a single digit and a short pill.
+                 SSID takes it, leaving every other column clear of both its
+                 content and its own header text. -->
+            <colgroup><col style="width:36%"><col style="width:12%"><col style="width:9%"><col style="width:14%"><col style="width:7%"><col style="width:8%"><col style="width:14%"></colgroup>
+            <thead><tr><th>SSID</th><th>Interface</th><th>Band</th><th>Security</th><th>VLAN</th><th>Clients</th><th>State</th></tr></thead>
+            <tbody id="wnTable" data-res-rows="wifiNet"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Legacy stack only: on /interface/wireless the passphrase lives in a
+         separate menu, so the profile is a first-class row rather than a field. -->
+    <div class="card" id="wnSecCard" style="margin-top:.85rem;display:none">
+      <div class="card-header d-flex align-items-center flex-wrap gap-2">
+        <h3 class="card-title mb-0">Security Profiles</h3>
+        <span class="card-badge" id="wnSecBadge">0</span>
+        <span class="muted-note">Legacy wireless keeps the passphrase here, not on the interface.</span>
+        <div class="hdr-actions" id="wnSecActions"><span data-res-add="wlSecProfile"></span></div>
+      </div>
+      <div class="card-body p-0">
+        <div class="data-scroll">
+          <table class="table table-vcenter mb-0">
+            <colgroup><col style="width:30%"><col style="width:25%"><col style="width:45%"></colgroup>
+            <thead><tr><th>Name</th><th>Mode</th><th>Authentication</th></tr></thead>
+            <tbody id="wnSecTable" data-res-rows="wlSecProfile"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="page-view" id="page-wireless">
     <div class="container-fluid px-0" style="width:100%">
 
@@ -2576,7 +2845,7 @@
       <div class="card" id="wirelessCard">
         <div class="stale-overlay">&#9679; stale</div>
         <div class="card-header d-flex align-items-center flex-wrap gap-2">
-          <h3 class="card-title mb-0">Wireless Clients</h3>
+          <h3 class="card-title mb-0">Wifi Clients</h3>
           <span id="wirelessTabBadge" class="card-badge">0</span>
           <div class="d-flex align-items-center gap-2 ms-auto flex-wrap">
             <span style="font-size:.7rem;color:var(--text-muted)">Sort:</span>
@@ -2652,6 +2921,7 @@
             <select id="dhcpServerFilter" class="form-select form-select-sm" style="flex:0 1 240px;width:240px" title="Filter leases by DHCP server">
               <option value="">All leases</option>
             </select>
+            <span data-res-add="dhcpLease"></span>
           </div>
         </div>
         <div class="card-body p-0">
@@ -2669,7 +2939,7 @@
           <div class="data-scroll" id="dhcpScrollWrap" style="max-height:calc(100vh - 200px);overflow-y:auto">
             <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%">
               <colgroup><col style="width:30%"><col style="width:20%"><col style="width:25%"><col style="width:25%"></colgroup>
-              <tbody id="dhcpTable"><tr><td colspan="4" class="empty-state">Waiting for lease data&#8230;</td></tr></tbody>
+              <tbody id="dhcpTable" data-res-rows="dhcpLease"><tr><td colspan="4" class="empty-state">Waiting for lease data&#8230;</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -2704,15 +2974,18 @@
             <h3 class="card-title mb-0">Static Entries</h3>
             <span id="dnsStaticBadge" class="card-badge">0</span>
           </div>
-          <input id="dnsStaticSearch" class="form-control form-control-sm"
-                 placeholder="Search name or address&hellip;" style="flex:0 1 260px;width:260px"/>
+          <div class="hdr-actions">
+            <input id="dnsStaticSearch" class="form-control form-control-sm"
+                   placeholder="Search name or address&hellip;" style="flex:0 1 260px;width:260px"/>
+            <span data-res-add="dnsStatic"></span>
+          </div>
         </div>
         <div class="card-body p-0">
           <div class="data-scroll" style="max-height:360px;overflow-y:auto">
             <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:720px">
               <colgroup><col style="width:34%"><col style="width:26%"><col style="width:10%"><col style="width:10%"><col style="width:20%"></colgroup>
               <thead><tr id="dnsStaticThead"></tr></thead>
-              <tbody id="dnsStaticTable">
+              <tbody id="dnsStaticTable" data-res-rows="dnsStatic">
                 <tr><td colspan="5" class="empty-state">Waiting for static entries&hellip;</td></tr>
               </tbody>
             </table>
@@ -2752,8 +3025,11 @@
             <h3 class="card-title mb-0">VLANs</h3>
             <span id="vlansBadge" class="card-badge">0</span>
           </div>
-          <input id="vlansSearch" class="form-control form-control-sm"
-                 placeholder="Search id, name or port…" style="flex:0 1 260px;width:260px"/>
+          <div class="hdr-actions">
+            <input id="vlansSearch" class="form-control form-control-sm"
+                   placeholder="Search id, name or port…" style="flex:0 1 260px;width:260px"/>
+            <span data-res-add="vlan"></span>
+          </div>
         </div>
         <div class="card-body p-0">
           <div class="data-scroll" style="max-height:calc(100vh - 340px);overflow-y:auto">
@@ -2761,7 +3037,7 @@
               <colgroup><col style="width:6%"><col style="width:13%"><col style="width:9%"><col style="width:6%">
                         <col style="width:18%"><col style="width:19%"><col style="width:7%"><col style="width:22%"></colgroup>
               <thead><tr id="vlansThead"></tr></thead>
-              <tbody id="vlansTable">
+              <tbody id="vlansTable" data-res-rows="vlan">
                 <tr><td colspan="8" class="empty-state">Waiting for VLAN data&hellip;</td></tr>
               </tbody>
             </table>
@@ -2927,14 +3203,21 @@
             <div class="fw-tab" data-fw="nat">NAT</div>
             <div class="fw-tab" data-fw="mangle">Mangle</div>
             <div class="fw-tab" data-fw="raw">Raw</div>
+            <!-- Which resource this means follows the active tab: app.js rewrites
+                 data-res-add and fires mikrodash:resmount. data-res-add-dynamic
+                 declares the whole range it can become, so the mount is
+                 greppable and a resource reachable only after a tab change is
+                 still visibly mounted. -->
+            <span data-res-add="fwFilter"
+                  data-res-add-dynamic="fwFilter,fwNat,fwMangle,fwRaw"></span>
           </div>
           <div class="fw-search-wrap">
             <input id="fwSearch" type="text" placeholder="Search chain, action, address, comment…" autocomplete="off" spellcheck="false">
           </div>
           <div class="table-responsive">
             <table class="table table-vcenter mb-0">
-              <thead><tr><th>Chain</th><th>Action</th><th>Src &#8594; Dst</th><th>Comment</th><th class="text-end">Packets</th><th class="text-end">Bytes</th></tr></thead>
-              <tbody id="firewallTable"><tr><td colspan="6" class="empty-state">Waiting&#8230;</td></tr></tbody>
+              <thead><tr><th class="fw-dragcell"></th><th class="fw-movecell"></th><th class="fw-pos" title="Position in the chain — a rule below the final drop never runs">#</th><th>Chain</th><th>Action</th><th>Src &#8594; Dst</th><th>Comment</th><th class="text-end">Packets</th><th class="text-end">Bytes</th></tr></thead>
+              <tbody id="firewallTable" data-res-rows="fwFilter"><tr><td colspan="9" class="empty-state">Waiting&#8230;</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -2958,6 +3241,7 @@
         <div class="card-header d-flex align-items-center gap-2">
           <h3 class="card-title mb-0">Bridges</h3>
           <span id="bridgesBadge" class="card-badge">0</span>
+          <span data-res-add="bridge"></span>
         </div>
         <div class="card-body p-0">
           <div class="data-scroll" style="max-height:320px;overflow-y:auto">
@@ -2965,7 +3249,7 @@
               <colgroup><col style="width:16%"><col style="width:10%"><col style="width:10%"><col style="width:9%">
                         <col style="width:15%"><col style="width:8%"><col style="width:8%"><col style="width:24%"></colgroup>
               <thead><tr id="bridgesThead"></tr></thead>
-              <tbody id="bridgesTable">
+              <tbody id="bridgesTable" data-res-rows="bridge">
                 <tr><td colspan="8" class="empty-state">Waiting for bridge data&hellip;</td></tr>
               </tbody>
             </table>
@@ -2986,10 +3270,15 @@
                     aria-controls="brtab-hosts" id="brTabBtn-hosts">Host Table
               <span id="bridgesHostBadge" class="card-badge">0</span></button>
           </div>
-          <div class="d-flex align-items-center gap-2" id="bridgesHostTools" hidden>
-            <span id="bridgesHostNote" class="muted-note"></span>
-            <input id="bridgesHostSearch" class="form-control form-control-sm"
-                   placeholder="Search MAC, port or VLAN&hellip;" style="flex:0 1 260px;width:260px"/>
+          <div class="hdr-actions">
+            <div class="d-flex align-items-center gap-2" id="bridgesHostTools" hidden>
+              <span id="bridgesHostNote" class="muted-note"></span>
+              <input id="bridgesHostSearch" class="form-control form-control-sm"
+                     placeholder="Search MAC, port or VLAN&hellip;" style="flex:0 1 260px;width:260px"/>
+            </div>
+            <!-- Last in the group, so it keeps the corner on the Host Table tab
+                 where the search box appears beside it. -->
+            <span data-res-add="bridgePort"></span>
           </div>
         </div>
         <div class="card-body p-0">
@@ -3000,7 +3289,7 @@
                 <colgroup><col style="width:20%"><col style="width:14%"><col style="width:8%"><col style="width:20%">
                           <col style="width:10%"><col style="width:14%"><col style="width:14%"></colgroup>
                 <thead><tr id="bridgesPortThead"></tr></thead>
-                <tbody id="bridgesPortTable">
+                <tbody id="bridgesPortTable" data-res-rows="bridgePort">
                   <tr><td colspan="7" class="empty-state">Waiting for port data&hellip;</td></tr>
                 </tbody>
               </table>
@@ -3053,9 +3342,11 @@
 
       <!-- All peer tiles -->
       <div class="card">
-        <div class="card-header d-flex align-items-center gap-2"><h3 class="card-title">WireGuard Peers</h3><span id="vpnPageCount" class="card-badge">0</span></div>
+        <div class="card-header d-flex align-items-center gap-2"><h3 class="card-title">WireGuard Peers</h3><span id="vpnPageCount" class="card-badge">0</span><span data-res-add="wgPeer"></span></div>
         <div class="card-body" style="padding:.65rem .75rem">
-          <div class="vpn-tile-grid" id="vpnPageGrid">
+          <!-- Tiles, not rows — the delegation looks for the nearest ancestor
+               carrying data-id, so a grid works the same as a tbody. -->
+          <div class="vpn-tile-grid" id="vpnPageGrid" data-res-rows="wgPeer">
             <div class="empty-state">No peers configured</div>
           </div>
         </div>
@@ -3155,21 +3446,91 @@
         </div>
       </div>
 
-      <div class="card" id="capsmanProvCard" style="margin-top:.85rem">
-        <div class="card-header d-flex align-items-center gap-2">
-          <h3 class="card-title mb-0">Provisioning</h3>
-          <span id="capsmanProvBadge" class="card-badge">0</span>
+      <!-- CAPsMAN configuration. Five RouterOS menus behind one tab strip, all
+           editable through the shared resource dialog. The Provisioning tab
+           replaced a separate read-only card showing the same rules: two tables
+           of one thing is one too many once the second one can edit it. -->
+      <div class="card" id="capsCfgCard" style="margin-top:.85rem">
+        <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
+          <div class="stab-bar" id="capsCfgTabBar" role="tablist" aria-label="CAPsMAN configuration">
+            <button class="stab active" data-capstab="provisioning" role="tab" aria-selected="true"
+                    aria-controls="capstab-provisioning" id="capsTabBtn-provisioning">Provisioning</button>
+            <button class="stab" data-capstab="configuration" role="tab" aria-selected="false"
+                    aria-controls="capstab-configuration" id="capsTabBtn-configuration">Configuration</button>
+            <button class="stab" data-capstab="security" role="tab" aria-selected="false"
+                    aria-controls="capstab-security" id="capsTabBtn-security">Security</button>
+            <button class="stab" data-capstab="channel" role="tab" aria-selected="false"
+                    aria-controls="capstab-channel" id="capsTabBtn-channel">Channel</button>
+            <button class="stab" data-capstab="datapath" role="tab" aria-selected="false"
+                    aria-controls="capstab-datapath" id="capsTabBtn-datapath">Datapath</button>
+          </div>
+          <div class="hdr-actions">
+            <span class="muted-note" id="capsCfgNote"></span>
+            <!-- Which resource this means follows the active tab: app.js rewrites
+                 data-res-add and fires mikrodash:resmount. data-res-add-dynamic
+                 declares the whole range it can become, so the mount is greppable
+                 and a resource reachable only after a tab change still counts. -->
+            <span id="capsAddSlot" data-res-add="capsProvisioning"
+                  data-res-add-dynamic="capsProvisioning,capsConfig,capsSecurity,capsChannel,capsDatapath"></span>
+          </div>
         </div>
         <div class="card-body p-0">
-          <div class="data-scroll" style="max-height:340px;overflow-y:auto">
-            <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:820px">
-              <colgroup><col style="width:22%"><col style="width:18%"><col style="width:20%"><col style="width:25%"><col style="width:15%"></colgroup>
-              <thead><tr><th>Bands</th><th>Action</th><th>Master Config</th><th>Slave Configs</th><th>Name Format</th></tr></thead>
-              <tbody id="capsmanProvTable">
-                <tr><td colspan="5" class="empty-state">No provisioning rules.</td></tr>
-              </tbody>
-            </table>
+
+          <div class="capstab-panel" id="capstab-provisioning" role="tabpanel"
+               aria-labelledby="capsTabBtn-provisioning">
+            <div class="data-scroll" style="max-height:340px">
+              <table class="table table-vcenter mb-0" style="min-width:820px">
+                <colgroup><col style="width:6%"><col style="width:20%"><col style="width:17%"><col style="width:19%"><col style="width:22%"><col style="width:16%"></colgroup>
+                <thead><tr><th class="fw-movecell"></th><th>Bands</th><th>Action</th><th>Master Config</th><th>Slave Configs</th><th>Name Format</th></tr></thead>
+                <tbody id="capsCfgProvTable" data-res-rows="capsProvisioning"></tbody>
+              </table>
+            </div>
           </div>
+
+          <div class="capstab-panel" id="capstab-configuration" role="tabpanel"
+               aria-labelledby="capsTabBtn-configuration" hidden>
+            <div class="data-scroll" style="max-height:340px">
+              <table class="table table-vcenter mb-0" style="min-width:820px">
+                <colgroup><col style="width:22%"><col style="width:18%"><col style="width:14%"><col style="width:16%"><col style="width:16%"><col style="width:14%"></colgroup>
+                <thead><tr><th>Name</th><th>SSID</th><th>Country</th><th>Security</th><th>Channel</th><th>Datapath</th></tr></thead>
+                <tbody id="capsCfgConfigTable" data-res-rows="capsConfig"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="capstab-panel" id="capstab-security" role="tabpanel"
+               aria-labelledby="capsTabBtn-security" hidden>
+            <div class="data-scroll" style="max-height:340px">
+              <table class="table table-vcenter mb-0" style="min-width:620px">
+                <colgroup><col style="width:28%"><col style="width:34%"><col style="width:19%"><col style="width:19%"></colgroup>
+                <thead><tr><th>Name</th><th>Authentication</th><th>WPS</th><th>Fast Roaming</th></tr></thead>
+                <tbody id="capsCfgSecurityTable" data-res-rows="capsSecurity"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="capstab-panel" id="capstab-channel" role="tabpanel"
+               aria-labelledby="capsTabBtn-channel" hidden>
+            <div class="data-scroll" style="max-height:340px">
+              <table class="table table-vcenter mb-0" style="min-width:660px">
+                <colgroup><col style="width:26%"><col style="width:14%"><col style="width:28%"><col style="width:16%"><col style="width:16%"></colgroup>
+                <thead><tr><th>Name</th><th>Band</th><th>Frequency</th><th>Width</th><th>Skip DFS</th></tr></thead>
+                <tbody id="capsCfgChannelTable" data-res-rows="capsChannel"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="capstab-panel" id="capstab-datapath" role="tabpanel"
+               aria-labelledby="capsTabBtn-datapath" hidden>
+            <div class="data-scroll" style="max-height:340px">
+              <table class="table table-vcenter mb-0" style="min-width:660px">
+                <colgroup><col style="width:24%"><col style="width:20%"><col style="width:12%"><col style="width:22%"><col style="width:22%"></colgroup>
+                <thead><tr><th>Name</th><th>Bridge</th><th>VLAN</th><th>Client Isolation</th><th>Forwarding</th></tr></thead>
+                <tbody id="capsCfgDatapathTable" data-res-rows="capsDatapath"></tbody>
+              </table>
+            </div>
+          </div>
+
         </div>
       </div>
 
@@ -3213,6 +3574,10 @@
             <option value="lg">Large</option>
             <option value="list">List</option>
           </select>
+          <!-- VETH and nothing else. A VLAN belongs on the VLANs page and a
+               bridge on the Bridges page; the thing this card is missing is the
+               one virtual interface with no page of its own. -->
+          <span data-res-add="veth"></span>
         </div>
         <div class="card-body" style="padding:.65rem .75rem">
           <div class="iface-grid" id="ifaceGrid"><div class="empty-state">Waiting&#8230;</div></div>
@@ -3477,7 +3842,7 @@
             <span id="qActionNote" class="muted-note"></span>
             <input id="qSearch" class="form-control form-control-sm"
                    placeholder="Search&hellip;" style="flex:0 1 200px;width:200px"/>
-            <button class="sbtn sbtn-primary" id="qAddBtn" style="padding:.32rem .7rem;font-size:.72rem">Add Queue</button>
+            <button class="sbtn sbtn-primary" id="qAddBtn" style="padding:.32rem .7rem;font-size:.72rem">+ Add Queue</button>
           </div>
         </div>
         <div class="card-body p-0">
@@ -3617,7 +3982,7 @@
             <span id="ruActionNote" class="muted-note"></span>
             <input id="ruSearch" class="form-control form-control-sm"
                    placeholder="Search&hellip;" style="flex:0 1 220px;width:220px"/>
-            <button class="sbtn sbtn-primary" id="ruAddBtn" style="padding:.32rem .7rem;font-size:.72rem">Add User</button>
+            <button class="sbtn sbtn-primary" id="ruAddBtn" style="padding:.32rem .7rem;font-size:.72rem">+ Add User</button>
           </div>
         </div>
         <div class="card-body p-0">
@@ -3873,6 +4238,7 @@
         <button class="stab" data-rtab="bandwidth">Bandwidth Usage</button>
         <button class="stab" data-rtab="alerts">Alert Events</button>
         <button class="stab" data-rtab="connectivity">Connectivity</button>
+        <button class="stab" data-rtab="scheduled">Scheduled</button>
       </div>
 
       <!-- ── Ping Stability tab ─────────────────────────────────────────── -->
@@ -3988,6 +4354,30 @@
         </div>
       </div>
 
+      <!-- ── Scheduled reports (#60) ─────────────────────────────────────
+           A tab rather than a card: this page is already tabbed, so a card
+           would sit on all five others. It inherits the router selector and
+           the page's permission gate, and needs no entry in src/pages.js. -->
+      <div id="rtab-scheduled" class="rtab-panel">
+        <div id="rptSchedNotice" class="ros-update-row warn" style="display:none">
+          <span class="ros-update-dot"></span>
+          <span id="rptSchedNoticeText"></span>
+        </div>
+        <div class="rpt-export-row" id="rptSchedActions"></div>
+        <div class="bw-table-wrap">
+          <table class="bw-table">
+            <thead><tr>
+              <th>Name</th><th>Frequency</th><th>Sections</th><th>Recipients</th>
+              <th>Last run</th><th class="text-end">Actions</th>
+            </tr></thead>
+            <tbody id="rptSchedTbody">
+              <tr><td colspan="6" class="rpt-empty">Select a router to see its scheduled reports.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="rptSchedRuns" style="margin-top:.85rem"></div>
+      </div>
+
     </div>
   </div>
 
@@ -4092,6 +4482,95 @@
         </div>
         <div class="rtrmap-tray" id="rtrMapTray" hidden></div>
       </div>
+    </div>
+  </div>
+
+  <div class="page-view" id="page-backups">
+    <div class="container-fluid px-0" style="width:100%">
+
+      <div class="wl-summary-row" style="grid-template-columns:repeat(4,1fr)">
+        <div class="wl-summary-card"><div class="wl-summary-title">Last backup</div><div class="fa-stat-val" id="bkSumLast">&mdash;</div></div>
+        <div class="wl-summary-card"><div class="wl-summary-title">Restore points</div><div class="fa-stat-val" id="bkSumStored">&mdash;</div></div>
+        <div class="wl-summary-card"><div class="wl-summary-title">Disk used</div><div class="fa-stat-val" id="bkSumBytes">&mdash;</div></div>
+        <div class="wl-summary-card"><div class="wl-summary-title">Schedule</div><div class="fa-stat-val" id="bkSumSchedule">&mdash;</div></div>
+      </div>
+
+      <div class="card" id="bkSettingsCard">
+        <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
+          <div class="d-flex align-items-center gap-2">
+            <h3 class="card-title mb-0">Backup Schedule</h3>
+            <span id="bkRouterName" class="muted-note"></span>
+          </div>
+          <div class="hdr-actions" id="bkSettingsActions"></div>
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-sm-3">
+              <label class="form-label" for="bkEnabled">Automatic backups</label>
+              <label class="stoggle"><span class="stoggle-label">Enabled</span><span class="stoggle-switch"><input type="checkbox" id="bkEnabled"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
+            </div>
+            <div class="col-sm-3">
+              <label class="form-label" for="bkSchedule">Frequency</label>
+              <select class="form-select form-select-sm" id="bkSchedule">
+                <option value="hourly">Hourly</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </div>
+            <div class="col-sm-2">
+              <label class="form-label" for="bkTime">Backup time</label>
+              <input type="time" class="form-control form-control-sm" id="bkTime">
+              <div class="form-hint" id="bkTimeHint">any time</div>
+            </div>
+            <div class="col-sm-2">
+              <label class="form-label" for="bkKeepCount">Keep at most</label>
+              <input type="number" min="0" max="1000" class="form-control form-control-sm" id="bkKeepCount">
+              <div class="form-hint">restore points, 0 for no limit</div>
+            </div>
+            <div class="col-sm-2">
+              <label class="form-label" for="bkKeepDays">Keep for</label>
+              <input type="number" min="0" max="3650" class="form-control form-control-sm" id="bkKeepDays">
+              <div class="form-hint">days, 0 for no limit</div>
+            </div>
+          </div>
+          <div class="form-hint mt-3" id="bkExplain">
+            A backup is stored only when the configuration actually changed, so a
+            frequent schedule costs a short check rather than disk. Each restore point
+            is a pair: an export for the diff, and an encrypted binary for the restore.
+          </div>
+        </div>
+      </div>
+
+      <!-- .card carries a 24px box-shadow and no margin, so stacked cards need
+           this explicitly — the same .85rem the summary row uses below itself.
+           Without it the schedule card's shadow falls across this one. -->
+      <div class="card" id="bkHistoryCard" style="margin-top:.85rem">
+        <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
+          <div class="d-flex align-items-center gap-2">
+            <h3 class="card-title mb-0">History</h3>
+            <span id="bkBadge" class="card-badge">0</span>
+            <span id="bkNote" class="muted-note"></span>
+          </div>
+          <div class="hdr-actions" id="bkHistoryActions"></div>
+        </div>
+        <div class="card-body p-0">
+          <div class="data-scroll" style="max-height:520px;overflow-y:auto">
+            <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:820px">
+              <colgroup><col style="width:2.6rem"><col style="width:4.5rem"><col style="width:18%"><col style="width:13%"><col style="width:12%"><col style="width:13%"><col style="width:13%"><col style="width:21%"></colgroup>
+              <thead><tr>
+                <th class="text-center" style="padding-right:0">
+                  <input type="checkbox" class="bk-pick" id="bkPickAll" title="Select all restore points" aria-label="Select all restore points">
+                </th>
+                <th>ID</th>
+                <th>When</th><th>Result</th><th>Trigger</th><th>RouterOS</th><th>Size</th><th class="text-end">Actions</th>
+              </tr></thead>
+              <tbody id="bkTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -4393,6 +4872,8 @@
               <label class="stoggle"><span class="stoggle-label">Ping Loss</span><span class="stoggle-switch"><input type="checkbox" id="s_notifPing"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">NetWatch Hosts</span><span class="stoggle-switch"><input type="checkbox" id="s_notifNetwatch"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Router Offline / Online</span><span class="stoggle-switch"><input type="checkbox" id="s_notifRouterStatus"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
+              <label class="stoggle"><span class="stoggle-label">Configuration Drift</span><span class="stoggle-switch"><input type="checkbox" id="s_notifBackupDrift"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
+              <label class="stoggle"><span class="stoggle-label">Backup Failed</span><span class="stoggle-switch"><input type="checkbox" id="s_notifBackupFail"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle" title="Notify once per release when RouterOS has a newer version available"><span class="stoggle-label">RouterOS Update Available</span><span class="stoggle-switch"><input type="checkbox" id="s_notifRouterUpdate"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle" title="BGP peer up/down, large prefix-count swings, session flapping and hold-timer misconfiguration"><span class="stoggle-label">BGP Peers</span><span class="stoggle-switch"><input type="checkbox" id="s_notifBgp"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
             </div>
@@ -4851,7 +5332,8 @@
               <button type="button" class="view-preset-btn" data-view-preset="custom" title="Your own selection">Custom</button>
             </div>
             <div class="stoggle-grid">
-              <label class="stoggle"><span class="stoggle-label">Wireless</span><span class="stoggle-switch"><input type="checkbox" id="s_pageWireless"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
+              <label class="stoggle"><span class="stoggle-label">Wifi Networks</span><span class="stoggle-switch"><input type="checkbox" id="s_pageWifi"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
+              <label class="stoggle"><span class="stoggle-label">Wifi Clients</span><span class="stoggle-switch"><input type="checkbox" id="s_pageWireless"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">WAN</span><span class="stoggle-switch"><input type="checkbox" id="s_pageWan"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Interfaces</span><span class="stoggle-switch"><input type="checkbox" id="s_pageInterfaces"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">DHCP</span><span class="stoggle-switch"><input type="checkbox" id="s_pageDhcp"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
@@ -4866,6 +5348,7 @@
               <label class="stoggle"><span class="stoggle-label">Queues</span><span class="stoggle-switch"><input type="checkbox" id="s_pageQueues"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Router Users</span><span class="stoggle-switch"><input type="checkbox" id="s_pageRosusers"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Audit</span><span class="stoggle-switch"><input type="checkbox" id="s_pageAudit"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
+              <label class="stoggle"><span class="stoggle-label">Backups</span><span class="stoggle-switch"><input type="checkbox" id="s_pageBackups"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Connections</span><span class="stoggle-switch"><input type="checkbox" id="s_pageConnections"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Firewall</span><span class="stoggle-switch"><input type="checkbox" id="s_pageFirewall"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Logs</span><span class="stoggle-switch"><input type="checkbox" id="s_pageLogs"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
@@ -5344,22 +5827,32 @@
             <h3 class="card-title mb-0" id="rtCardTitle">Static &amp; Dynamic Routes</h3>
           </div>
           <div id="rtRoutesFilters" class="d-flex align-items-center gap-2 flex-wrap justify-content-end">
+            <!-- Trimmed to leave room for the two Add buttons in the corner.
+                 The selects are sized to their own longest option, not padded. -->
             <input type="text" class="form-control form-control-sm" id="rtRouteSearch"
-                   placeholder="Search destination or gateway&hellip;" style="flex:0 1 240px;width:240px">
-            <select class="form-select form-select-sm" id="rtRouteSelType" style="width:168px;flex:0 0 auto;font-size:.74rem" aria-label="Route type filter">
+                   placeholder="Search destination or gateway&hellip;" style="flex:0 1 170px;width:170px">
+            <select class="form-select form-select-sm" id="rtRouteSelType" style="width:142px;flex:0 0 auto;font-size:.74rem" aria-label="Route type filter">
               <option value="">Static + Dynamic</option>
               <option value="static">Static only</option>
               <option value="dynamic">Dynamic only</option>
             </select>
-            <select class="form-select form-select-sm" id="rtRouteSelFamily" style="width:130px;flex:0 0 auto;font-size:.74rem" aria-label="Address family filter">
+            <select class="form-select form-select-sm" id="rtRouteSelFamily" style="width:118px;flex:0 0 auto;font-size:.74rem" aria-label="Address family filter">
               <option value="">IPv4 + IPv6</option>
               <option value="ipv4">IPv4 only</option>
               <option value="ipv6">IPv6 only</option>
             </select>
-            <select class="form-select form-select-sm" id="rtRouteSelActive" style="width:120px;flex:0 0 auto;font-size:.74rem" aria-label="Active routes filter">
+            <select class="form-select form-select-sm" id="rtRouteSelActive" style="width:108px;flex:0 0 auto;font-size:.74rem" aria-label="Active routes filter">
               <option value="">All routes</option>
               <option value="active">Active only</option>
             </select>
+            <!-- Inside the Routes filter group, so the buttons sit with the
+                 controls at the right rather than pushing them to the title —
+                 and so they hide with the group when the BGP tab is showing,
+                 where adding a route is not what anyone is there to do.
+                 Two buttons, because the two address families are two RouterOS
+                 menus and one form cannot be both; ONE slot, because two slots
+                 are two flex items and they wrapped onto separate lines. -->
+            <span data-res-add="route,route6"></span>
           </div>
           <div id="rtPeersFilters" class="d-flex align-items-center gap-2 flex-wrap justify-content-end" hidden>
             <input type="text" class="form-control form-control-sm" id="rtSearch"
@@ -5413,7 +5906,9 @@
                   <th id="rtRThComment">Comment</th>
                 </tr>
               </thead>
-              <tbody id="rtRoutesTbody">
+              <!-- A row carries data-id and data-identity; a v6 row overrides
+                   data-res on itself, because the family decides the menu. -->
+              <tbody id="rtRoutesTbody" data-res-rows="route">
                 <tr><td colspan="6" class="empty-state">Waiting for route data&hellip;</td></tr>
               </tbody>
             </table>
@@ -5963,19 +6458,10 @@
           </p>
 
           <label class="sform-label">Collectors</label>
-          <div class="stoggle-grid" id="rtrModalCollectors">
-            <label class="stoggle"><span class="stoggle-label">Connections</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_conns" data-coll="conns" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle" data-requires="conns"><span class="stoggle-label">Bandwidth</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_bandwidth" data-coll="bandwidth" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle"><span class="stoggle-label">Top Talkers</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_talkers" data-coll="talkers" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle"><span class="stoggle-label">Interface Rates</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_ifStatus" data-coll="ifStatus" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle"><span class="stoggle-label">Ping</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_ping" data-coll="ping" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle"><span class="stoggle-label">Wireless</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_wireless" data-coll="wireless" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle"><span class="stoggle-label">VPN</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_vpn" data-coll="vpn" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle"><span class="stoggle-label">Firewall</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_firewall" data-coll="firewall" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle"><span class="stoggle-label">Routing</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_routing" data-coll="routing" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle"><span class="stoggle-label">NetWatch</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_netwatch" data-coll="netwatch" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-            <label class="stoggle"><span class="stoggle-label">Logs</span><span class="stoggle-switch"><input type="checkbox" id="rtrColl_logs" data-coll="logs" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-          </div>
+          <!-- Built from GET /api/collectors, not written by hand. The hand-written
+               version drifted to 11 toggles against 21 disableable collectors, so ten
+               of them could only be turned off by editing routers.json directly. -->
+          <div class="stoggle-grid" id="rtrModalCollectors"></div>
           <p style="font-size:.68rem;color:var(--text-muted);margin:.35rem 0 0">
             Turn off what a router has no data for. Bandwidth needs Connections and follows it.
             Turning off Interface Rates also stops interface up/down alerts; turning off Ping also
@@ -6056,6 +6542,141 @@
         </div>
       </div>
     </div>
+  </div>
+
+  <!-- ── Add / edit any RouterOS resource ──────────────────────────────
+       ONE dialog for every resource in src/routeros/resources.js. The fields
+       are built at runtime from the schema the server sends, which is why
+       there is nothing between the header and the footer: a field list here
+       would be a second copy of the registry, and copies drift. -->
+  <!-- Configuration diff. Wide and monospaced, because a config diff is only
+       readable if the columns line up. -->
+  <!-- Create or edit a scheduled report. -->
+  <div class="rtr-modal-bg" id="rptSchedModal">
+   <div class="rtr-modal pmodal" style="max-width:30rem">
+    <div class="rtr-modal-hdr">
+      <span class="rtr-modal-title" id="rptSchedTitle">Scheduled report</span>
+      <button class="rtr-modal-close" data-modal-close="rptSchedModal" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="rtr-modal-body">
+      <div class="sform-group">
+        <label class="sform-label" for="rs_name">Name</label>
+        <input class="sform-input" id="rs_name" type="text" maxlength="80" placeholder="Monthly usage">
+      </div>
+      <div class="sform-row">
+        <div class="sform-group">
+          <label class="sform-label" for="rs_frequency">Frequency</label>
+          <select class="sform-input" id="rs_frequency">
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+        </div>
+        <div class="sform-group">
+          <label class="sform-label" for="rs_hour">Send at</label>
+          <select class="sform-input" id="rs_hour"></select>
+        </div>
+      </div>
+      <div class="sform-group">
+        <label class="sform-label">Sections</label>
+        <div class="stoggle-grid" id="rs_sections"></div>
+      </div>
+      <div class="sform-group" id="rs_ifaceWrap" style="display:none">
+        <label class="sform-label" for="rs_iface">Interface</label>
+        <input class="sform-input" id="rs_iface" type="text" placeholder="ether1">
+        <div class="form-hint">Traffic and bandwidth reports cover one interface.</div>
+      </div>
+      <div class="sform-group">
+        <label class="sform-label" for="rs_recipients">Recipients</label>
+        <textarea class="sform-input" id="rs_recipients" rows="3" placeholder="ops@example.com&#10;noc@example.com"></textarea>
+        <div class="form-hint">One address per line. Sent as Bcc, so recipients cannot see each other.</div>
+      </div>
+      <label class="stoggle"><span class="stoggle-label">Enabled</span><span class="stoggle-switch"><input type="checkbox" id="rs_enabled" checked><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
+      <div class="login-error" id="rs_error" style="display:none;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.25);border-radius:6px;color:#f87171;font-size:.78rem;padding:.45rem .65rem;margin-top:.6rem;text-align:center"></div>
+    </div>
+    <div class="rtr-modal-footer">
+      <button class="sbtn sbtn-outline" data-modal-close="rptSchedModal">Cancel</button>
+      <button class="sbtn sbtn-primary" id="rs_save">Save</button>
+    </div>
+   </div>
+  </div>
+
+  <div class="rtr-modal-bg" id="bkDiffModal">
+   <div class="rtr-modal pmodal" style="max-width:1100px;width:96vw">
+    <div class="rtr-modal-hdr">
+      <span class="rtr-modal-title" id="bkDiffTitle">Changes</span>
+      <button class="rtr-modal-close" data-modal-close="bkDiffModal" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="rtr-modal-body">
+      <div id="bkDiffSummary" class="muted-note" style="margin-bottom:.5rem"></div>
+      <div id="bkDiffBody" class="bk-diff"></div>
+    </div>
+   </div>
+  </div>
+
+  <div class="rtr-modal-bg" id="resModal">
+   <div class="rtr-modal pmodal">
+    <div class="rtr-modal-hdr">
+      <span class="rtr-modal-title" id="res_title">Add</span>
+      <button class="rtr-modal-close" data-modal-close="resModal" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="rtr-modal-body">
+      <div id="res_fields"></div>
+      <div class="login-error" id="res_error" style="display:none;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.25);border-radius:6px;color:#f87171;font-size:.78rem;padding:.45rem .65rem;margin-top:.6rem;text-align:center"></div>
+      <!-- The self-cutoff prompt lives inside the dialog rather than in a
+           window.confirm, so it can name the interface and the address the
+           router sees us from. -->
+      <div id="res_warn" style="display:none;background:rgba(245,159,0,.1);border:1px solid rgba(245,159,0,.3);border-radius:6px;color:var(--text-main);font-size:.78rem;padding:.55rem .7rem;margin-top:.6rem"></div>
+      <!-- #97 asks for a preview before apply. Collapsed by default: it is
+           reassurance for the cautious, not a step everyone must read. -->
+      <div style="margin-top:.7rem">
+        <button class="sbtn sbtn-ghost" id="res_previewBtn" type="button" style="padding:.25rem .6rem;font-size:.7rem">Show command</button>
+        <pre id="res_preview" style="display:none;margin:.5rem 0 0;padding:.5rem .6rem;background:rgba(127,127,127,.09);border-radius:6px;font-size:.7rem;white-space:pre-wrap;word-break:break-all;color:var(--text-muted)"></pre>
+      </div>
+    </div>
+    <div class="rtr-modal-footer">
+      <button class="sbtn sbtn-danger" id="res_delete" style="margin-right:auto;display:none">Delete</button>
+      <!-- Verbs a row still offers when it cannot be edited — "make static" on
+           a dynamic DHCP lease is the case this exists for. Filled from the
+           action list the server sends, which it re-checks against a fresh
+           read before acting on any of them. -->
+      <span id="res_actions"></span>
+      <button class="sbtn sbtn-outline" data-modal-close="resModal">Cancel</button>
+      <button class="sbtn sbtn-primary" id="res_save">Save</button>
+    </div>
+   </div>
+  </div>
+
+  <!-- ── Upgrade RouterOS ──────────────────────────────────────────────
+       Reached from the update row on the Dashboard's System card. The name
+       confirmation is the same second gate apply-changes uses: this one
+       downloads and reboots in a single command. -->
+  <div class="rtr-modal-bg" id="updModal">
+   <div class="rtr-modal pmodal" style="max-width:26rem">
+    <div class="rtr-modal-hdr">
+      <span class="rtr-modal-title">Update RouterOS</span>
+      <button class="rtr-modal-close" data-modal-close="updModal" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="rtr-modal-body">
+      <div style="display:flex;align-items:center;justify-content:center;gap:.6rem;font-size:1.05rem;margin:.2rem 0 .1rem">
+        <span id="upd_from" style="color:var(--text-muted)">&mdash;</span>
+        <span style="color:var(--text-muted)">&rarr;</span>
+        <strong id="upd_to" style="color:var(--accent-warn)">&mdash;</strong>
+      </div>
+      <div style="text-align:center;font-size:.72rem;color:var(--text-muted);margin-bottom:.8rem" id="upd_channel"></div>
+      <div style="background:rgba(245,159,0,.1);border:1px solid rgba(245,159,0,.3);border-radius:6px;font-size:.78rem;padding:.55rem .7rem;margin-bottom:.8rem;color:var(--text-main)">
+        The router downloads the packages and <strong>reboots immediately</strong>. Every connection through it drops for the duration.
+      </div>
+      <label class="sform-label">Type the router name to confirm</label>
+      <input class="sform-input" id="upd_confirm" type="text" autocomplete="off" placeholder="">
+      <div id="upd_pending" style="display:none;text-align:center;font-size:.76rem;color:var(--text-muted);margin-top:.7rem;line-height:1.5"></div>
+      <div class="login-error" id="upd_error" style="display:none;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.25);border-radius:6px;color:#f87171;font-size:.78rem;padding:.45rem .65rem;margin-top:.6rem;text-align:center"></div>
+    </div>
+    <div class="rtr-modal-footer">
+      <button class="sbtn sbtn-outline" id="upd_cancel" data-modal-close="updModal">Cancel</button>
+      <button class="sbtn sbtn-primary" id="upd_go">Update &amp; Reboot</button>
+    </div>
+   </div>
   </div>
 
   <!-- ── Router Switching Overlay ──────────────────────────────────── -->
