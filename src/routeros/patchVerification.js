@@ -1,17 +1,22 @@
 const path = require('path');
 
-const PATCH_MARKERS = [
-  'MIKRODASH_PATCHED_EMPTY_REPLY',
-  'MIKRODASH_PATCHED_EMPTY_NO_CLOSE',
-  'MIKRODASH_PATCHED_UNREGISTEREDTAG',
-  'MIKRODASH_PATCHED_UTF8_ENCODING',
-  'MIKRODASH_PATCHED_MULTI_BLOCK',
-  'MIKRODASH_PATCHED_MULTI_BLOCK_V2',
-];
+// Which file each marker must appear in. Spelled out rather than derived from
+// the marker's name so every compatibility patch is verified in the file it
+// actually modifies.
+const PATCH_FILES = {
+  MIKRODASH_PATCHED_EMPTY_REPLY:     'Channel.js',
+  MIKRODASH_PATCHED_EMPTY_NO_CLOSE:  'Channel.js',
+  MIKRODASH_PATCHED_UNREGISTEREDTAG: path.join('connector', 'Receiver.js'),
+  MIKRODASH_PATCHED_RAW_BYTES:       path.join('connector', 'Receiver.js'),
+  MIKRODASH_PATCHED_MULTI_BLOCK:     'Channel.js',
+  MIKRODASH_PATCHED_MULTI_BLOCK_V2:  'Channel.js',
+  MIKRODASH_PATCHED_UTF8_ENCODE:     path.join('connector', 'Transmitter.js'),
+};
+
+const PATCH_MARKERS = Object.keys(PATCH_FILES);
 
 function resolveDistPath(marker) {
-  return marker.includes('EMPTY') || marker.includes('MULTI_BLOCK')
-    ? 'Channel.js' : path.join('connector', 'Receiver.js');
+  return PATCH_FILES[marker] || path.join('connector', 'Receiver.js');
 }
 
 function hasExactPatchMarker(src, marker) {

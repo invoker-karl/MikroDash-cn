@@ -11,7 +11,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrodash-v10-upgrade-'))
 process.env.DATA_DIR = dataDir;
 const db = require('../src/db');
 
-test('v0.7.8 user layouts survive the v11/v12 upgrade and nav becomes writable', () => {
+test('v0.7.8 user layouts survive the v11-v14 upgrade and nav becomes writable', () => {
   db.open();
   db.setLayout('upgrade-user', 'dashboard', { cards: ['traffic', 'talkers'] });
   db.setLayout('upgrade-user', 'topology', { zoom: 1.25 });
@@ -27,6 +27,12 @@ test('v0.7.8 user layouts survive the v11/v12 upgrade and nav becomes writable',
     DROP INDEX IF EXISTS idx_audit_ts;
     DROP INDEX IF EXISTS idx_audit_router_ts;
     DROP INDEX IF EXISTS idx_audit_actor_ts;
+    DROP INDEX IF EXISTS idx_report_runs_sched;
+    DROP INDEX IF EXISTS idx_report_schedules_router;
+    DROP INDEX IF EXISTS idx_config_backups_router;
+    DROP TABLE IF EXISTS report_runs;
+    DROP TABLE IF EXISTS report_schedules;
+    DROP TABLE IF EXISTS config_backups;
     DROP TABLE IF EXISTS audit_events;
     CREATE TABLE user_layouts_v10 (
       user_id TEXT NOT NULL,
@@ -49,9 +55,12 @@ test('v0.7.8 user layouts survive the v11/v12 upgrade and nav becomes writable',
   assert.deepEqual(db.getLayout('upgrade-user', 'nav'), { grouped: true, open: ['network'] });
   assert.deepEqual(
     upgraded.prepare('SELECT version FROM schema_version WHERE version >= 11 ORDER BY version').all().map(r => r.version),
-    [11, 12]
+    [11, 12, 13, 14]
   );
   assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_events'").get());
+  assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='config_backups'").get());
+  assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='report_schedules'").get());
+  assert.ok(upgraded.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='report_runs'").get());
 });
 
 test.after(() => {

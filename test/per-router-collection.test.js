@@ -36,7 +36,7 @@ test('registry covers every collector the session builds, exactly once', () => {
   const sessionProps = ['dhcpLeases','dhcpNetworks','arp','traffic','conns','talkers','logs',
                         'system','wireless','vpn','firewall','ifStatus','ping','bandwidth',
                         'routing','netwatch','topology','vlans','ppp',
-                        'bridges','dns','capsman','packages','rosusers','queues','wan'];
+                        'bridges','dns','capsman','packages','rosusers','queues','wan','wifi'];
   assert.deepEqual(COLLECTORS.map(c => c.sessionProp).sort(), [...sessionProps].sort());
 });
 
@@ -96,7 +96,7 @@ test('protected collectors are the ones other collectors read unguarded', () => 
   // arp/dhcpLeases/dhcpNetworks are read without a null guard by connections.js;
   // traffic feeds stored history; system feeds identity, the update check and CPU alerts.
   assert.deepEqual(protectedKeys, ['arp','dhcpLeases','dhcpNetworks','system','traffic']);
-  assert.equal(DISABLEABLE.length, 21);
+  assert.equal(DISABLEABLE.length, 22);
 });
 
 // ── Defaults and inheritance ─────────────────────────────────────────────────
@@ -706,12 +706,12 @@ test('no collector clears a poll timer on suspend without restarting it on resum
   };
   const offenders = [];
   for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.js'))) {
-    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    const src = fs.readFileSync(path.join(dir, f), 'utf8').replace(/\r\n/g, '\n');
     if (!src.includes('streamMode')) continue;          // no poll path to strand
     const s = body(src, 'suspend'), r = body(src, 'resume');
     if (!s || !r) continue;                              // no suspend/resume pair
     const stopsPoll   = /_pollTimer|_stopPoll|_stopRatesPoll|Poll\.stop\(\)/.test(s);
-    const restartsPoll = /_schedule|_startRatesPoll|_poll[A-Z]\w*Once|_startPoll|Poll\.start\(\)|streamMode/.test(r);
+    const restartsPoll = /_schedule|_startRatesPoll|_startTalkers|_poll[A-Z]\w*Once|_startPoll|Poll\.start\(\)|streamMode/.test(r);
     if (stopsPoll && !restartsPoll) offenders.push(f);
   }
   assert.deepEqual(offenders, [],

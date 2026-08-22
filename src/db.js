@@ -495,6 +495,106 @@ const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 13,
+    up(db) {
+      // Configuration backups. Metadata only — the .rsc.gz / .backup pairs live
+      // on disk under /data/config-backups, because a 3.4 MB binary per restore
+      // point does not belong in a database that is otherwise time-series.
+      //
+      // EVERY run is recorded, including ones that changed nothing: "checked
+      // daily, changed on these three dates" is the useful history, and it is
+      // also how the scheduler knows whether a backup is due after a restart.
+      //
+      // `dir` is stored rather than re-derived from the router's label, so
+      // renaming a router cannot orphan its backups.
+      //
+      // Like audit_events and the RBAC tables, this is deliberately absent from
+      // PURGE_TABLES and from deleteRouterData(). A retention sweep for metrics
+      // must never delete a restore point, and removing a router is exactly
+      // when its last known-good configuration matters most.
+      db.exec(`
+        CREATE TABLE config_backups (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          router_id    TEXT    NOT NULL,
+          taken_at     INTEGER NOT NULL,
+          outcome      TEXT    NOT NULL,
+          source       TEXT    NOT NULL DEFAULT 'schedule',
+          actor        TEXT,
+          stem         TEXT,
+          dir          TEXT,
+          fingerprint  TEXT,
+          rsc_bytes    INTEGER NOT NULL DEFAULT 0,
+          backup_bytes INTEGER NOT NULL DEFAULT 0,
+          model        TEXT,
+          serial       TEXT,
+          os_version   TEXT,
+          ms           INTEGER NOT NULL DEFAULT 0,
+          pruned_at    INTEGER,
+          error        TEXT
+        );
+        CREATE INDEX idx_config_backups_router ON config_backups (router_id, taken_at DESC);
+      `);
+    },
+  },
+  {
+    version: 14,
+    up(db) {
+      // Scheduled email reports (#60).
+      //
+      // Two tables rather than one, unlike config_backups. A backup IS a run,
+      // so folding them together is right there. A schedule is long-lived
+      // configuration with many runs against it, and putting the history in
+      // columns would erase "did last month's go out?" the moment this month's
+      // fires — which is the question the whole feature exists to answer.
+      //
+      // There is deliberately no last_run_at mirror on the schedule. Due-ness
+      // reads MAX(ran_at) from report_runs; a mirror is a second source of
+      // truth that can disagree with the history it claims to summarise.
+      //
+      // Both tables are absent from PURGE_TABLES and deleteRouterData() for the
+      // same reason config_backups is: those sweep time-series data, and a
+      // schedule is configuration. Removing a router does delete its schedules,
+      // but explicitly in the route where it is visible, rather than as a side
+      // effect of a retention sweep.
+      db.exec(`
+        CREATE TABLE report_schedules (
+          id              TEXT PRIMARY KEY,
+          router_id       TEXT    NOT NULL,
+          name            TEXT    NOT NULL,
+          sections        TEXT    NOT NULL,
+          interface       TEXT,
+          aggregate       TEXT    NOT NULL DEFAULT '',
+          recipients      TEXT    NOT NULL,
+          frequency       TEXT    NOT NULL CHECK (frequency IN ('daily','weekly','monthly')),
+          send_hour       INTEGER NOT NULL DEFAULT 7,
+          enabled         INTEGER NOT NULL DEFAULT 1,
+          disabled_reason TEXT,
+          created_by      TEXT,
+          created_at      INTEGER NOT NULL,
+          updated_at      INTEGER NOT NULL
+        );
+        CREATE INDEX idx_report_schedules_router ON report_schedules (router_id);
+
+        CREATE TABLE report_runs (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          schedule_id  TEXT    NOT NULL REFERENCES report_schedules(id) ON DELETE CASCADE,
+          ran_at       INTEGER NOT NULL,
+          period_from  INTEGER NOT NULL,
+          period_to    INTEGER NOT NULL,
+          outcome      TEXT    NOT NULL,
+          source       TEXT    NOT NULL DEFAULT 'schedule',
+          actor        TEXT,
+          recipients_n INTEGER NOT NULL DEFAULT 0,
+          bytes        INTEGER NOT NULL DEFAULT 0,
+          rows_n       INTEGER NOT NULL DEFAULT 0,
+          ms           INTEGER NOT NULL DEFAULT 0,
+          error        TEXT
+        );
+        CREATE INDEX idx_report_runs_sched ON report_runs (schedule_id, ran_at DESC);
+      `);
+    },
+  },
 ];
 
 function _runMigrations(db) {
@@ -1258,6 +1358,287 @@ function deleteRouterData(routerId) {
   console.log('%s', `[db] deleted all data for router ${routerId}`);
 }
 
+// ── Configuration backups ────────────────────────────────────────────────────
+// Note what is NOT above: config_backups is absent from deleteRouterData() and
+// from PURGE_TABLES, on purpose. Nothing that sweeps time-series data can reach
+// a restore point. Pruning backups is its own thing, bounded by the per-router
+// keepCount/keepDays, and it clears `stem` rather than the row — the history of
+// when a router was checked outlives the artefacts.
+
+function recordBackup(row) {
+  if (!_db) return null;
+  try {
+    const info = _prep(`
+      INSERT INTO config_backups
+        (router_id, taken_at, outcome, source, actor, stem, dir, fingerprint,
+         rsc_bytes, backup_bytes, model, serial, os_version, ms, error)
+      VALUES
+        (@routerId, @takenAt, @outcome, @source, @actor, @stem, @dir, @fingerprint,
+         @rscBytes, @backupBytes, @model, @serial, @osVersion, @ms, @error)
+    `).run({
+      routerId:    row.routerId,
+      takenAt:     row.takenAt || Date.now(),
+      outcome:     row.outcome,
+      source:      row.source || 'schedule',
+      actor:       row.actor || null,
+      stem:        row.stem || null,
+      dir:         row.dir || null,
+      fingerprint: row.fingerprint || null,
+      rscBytes:    row.rscBytes || 0,
+      backupBytes: row.backupBytes || 0,
+      model:       (row.identity && row.identity.model) || null,
+      serial:      (row.identity && row.identity.serial) || null,
+      osVersion:   (row.identity && row.identity.osVersion) || null,
+      ms:          row.ms || 0,
+      error:       row.error || null,
+    });
+    return info.lastInsertRowid;
+  } catch (e) {
+    console.error('%s', '[db] backup record failed:', (e && e.message) || e);
+    return null;
+  }
+}
+
+/** Runs for one router, newest first. */
+function listBackups(routerId, limit) {
+  if (!_db) return [];
+  return _prep(`SELECT * FROM config_backups WHERE router_id = ?
+                ORDER BY taken_at DESC LIMIT ?`).all(routerId, Math.min(Number(limit) || 200, 1000));
+}
+
+function getBackup(id) {
+  if (!_db) return null;
+  return _prep('SELECT * FROM config_backups WHERE id = ?').get(Number(id)) || null;
+}
+
+/**
+ * The configuration this router was last seen with.
+ *
+ * Any run that read an export has a fingerprint, whether or not it stored a
+ * pair — so an unchanged run still moves this forward and a failed one leaves
+ * it alone. That is what stops a transient failure from being reported as
+ * drift on the next successful run.
+ */
+function latestFingerprint(routerId) {
+  if (!_db) return null;
+  const row = _prep(`SELECT fingerprint FROM config_backups
+                     WHERE router_id = ? AND fingerprint IS NOT NULL
+                     ORDER BY taken_at DESC LIMIT 1`).get(routerId);
+  return row ? row.fingerprint : null;
+}
+
+/**
+ * When this router was last attempted, at all.
+ *
+ * Read from the database rather than held in memory, so a restart neither
+ * skips a due backup nor re-runs one taken a minute ago — the failure mode of
+ * a purely in-process timer.
+ */
+function lastBackupRun(routerId) {
+  if (!_db) return 0;
+  const row = _prep(`SELECT taken_at FROM config_backups WHERE router_id = ?
+                     ORDER BY taken_at DESC LIMIT 1`).get(routerId);
+  return row ? row.taken_at : 0;
+}
+
+/** The stored pairs for a router, newest first — rows that still have files. */
+function storedBackups(routerId) {
+  if (!_db) return [];
+  return _prep(`SELECT * FROM config_backups
+                WHERE router_id = ? AND stem IS NOT NULL AND pruned_at IS NULL
+                ORDER BY taken_at DESC`).all(routerId);
+}
+
+/**
+ * Remove a backup row outright — a deliberate operator delete, not retention.
+ *
+ * The two are different acts and get different treatment. Retention aging a pair
+ * out is something MikroDash did on its own, so markBackupPruned keeps the row
+ * and the History table explains the disappearance. Pressing Delete is somebody
+ * saying "I do not want this listed", and leaving a tombstone behind answers a
+ * question they did not ask.
+ *
+ * The trail is not lost: audit_events independently records the backup.run that
+ * created it and the backup.delete that removed it, and the audit table is the
+ * one place deliberately hard to erase. The caller resolves the id router-first,
+ * so this can only ever be aimed at a row it was already allowed to see.
+ */
+function deleteBackup(id) {
+  if (!_db) return false;
+  const info = _prep('DELETE FROM config_backups WHERE id = ?').run(Number(id));
+  return info.changes > 0;
+}
+
+/** The artefacts are gone; the record of the run is not. Retention's half. */
+function markBackupPruned(id, ts) {
+  if (!_db) return false;
+  const info = _prep('UPDATE config_backups SET pruned_at = ? WHERE id = ?')
+    .run(ts || Date.now(), Number(id));
+  return info.changes > 0;
+}
+
+// ── Scheduled email reports (#60) ────────────────────────────────────────────
+// Same placement reasoning as config_backups above: absent from PURGE_TABLES
+// and deleteRouterData(), because a schedule is configuration rather than
+// telemetry. Removing a router calls deleteReportSchedulesForRouter explicitly.
+
+function listReportSchedules() {
+  if (!_db) return [];
+  return _prep('SELECT * FROM report_schedules ORDER BY created_at').all();
+}
+
+function listReportSchedulesFor(routerId) {
+  if (!_db) return [];
+  return _prep('SELECT * FROM report_schedules WHERE router_id = ? ORDER BY created_at')
+    .all(routerId);
+}
+
+function getReportSchedule(id) {
+  if (!_db) return null;
+  return _prep('SELECT * FROM report_schedules WHERE id = ?').get(String(id)) || null;
+}
+
+/** Insert or replace a whole schedule row. Validation belongs to the caller. */
+function upsertReportSchedule(row) {
+  if (!_db) return null;
+  _prep(`
+    INSERT INTO report_schedules
+      (id, router_id, name, sections, interface, aggregate, recipients, frequency,
+       send_hour, enabled, disabled_reason, created_by, created_at, updated_at)
+    VALUES
+      (@id, @routerId, @name, @sections, @iface, @aggregate, @recipients, @frequency,
+       @sendHour, @enabled, @disabledReason, @createdBy, @createdAt, @updatedAt)
+    ON CONFLICT(id) DO UPDATE SET
+      name = @name, sections = @sections, interface = @iface, aggregate = @aggregate,
+      recipients = @recipients, frequency = @frequency, send_hour = @sendHour,
+      enabled = @enabled, disabled_reason = @disabledReason, updated_at = @updatedAt
+  `).run({
+    id: row.id, routerId: row.routerId, name: row.name,
+    sections: JSON.stringify(row.sections || []),
+    iface: row.iface || null,
+    aggregate: row.aggregate || '',
+    recipients: JSON.stringify(row.recipients || []),
+    frequency: row.frequency,
+    sendHour: row.sendHour == null ? 7 : row.sendHour,
+    enabled: row.enabled ? 1 : 0,
+    disabledReason: row.disabledReason || null,
+    createdBy: row.createdBy || null,
+    createdAt: row.createdAt || Date.now(),
+    updatedAt: row.updatedAt || Date.now(),
+  });
+  return getReportSchedule(row.id);
+}
+
+/**
+ * Switch a schedule off with a reason.
+ *
+ * The scheduler disables rather than deletes when a router disappears or a
+ * creator loses access: the record of why it stopped is worth more than the row
+ * is worth reclaiming, and a silently vanished schedule is indistinguishable
+ * from one that never existed.
+ */
+function setReportScheduleEnabled(id, enabled, reason) {
+  if (!_db) return false;
+  const info = _prep(`UPDATE report_schedules
+                      SET enabled = ?, disabled_reason = ?, updated_at = ?
+                      WHERE id = ?`)
+    .run(enabled ? 1 : 0, enabled ? null : (reason || null), Date.now(), String(id));
+  return info.changes > 0;
+}
+
+function deleteReportSchedule(id) {
+  if (!_db) return false;
+  return _prep('DELETE FROM report_schedules WHERE id = ?').run(String(id)).changes > 0;
+}
+
+/** Called from the router-delete route: a schedule for a gone router cannot run. */
+function deleteReportSchedulesForRouter(routerId) {
+  if (!_db) return 0;
+  return _prep('DELETE FROM report_schedules WHERE router_id = ?').run(routerId).changes;
+}
+
+/** Newest run history per schedule, bounded so it cannot grow without limit. */
+const REPORT_RUN_KEEP = 100;
+
+function recordReportRun(row) {
+  if (!_db) return null;
+  try {
+    const info = _prep(`
+      INSERT INTO report_runs
+        (schedule_id, ran_at, period_from, period_to, outcome, source, actor,
+         recipients_n, bytes, rows_n, ms, error)
+      VALUES
+        (@scheduleId, @ranAt, @periodFrom, @periodTo, @outcome, @source, @actor,
+         @recipientsN, @bytes, @rowsN, @ms, @error)
+    `).run({
+      scheduleId: row.scheduleId,
+      ranAt: row.ranAt || Date.now(),
+      periodFrom: row.periodFrom || 0,
+      periodTo: row.periodTo || 0,
+      outcome: row.outcome,
+      source: row.source || 'schedule',
+      actor: row.actor || null,
+      recipientsN: row.recipientsN || 0,
+      bytes: row.bytes || 0,
+      rowsN: row.rowsN || 0,
+      ms: row.ms || 0,
+      error: row.error || null,
+    });
+    _prep(`DELETE FROM report_runs WHERE schedule_id = ? AND id NOT IN
+             (SELECT id FROM report_runs WHERE schedule_id = ? ORDER BY ran_at DESC LIMIT ?)`)
+      .run(row.scheduleId, row.scheduleId, REPORT_RUN_KEEP);
+    return info.lastInsertRowid;
+  } catch (e) {
+    console.error('%s', '[db] report run record failed:', (e && e.message) || e);
+    return null;
+  }
+}
+
+/**
+ * What due-ness needs to know: when this schedule last ran, how that went, and
+ * how many attempts already fall inside the period being considered.
+ */
+function reportRunHistory(scheduleId, periodFrom, periodTo) {
+  if (!_db) return { lastRun: 0, lastOutcome: null, runsInPeriod: 0 };
+  const last = _prep(`SELECT ran_at, outcome FROM report_runs WHERE schedule_id = ?
+                      ORDER BY ran_at DESC LIMIT 1`).get(scheduleId);
+  const inPeriod = _prep(`SELECT COUNT(*) AS n FROM report_runs
+                          WHERE schedule_id = ? AND period_from = ? AND period_to = ?`)
+    .get(scheduleId, periodFrom, periodTo) || { n: 0 };
+  return {
+    lastRun: last ? last.ran_at : 0,
+    lastOutcome: last ? last.outcome : null,
+    runsInPeriod: inPeriod.n || 0,
+  };
+}
+
+function listReportRuns(scheduleId, limit) {
+  if (!_db) return [];
+  return _prep(`SELECT * FROM report_runs WHERE schedule_id = ?
+                ORDER BY ran_at DESC LIMIT ?`)
+    .all(scheduleId, Math.min(Number(limit) || 20, REPORT_RUN_KEEP));
+}
+
+/** Counts and bytes for the page header, per router. */
+function backupSummary(routerId) {
+  if (!_db) return { runs: 0, stored: 0, bytes: 0, lastAt: 0, lastOutcome: null };
+  const agg = _prep(`
+    SELECT COUNT(*) AS runs,
+           SUM(CASE WHEN stem IS NOT NULL AND pruned_at IS NULL THEN 1 ELSE 0 END) AS stored,
+           SUM(CASE WHEN stem IS NOT NULL AND pruned_at IS NULL
+                    THEN rsc_bytes + backup_bytes ELSE 0 END) AS bytes
+    FROM config_backups WHERE router_id = ?`).get(routerId) || {};
+  const last = _prep(`SELECT taken_at, outcome FROM config_backups WHERE router_id = ?
+                      ORDER BY taken_at DESC LIMIT 1`).get(routerId);
+  return {
+    runs: agg.runs || 0,
+    stored: agg.stored || 0,
+    bytes: agg.bytes || 0,
+    lastAt: last ? last.taken_at : 0,
+    lastOutcome: last ? last.outcome : null,
+  };
+}
+
 // ── Sites (issue #78) ────────────────────────────────────────────────────────
 // Persistence only. Validation of names, lengths and coordinate ranges lives in
 // the route layer, matching how routers and users are handled.
@@ -1668,5 +2049,10 @@ module.exports = {
   queryAlertEvents, queryConnectivityEvents, queryConnectivityEventsAgg,
   insertAuditEvent, queryAuditEvents, auditFacets,
   prune, startPruneInterval, deleteRouterData,
+  recordBackup, listBackups, getBackup, latestFingerprint, lastBackupRun,
+  storedBackups, markBackupPruned, deleteBackup, backupSummary,
+  listReportSchedules, listReportSchedulesFor, getReportSchedule, upsertReportSchedule,
+  setReportScheduleEnabled, deleteReportSchedule, deleteReportSchedulesForRouter,
+  recordReportRun, reportRunHistory, listReportRuns, REPORT_RUN_KEEP,
   purge, countPurge, vacuum, stats, PURGE_TYPES,
 };

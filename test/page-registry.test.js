@@ -22,10 +22,11 @@ const Settings = require('../src/settings');
 const { COLLECTORS } = require('../src/collection');
 
 const root     = path.join(__dirname, '..');
-const INDEX_JS = fs.readFileSync(path.join(root, 'src', 'index.js'), 'utf8');
-const APP_JS   = fs.readFileSync(path.join(root, 'public', 'app.js'), 'utf8');
-const HTML     = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
-const PREFLIGHT = fs.readFileSync(path.join(root, 'public', 'preflight.js'), 'utf8');
+const readSource = (...parts) => fs.readFileSync(path.join(root, ...parts), 'utf8').replace(/\r\n/g, '\n');
+const INDEX_JS = readSource('src', 'index.js');
+const APP_JS   = readSource('public', 'app.js');
+const HTML     = readSource('public', 'index.html');
+const PREFLIGHT = readSource('public', 'preflight.js');
 
 // ── Registry integrity ───────────────────────────────────────────────────────
 
@@ -98,7 +99,7 @@ test('the stream-room map is derived and covers only suspendable pages', () => {
   // ones with no page of their own.
   assert.deepStrictEqual(Object.keys(Pages.STREAM_ROOMS).sort(),
     ['bridges', 'capsman', 'dns', 'firewall', 'packages', 'ppp', 'queues',
-     'rosusers', 'routing', 'topology', 'vlans', 'vpn', 'wan', 'wireless']);
+     'rosusers', 'routing', 'topology', 'vlans', 'vpn', 'wan', 'wifi', 'wireless']);
   for (const [page, rooms] of Object.entries(Pages.STREAM_ROOMS)) {
     assert.ok(rooms.includes('page-' + page), page + ' must watch its own page room');
   }
@@ -297,7 +298,7 @@ test('app.js mirrors the preset definition in src/pages.js', () => {
 test('a preset cannot widen what a role allows', () => {
   // The security claim of the whole feature. Presets write install toggles;
   // _pageAllowed() ANDs the role, so turning everything on grants nothing.
-  const src  = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+  const src  = readSource('src', 'index.js');
   const at   = src.indexOf('function _pageAllowed(');
   const body = src.slice(at, at + 700);
   assert.ok(/Rbac\.canPage\(/.test(body), '_pageAllowed must still consult the role');
@@ -321,10 +322,11 @@ test('every page declares a nav category from the registry vocabulary', () => {
         p.key + ' names unknown category ' + p.category);
     }
   }
-  // The five at top level are a decision, not an accident — a new page landing
-  // here silently means somebody forgot to file it.
+  // The six at top level are a decision, not an accident — a new page landing
+  // here silently means somebody forgot to file it. Backups sits here because a
+  // restore point is configuration about the router, not telemetry from it.
   const top = Pages.PAGES.filter(p => p.category === null).map(p => p.key).sort();
-  assert.deepStrictEqual(top, ['audit', 'dashboard', 'reports', 'routers', 'settings']);
+  assert.deepStrictEqual(top, ['audit', 'backups', 'dashboard', 'reports', 'routers', 'settings']);
   // An empty category is a header the visibility sweep has to hide and nobody
   // meant to write.
   for (const c of Pages.CATEGORY_KEYS) {
@@ -457,4 +459,58 @@ test('auto-expanding a category is never saved', () => {
   const body = APP_JS.slice(at, APP_JS.indexOf('\n}', at));
   assert.match(body, /_navAutoCat = navGrp\.dataset\.cat/, 'navigation sets the auto-expand');
   assert.ok(!/_navSave\(/.test(body), 'navigation must not persist the auto-expand');
+});
+
+// ── Page titles: three copies, one source ───────────────────────────────────
+
+test('every page title reaches the nav and the topbar unchanged', () => {
+  // src/pages.js holds the title, but two hand-written mirrors render it: the
+  // nav-label in index.html and PAGE_TITLES in app.js. Category titles were
+  // already guarded above; page titles were not, so the three could drift with
+  // nothing failing. Renaming Wireless -> Wireless Clients touched all three.
+  const titles = Object.fromEntries(
+    (APP_JS.match(/var PAGE_TITLES = \{([^}]*)\}/) || [, ''])[1]
+      .split(',')
+      .map(pair => pair.split(':'))
+      .filter(kv => kv.length === 2)
+      .map(([k, v]) => [k.trim().replace(/^'|'$/g, ''), v.trim().replace(/^'|'$/g, '')]));
+
+  for (const page of Pages.PAGES) {
+    assert.equal(titles[page.key], page.title,
+      'PAGE_TITLES.' + page.key + ' disagrees with src/pages.js');
+  }
+});
+
+test('no nav item is labelled the same as the category holding it', () => {
+  // The Wireless PAGE sat inside the Wireless CATEGORY with both labelled
+  // "Wireless", so the two read as one destination a single indent apart.
+  //
+  // Deliberately NOT "the nav label equals the registry title": Topology is
+  // titled "Network Topology" and labelled "Topology" in the sidebar, which is
+  // right — the category already supplies the "Network". Shortening a label
+  // under its category is good; colliding with it is the bug.
+  const catTitle = Object.fromEntries(Pages.CATEGORIES.map(c => [c.key, c.title]));
+  for (const page of Pages.PAGES) {
+    if (!page.category) continue;
+    const at = HTML.indexOf('data-page="' + page.key + '"');
+    if (at === -1) continue;   // pages without a nav entry are covered elsewhere
+    const item = HTML.slice(at, at + 700);
+    const label = (item.match(/<span class="nav-label">([^<]*)<\/span>/) || [])[1];
+    assert.ok(label, page.key + ' has no nav label');
+    assert.notEqual(label, catTitle[page.category],
+      page.key + ' is labelled "' + label + '" inside a category of the same name');
+  }
+});
+
+test('the wireless category and its client page do not share an icon', () => {
+  // The section means "wireless, generally" and the page lists per-client signal
+  // strength; giving them the same glyph made the sidebar ambiguous.
+  const grp  = HTML.indexOf('class="nav-group" data-cat="wireless"');
+  const item = HTML.indexOf('data-page="wireless"');
+  const svgOf = (from) => (HTML.slice(from, from + 700)
+    .match(/<span class="nav-icon">(<svg[\s\S]*?<\/svg>)<\/span>/) || [])[1];
+  const catSvg  = svgOf(grp);
+  const pageSvg = svgOf(item);
+  assert.ok(catSvg && pageSvg, 'both need an icon');
+  assert.notEqual(catSvg, pageSvg, 'category and page must be distinguishable');
 });

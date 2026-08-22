@@ -20,11 +20,23 @@ function loadLocale(name) {
   return window.MikroDashLocales[name];
 }
 
-function createDom(language = 'en-US') {
+function createDom(language = 'en-US', options = {}) {
   const dom = new JSDOM('<!doctype html><html><body><h1 id="brand" data-i18n-skip>Mikro<span>Dash</span></h1><select data-language-select><option value="en-US">English</option><option value="zh-CN">简体中文</option></select><p id="label">Dashboard</p><input id="search" placeholder="Search"><img id="visual" alt="Dashboard" aria-description="Settings" aria-valuetext="Interfaces"></body></html>', {
     url: 'http://127.0.0.1/', runScripts: 'dangerously', pretendToBeVisual: true,
   });
   Object.defineProperty(dom.window.navigator, 'language', { configurable: true, value: language });
+  if (options.trackObserver) {
+    const NativeObserver = dom.window.MutationObserver;
+    const stats = { created: 0, disconnected: 0 };
+    dom.window.MutationObserver = function TrackingObserver(callback) {
+      stats.created++;
+      const instance = new NativeObserver(callback);
+      const disconnect = instance.disconnect.bind(instance);
+      instance.disconnect = function () { stats.disconnected++; return disconnect(); };
+      return instance;
+    };
+    dom.observerStats = stats;
+  }
   dom.window.eval(readPublic(path.join('locales', 'en-US.js')));
   dom.window.eval(readPublic(path.join('locales', 'zh-CN.js')));
   dom.window.eval(readPublic('i18n.js'));
@@ -53,6 +65,9 @@ test('locale maps required current navigation and settings copy', () => {
 test('every static English UI candidate is translated or explicitly classified', () => {
   const result = audit();
   assert.deepEqual(result.missing, [], result.missing.join('\n'));
+  assert.ok(Array.isArray(result.staleMessages));
+  assert.ok(!result.staleMessages.includes('Dashboard'));
+  assert.ok(!result.staleMessages.includes('This applies all scheduled package changes and REBOOTS the router.'));
 });
 
 test('English locale remains the source-language fallback', () => {
@@ -108,6 +123,19 @@ test('observer translates dynamic nodes and attributes without recursive corrupt
   assert.equal(button.title, '搜索');
   await settle();
   assert.equal(button.title, '搜索');
+  dom.window.close();
+});
+
+test('mutation observer only runs while a translated language is active', async () => {
+  const dom = createDom('en-US', { trackObserver: true });
+  await settle();
+  assert.equal(dom.observerStats.created, 0, 'English should not pay for a document-wide observer');
+  dom.window.MikroDashI18n.setLanguage('zh-CN');
+  assert.equal(dom.observerStats.created, 1);
+  dom.window.MikroDashI18n.setLanguage('en-US');
+  assert.equal(dom.observerStats.disconnected, 1);
+  dom.window.MikroDashI18n.setLanguage('zh-CN');
+  assert.equal(dom.observerStats.created, 2, 'switching back to Chinese re-arms translation');
   dom.window.close();
 });
 
