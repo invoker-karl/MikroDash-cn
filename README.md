@@ -1,7 +1,7 @@
 # MikroDash 中文版
 
 This fork is the reviewed Simplified Chinese edition of MikroDash. Release
-`0.7.32-cn.1` tracks upstream `v0.7.32`; English remains available from the
+`0.7.32-cn.2` tracks upstream `v0.7.32`; English remains available from the
 language selector. Chinese images use
 `ghcr.io/invoker-karl/mikrodash-cn:<version>` on `linux/amd64` and
 `linux/arm64`. Node 24 no longer supports the former `linux/arm/v7` target.
@@ -175,7 +175,7 @@ Images are published by GitHub Actions on Chinese version tags only, so `latest`
 To pin to a specific release:
 
 ```bash
-docker pull ghcr.io/invoker-karl/mikrodash-cn:0.7.32-cn.1
+docker pull ghcr.io/invoker-karl/mikrodash-cn:0.7.32-cn.2
 ```
 
 Run with Docker Compose — create a `docker-compose.yml`:
