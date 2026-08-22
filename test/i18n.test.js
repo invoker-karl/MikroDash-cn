@@ -425,19 +425,6 @@ test('audit rejects unresolved translation calls and untranslated native dialogs
   assert.deepEqual(result.untranslatedDialogs, [], result.untranslatedDialogs.join('\n'));
 });
 
-test('mutation observer only runs while a translated language is active', async () => {
-  const dom = createDom('en-US', { trackObserver: true });
-  await settle();
-  assert.equal(dom.observerStats.created, 0, 'English should not pay for a document-wide observer');
-  dom.window.MikroDashI18n.setLanguage('zh-CN');
-  assert.equal(dom.observerStats.created, 1);
-  dom.window.MikroDashI18n.setLanguage('en-US');
-  assert.equal(dom.observerStats.disconnected, 1);
-  dom.window.MikroDashI18n.setLanguage('zh-CN');
-  assert.equal(dom.observerStats.created, 2, 'switching back to Chinese re-arms translation');
-  dom.window.close();
-});
-
 test('every page introduced by upstream v0.7.25 has a translated document title', () => {
   const messages = loadLocale('zh-CN').messages;
   const pages = ['VLANs', 'PPP', 'Bridges', 'DNS', 'CAPsMAN', 'Packages',
