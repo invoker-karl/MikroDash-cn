@@ -2,6 +2,21 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.32-cn.2] — Hardened live-data localization boundaries
+
+- Protected router, interface, wireless, notification, report, router-map, PPP,
+  and alert-history values from accidental dictionary translation while keeping
+  adjacent fixed interface copy translatable.
+- Added bounded Simplified Chinese forms for short relative times and dynamic
+  network, router, and offline counts without reintroducing arbitrary captures.
+- Extended the translation audit to reject unresolved explicit translation
+  calls and untranslated native dialogs with source locations.
+- Added production-renderer regressions for collision-prone live values and
+  retained the fork-specific Top Talkers and RouterOS collection behavior.
+- Passed GPT-5.6 Sol Pro release review, the full development-dependency quality
+  suite, and the production-image test suite before publishing both amd64 and
+  arm64 images and promoting `latest`.
+
 ## [0.7.32-cn.1] — Simplified Chinese edition on upstream v0.7.32
 
 - Upgraded the Chinese edition from upstream v0.7.25 to the complete v0.7.32
