@@ -389,7 +389,10 @@ test('ROS client connectLoop does not schedule another retry after stop is reque
   ros._sleep = async () => {
     sleepCalls++;
   };
-  ros.on('close', () => ros.stop());
+  // A teardown reacts to the first close. Using a persistent listener here
+  // makes mockConn.close() synchronously re-enter stop() and emit close again,
+  // so the test measures recursive mock events instead of reconnect behaviour.
+  ros.once('close', () => ros.stop());
 
   await ros.connectLoop();
 
