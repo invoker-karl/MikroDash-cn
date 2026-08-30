@@ -57,7 +57,7 @@ test('DHCP Networks preserves rejected tables and accepts successful empty snaps
   const state = {};
   const c = new DhcpNetworksCollector({
     ros, io: ioStub(), pollMs: 5000, state, wanIface: 'wan',
-    dhcpLeases: { getAllLeaseIPs: () => [] },
+    dhcpLeases: { getInUseLeaseIPs: () => [] },
   });
   c._raw.networks = [{ address: '192.168.1.0/24' }];
   await c._fetchOnce();

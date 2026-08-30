@@ -216,3 +216,115 @@ test('requirePage with no target fails closed', () => {
      res, () => { throw new Error('a missing target must never permit'); });
   assert.strictEqual(status, 403);
 });
+
+// ── Site membership is an administrator decision (issue #117) ───────────────
+//
+// TWO routes change a device's site, and before #117 only one was gated for it.
+// PUT /api/sites/:id/routers has always been requireGlobalAdmin, precisely
+// because membership decides who can reach a device. PUT /api/routers/:id is
+// gated on router:manage for the target device — which Devices-page write
+// confers and which is NOT global-only — and it passed the field straight to
+// the store, where validation is format-only.
+//
+// Under single-site that was a MOVE: an escalation, but self-limiting and loud,
+// because the device vanished from the old site's users. Many-to-many makes it
+// an ADD: purely additive, invisible to existing grantees, repeatable, with
+// every site id enumerable from an ungated GET /api/sites.
+//
+// So the field is stripped for anyone without system:principals. This is a
+// source scan for the reason this file's header gives: the handler needs a live
+// io/session stack, and the wiring is the thing worth holding in place.
+test('the router update route refuses to set site membership for a non-admin', () => {
+  const at = INDEX_JS.indexOf("app.put('/api/routers/:id'");
+  assert.ok(at > 0, 'the router update route moved or was renamed');
+  const block = INDEX_JS.slice(at, at + 4000);
+
+  const guard = block.indexOf("Rbac.can(req.authSession, 'system:principals')");
+  const write = block.indexOf('Routers.update(req.params.id');
+  assert.ok(guard > 0, 'membership must be gated on system:principals, the permission the sites route requires');
+  assert.ok(write > 0, 'the update call moved');
+  assert.ok(guard < write,
+    'the strip has to happen BEFORE the write, or the field reaches the store anyway');
+
+  // Both spellings, or an older client still gets through on the legacy scalar.
+  const stripped = block.slice(guard, write);
+  assert.ok(/delete\s+body\.siteIds/.test(stripped),  'siteIds must be stripped');
+  assert.ok(/delete\s+body\.siteId\b/.test(stripped), 'the legacy scalar must be stripped too');
+});
+
+test('the sites membership route stays administrator-only', () => {
+  // The other door. If this ever loosens, the strip above is pointless.
+  const at = INDEX_JS.indexOf("app.put('/api/sites/:id/routers'");
+  assert.ok(at > 0, 'the site membership route moved or was renamed');
+  const line = INDEX_JS.slice(at, INDEX_JS.indexOf('\n', at));
+  assert.ok(line.includes('Rbac.requireGlobalAdmin'),
+    'membership must remain an administrator decision on both routes');
+});
+
+test('system:principals cannot be satisfied by a scoped grant', () => {
+  // What makes the gate meaningful. If this permission were reachable from a
+  // site- or router-scoped grant, gating membership on it would achieve nothing.
+  // GLOBAL_ONLY is a Set, not an array.
+  assert.ok(rbac.GLOBAL_ONLY.has('system:principals'),
+    'system:principals must stay global-only or the membership gate is cosmetic');
+});
+
+// ── Assigning from the site side ADDS, it does not move (issue #117) ─────────
+//
+// Reported after the rest of #117 landed: ticking a device under Settings →
+// Access Management → Sites still took it out of the site it was already in.
+//
+// The client-side wording had been updated and the store was many-to-many, but
+// this route still read a scalar and wrote a scalar, so the overwrite WAS the
+// removal — the old site was never consulted, and nothing said so. The device
+// modal was fixed; this second door was not.
+//
+// Source scan for the reason this file's header gives: the handler needs a live
+// io/session stack, and the wiring is the thing worth holding in place.
+test('the site membership route adds a site instead of replacing the list', () => {
+  const at = INDEX_JS.indexOf("app.put('/api/sites/:id/routers'");
+  assert.ok(at > 0, 'the site membership route moved or was renamed');
+  const block = INDEX_JS.slice(at, at + 2600);
+
+  // It must write the LIST. A scalar write here is the bug: it silently drops
+  // every other site the device is in.
+  assert.ok(/Routers\.update\([^)]*\{\s*siteIds:/.test(block),
+    'membership must be written as siteIds; writing siteId replaces the whole list');
+  assert.ok(!/Routers\.update\([^)]*\{\s*siteId:/.test(block),
+    'no scalar siteId write may remain on this route');
+
+  // Adding keeps what was there, removing takes only this site.
+  assert.ok(/\.concat\(req\.params\.id\)/.test(block),
+    'adding must keep the sites the device already has');
+  assert.ok(/!== req\.params\.id/.test(block),
+    'removing must drop only this site');
+
+  // And it stays administrator-only, because membership decides reachability.
+  const line = INDEX_JS.slice(at, INDEX_JS.indexOf('\n', at));
+  assert.ok(line.includes('Rbac.requireGlobalAdmin'),
+    'assigning devices to a site must remain an administrator decision');
+});
+
+// ── One permissions broadcast per authorization write (ToDo §5) ─────────────
+//
+// The site membership route called _broadcastPermsChanged() twice on one line.
+// Not a correctness bug — the event carries no payload and every handler just
+// refetches — but each call is a frame to every connected browser and a
+// GET /api/me/permissions back from each. With three tabs open one membership
+// save cost six of each where three would do.
+//
+// Counted rather than pattern-matched on the one line, so the check keeps
+// working if the duplicate reappears somewhere else in the file.
+test('no route broadcasts a permissions change twice', () => {
+  const lines = INDEX_JS.split('\n');
+  const doubled = [];
+  lines.forEach((line, i) => {
+    const n = (line.match(/_broadcastPermsChanged\(\)/g) || []).length;
+    // The declaration line names it once without calling it; a call site that
+    // names it twice is the defect.
+    if (n > 1) doubled.push((i + 1) + ': ' + line.trim());
+  });
+  assert.deepEqual(doubled, [],
+    'a second call sends a duplicate frame to every browser and costs each one ' +
+    'an extra permissions refetch');
+});

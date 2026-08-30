@@ -2,6 +2,21 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.7.38-cn.1] — Simplified Chinese edition on upstream v0.7.38
+
+- Upgraded the Chinese edition from upstream v0.7.32 to v0.7.38, including the
+  Devices multi-site model, RouterOS release notes, Traffic interface-cycle
+  fixes, alert scaling fixes, report corrections, DHCP utilisation fixes, and
+  the interface-name injection security fix.
+- Preserved the fork's connection-derived Top Talkers, authoritative RouterOS
+  snapshot reconciliation, live interface metadata recovery, multi-router
+  isolation, and fail-closed dependency patch verification.
+- Kept router-provided names, site names, report details, and other live values
+  outside automatic translation while extending Simplified Chinese coverage to
+  the new Devices, site membership, update-notes, and empty-state interface.
+- Retained the reviewed two-platform release gate: amd64 and arm64 images must
+  start successfully before the immutable version is promoted to `latest`.
+
 ## [0.7.32-cn.2] — Hardened live-data localization boundaries
 
 - Protected router, interface, wireless, notification, report, router-map, PPP,
@@ -179,6 +194,268 @@ confirmed root cause; this release does not claim to have fixed it.
 - Restricted signed-out translation assets to three exact paths.
 - Added reviewed upstream-sync and two-platform GHCR release workflows. The
   immutable version image is verified before the same digest becomes `latest`.
+
+## [0.7.38] - Release notes in the Update dialog, and the Traffic dropdown fix that actually works
+
+### New
+
+- **The Update dialog shows the release notes** for the version it is offering, in a scrollable box
+  above the reboot warning. The decision to restart a router is now made against what changed rather
+  than against two version numbers. The notes come from MikroTik, because the router does not carry
+  them; an install with no route to the internet sees "Release notes unavailable" and everything else
+  works as before.
+
+### Fixed
+
+- **The Traffic dropdown still lost its interfaces in 0.7.37.** The earlier fix did not prevent the
+  problem, it completed it. An interface that reports late, such as a ZeroTier tunnel, ended up
+  replacing the whole list instead of joining it, which is why one reporter's dropdown contained
+  exactly `zerotier1`. ([#119](https://github.com/SecOps-7/MikroDash/issues/119), thanks
+  [@steenekenm](https://github.com/steenekenm) and
+  [@erion1979-cell](https://github.com/erion1979-cell))
+- **Alerts went quiet on large fleets.** Past 500 tracked interfaces, VPN peers, NetWatch hosts or
+  BGP peers, the alerter discarded what it knew about all of them at once. On a router at that size
+  a fleet-wide outage produced a single alert. It now forgets only what the router has stopped
+  reporting.
+- **A second RouterOS release is announced.** A router left un-updated across two releases was only
+  ever told about the first.
+- **A site could be created called "null"** by a form field that had been cleared, and creating a
+  second one then reported that the name was already taken.
+- Saving site membership sent every open browser a duplicate refresh.
+
+### Internal
+
+- Release-note lookups validate the version against a strict whitelist before any request is made,
+  cache per version, cap the response size while it downloads and time out.
+- A test suite can be confidently green about something it never checks: several rules added
+  recently were verified by removing them and watching the tests still pass. Those gaps are closed.
+- 1620 tests, 25 more than 0.7.37.
+
+## [0.7.37] - Fixes for the Devices page, reports and alerts
+
+### Fixed
+
+- **The Save and Test Connection buttons in the device editor did nothing.** A scripting error broke
+  both, silently, with no message to say why. This is what made sites look unremovable in
+  [#117](https://github.com/SecOps-7/MikroDash/issues/117).
+- **Editing a device no longer asks you to retype its password.** The field says "leave blank to keep
+  current", but saving then failed because the connection test had no password to use. The stored one
+  is now reused, as long as the host, port, username and TLS settings are unchanged.
+- **The Traffic dropdown lost all but one interface** after a couple of minutes. Reported on a
+  CCR2004; more likely the more interfaces a router has.
+  ([#119](https://github.com/SecOps-7/MikroDash/issues/119), thanks
+  [@steenekenm](https://github.com/steenekenm))
+- **The site filter could label a site wrongly** on the Devices page when a device still listed a
+  deleted site. Picking that entry filtered to the wrong site.
+- **Report PDFs had no separator in the date range.** The character used had no glyph in the report
+  font, so it was invisible in every report.
+- **Report chart dates flipped day and month** when a display timezone was set, so 08-09 and 09-08
+  could mean the same day depending on a setting the reader cannot see.
+- **A failed ntfy notification now says why** instead of showing a bare status code.
+- The Backups table no longer fills with runs that found nothing to back up.
+- A report run with no history left the box blank instead of saying so, and its table put values
+  under the wrong headings.
+- One malformed row no longer blanks the whole Audit table.
+- The Bandwidth and Dashboard charts could disagree by one sample after a router corrected its clock.
+- Restoring a backup on a router with no stored backup settings sent an invalid password.
+
+### Changed
+
+- **Site membership is now set in Settings → Access Management → Sites only.** The device editor
+  keeps a **Primary site** picker, which chooses where the device is drawn on the map. Membership
+  decides who can reach a device, so it belongs with the other access controls.
+
+### Internal
+
+- Interface cycles are delimited by the marker RouterOS already sends, rather than by a timer.
+- A test now catches the class of scripting error behind the broken buttons, which had appeared
+  twice.
+- Two notes in the RouterOS patch file are corrected against fresh hardware traces; one described a
+  failure as silent when it is not.
+- 1588 tests, 25 more than 0.7.36.
+
+## [0.7.36] - Devices can belong to several sites
+
+### New
+
+- **The Routers page is now Devices.** A fleet holds switches and access points too, so the name no
+  longer claims otherwise. Custom roles keep the page across the upgrade.
+  ([#117](https://github.com/SecOps-7/MikroDash/issues/117), thanks
+  [@erion1979-cell](https://github.com/erion1979-cell))
+- **A device can belong to more than one site.** Assigning it to a second site no longer removes it
+  from the first. A grant on any of its sites reaches it, and the first site listed is the primary,
+  which is what places it on the map.
+- **Sites card** on the Devices page, counting the distinct sites your devices are assigned to.
+- **Site filter** on the left of the Devices toolbar. All Sites by default, then each site, plus
+  Unassigned when such a device exists. It narrows the cards, the list and the map together.
+- The device editor takes multiple sites and lets you pick which one is primary. Site names are
+  searchable.
+
+### Fixed
+
+- **Switching routers could hang for 30 seconds.** A request already in flight when the old
+  connection went away had no way to fail, so it waited out the full write timeout, and with 26
+  collectors they all waited at once. Requests now fail as soon as the connection goes.
+  ([#118](https://github.com/SecOps-7/MikroDash/issues/118))
+- **A disconnected banner that would not clear** when switching to a router already connected in the
+  background. That switch also left the traffic chart unbound until you reloaded.
+- **Only administrators can change which sites a device is in.** Previously anyone who could edit a
+  device could set its site, which decides who can reach it.
+- **The Backups table no longer fills with no-op runs.** A run that found nothing changed has nothing
+  to restore, and on a stable router with a daily schedule those rows crowded out the real restore
+  points. The newest one is kept so you can still see the schedule fired.
+- **The update banner stopped flickering** once per poll on the Dashboard.
+- **The report history table put values under the wrong headings**, and a report run with no history
+  left the box blank instead of saying so.
+- One malformed row in the Audit table no longer blanks the whole table.
+- The Bandwidth chart and the Dashboard chart could disagree by one sample after a router corrected
+  its clock.
+- Restoring a backup on a router with no stored backup settings sent a literal `undefined` password.
+- The Connections country list is updated in place, so hovering and clicking no longer fight with the
+  live refresh.
+- CAPsMAN now distinguishes "no results for your search" from "no clients connected".
+
+### Internal
+
+- The RouterOS client carries one close signal per connection, so a teardown mid-request cannot leave
+  a request unsettled or a login open that nobody owns.
+- Site membership is stored as a list, with the old single value kept in step so an older build still
+  reads it.
+- 1563 tests, 21 more than 0.7.35.
+
+## [0.7.35] - An interface name can no longer inject markup
+
+### Security
+
+- **A quote in an interface name could inject an attribute into the Dashboard.** The Physical Ports
+  card and the API Diagnostics card built their tooltips with a text-only escaper, which leaves `"`
+  and `'` untouched by design. Confirmed on RouterOS 7.24 that a quoted name is accepted and reaches
+  the browser intact, so an interface called `ether1" onmouseover="x` could inject an attribute.
+  Exploiting it requires the ability to name an interface on a monitored router, so it is not remote,
+  but it is real. The Interfaces page was never affected: it always used the correct escaper.
+
+### Fixed
+
+- **The Logs card no longer starts blank.** The log history the server sends when a browser connects
+  was silently discarded, so the card stayed empty until you opened it and it refetched.
+
+### Internal
+
+- CI and the pre-push hook run the suite in the image that carries the dev tooling. A test needing a
+  dev-only tool previously failed to load rather than failing, taking its whole file with it.
+- A collector timer bounds itself where it is created instead of relying only on upstream clamping.
+- All GitHub code scanning alerts are resolved, each either fixed or dismissed with a written reason.
+- Release notes are short scannable points, and version headings no longer require an em dash.
+
+## [0.7.34] - Interface comments in alerts, and a DHCP gauge that adds up
+
+### New
+
+- **`{{comment}}` notification variable.** Alerts can now carry the RouterOS comment for the
+  interface, NetWatch host, VPN peer or BGP peer they are about. Add it to your template under
+  Settings, Notifications, Message Templates, for example `{{alertType}}: {{detail}} ({{comment}})`.
+  It is not in the default template, so nothing changes unless you add it.
+  ([#116](https://github.com/SecOps-7/MikroDash/issues/116), thanks
+  [@erion1979-cell](https://github.com/erion1979-cell))
+
+### Fixed
+
+- **"DHCP used IPs" over-reported utilisation.** Static reservations nobody was using counted as in
+  use, and leases that disappeared were never cleared in poll mode. A /23 could read 507 of 512 used
+  with about 110 addresses actually held. ([#115](https://github.com/SecOps-7/MikroDash/issues/115),
+  thanks [@erion1979-cell](https://github.com/erion1979-cell))
+- **Traffic chart could silently lose most of its window** and redraw short, then refill. One
+  out-of-order sample, which a router emits when NTP corrects its clock, ended the redraw early.
+- **Backup pruning could offer every real restore point for deletion** if a file it did not create
+  sat in the backup folder.
+- **Report rate card showed the wrong sample count**, counting bandwidth rows instead of traffic
+  samples.
+- **A firewall address written without a prefix matched every address**, so blocking a single host
+  did not raise the lockout warning it should have.
+- **Queue edits recorded changes nobody made**, and said a field had been cleared when the router
+  had kept its value.
+- **Action status messages never appeared** on the WAN, Queues, Router Users and Packages pages.
+- **Five Queues column headers offered a sort they do not have.** They are no longer marked
+  sortable: a simple queue is first match wins, so position is meaningful.
+- **Three values were rendered but never sent:** the upgrade dialog's channel line, the topology
+  core node name, and the Bandwidth page device count.
+
+### Internal
+
+- The test suite stopped under-reporting its own size. 1527 tests, stable across runs.
+- CI and the pre-push hook now run the suite in the image that carries the dev tooling.
+- Three checks run on every build: orphaned element lookups, payload fields read but never sent, and
+  variables written but never read.
+
+### Discussion
+
+- **Should MikroDash be rewritten in Go and TypeScript?** Comments wanted, objections as welcome as
+  support. ([#114](https://github.com/SecOps-7/MikroDash/issues/114))
+
+## [0.7.33] — Failures that never announced themselves
+
+Every fix in this release is something that had been quietly not working. None of them logged an
+error, none crashed, and several had been broken for weeks behind a green test suite. Most were
+found by porting MikroDash to Go and TypeScript and discovering that the two implementations
+disagreed.
+
+**A daily backup at 08:00 now happens at 08:00.** The scheduler applied its 24-hour interval gate
+*before* the wall-clock anchor, so a run late in the day pushed the next one past its own target. A
+manual backup at 11:45 left "daily at 08:00" not due at 08:00 the next morning, and once it fired at
+11:45 it stayed there permanently. One router's daily schedule had never fired once in its life;
+another was drifting a couple of minutes later every day. Weekly and monthly keep the interval,
+because "today at 08:00" knows an hour and a minute but not a weekday or a date.
+
+**Clicking a column header sorts the table again.** Nine tables lost their sort on the first click
+and could not recover it for the life of the page — VLANs, PPP, CAPsMAN, the three Bridges tables,
+DNS, Packages and Audit. Two incompatible conventions for the sort direction were the cause, and the
+second half of the same mismatch emitted a CSS class no stylesheet defines, so no arrow ever
+appeared to contradict it. A table that had silently stopped sorting looked like one that had never
+been sorted.
+
+**An edit you make now reaches the page you are looking at.** Several collectors suppress a
+redundant update by fingerprinting the payload, and those fingerprints were built from hand-written
+field lists. Any field left off the list was invisible to the check: the collector re-read the
+router, hashed an identical string, and returned without emitting. A comment-only edit to a DNS
+entry wrote the router and never reached the open table. It hid because these collectors also hash
+something that moves on its own, so on a busy router the table caught up a tick or two later and
+merely looked slow; on an idle device the update never arrived at all. Fixed for DNS (`comment` and
+`ttl`), interfaces (`type`, `comment`, MAC), queues (`comment`), and firewall — where the
+fingerprint covered only rule counters, so *every* rule field, and rule order with it, reached the
+page only when traffic happened to move a counter in the same tick.
+
+**MX, NS and SRV DNS records survive being looked at.** The DNS form offered six of the nine record
+types RouterOS supports. Opening an MX record showed its type as "A", and saving rewrote it as one:
+the MX preference, the SRV target and port, the NS delegation, gone, with nothing on screen
+suggesting the form was showing anything other than the record. All nine types are now supported
+with their own fields, and, more generally, a form no longer silently coerces a value it does not
+recognise into the first item of a list.
+
+**The audit trail records what happened.** Two problems in the one table that cannot be pruned
+selectively. Credential masking knew `private_key` but not `private-key`, `passphrase` but not
+`pre-shared-key` — the settings vocabulary, not the router's. And because row values are real
+booleans while form values are the strings `yes`/`no`, every save of every resource carrying a
+checkbox recorded a change nobody made, burying the edit that did happen.
+
+**Fewer bytes on the wire.** Routing sent every route's internal flags object to every viewer, up to
+800 routes at a time, despite a comment claiming it did not and nothing on the page reading them.
+
+### Merged contributions
+
+Thanks to [@invoker-karl](https://github.com/invoker-karl) for both.
+
+- **Fail closed when node-routeros compatibility patches are incomplete** ([#113]). The build no
+  longer warns and continues when a compatibility patch cannot be applied. Underneath the headline
+  sat a real gap: three of the seven patches were being applied and then never verified, so a
+  dependency update could have dropped any of them silently. Marker matching is now token-bounded,
+  so `MULTI_BLOCK_V2` can no longer satisfy a requirement for `MULTI_BLOCK`.
+- **Fix missing action status handlers on WAN, Queues and Router Users** ([#112]). Six status calls
+  on those three pages had no handler in scope. A write landed on the router and the browser then
+  threw instead of reporting the result, so the operator saw nothing and assumed it had failed.
+
+[#112]: https://github.com/SecOps-7/MikroDash/pull/112
+[#113]: https://github.com/SecOps-7/MikroDash/pull/113
+
 ## [0.7.32] — Wireless you can change, not just watch
 
 MikroDash could see wireless in detail and change none of it. Every SSID edit, every passphrase

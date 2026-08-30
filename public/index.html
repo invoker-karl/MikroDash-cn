@@ -1090,6 +1090,14 @@
        Harmless when the span is empty, which it is for anyone who may not
        reboot the router. */
     .ros-update-row #sysUpdateAction{margin-left:auto;display:inline-flex;align-items:center}
+    /* Release notes in the Update dialog. Fixed height and scrolled: a patch
+       changelog is ~23 lines but a feature release is ~520, and the dialog is
+       max-width:26rem and must not grow to fit either. pre-wrap keeps the
+       "*) area - what changed;" layout without parsing it. */
+    .upd-notes{max-height:11rem;overflow-y:auto;overflow-x:hidden;white-space:pre-wrap;word-break:break-word;
+               font-size:.72rem;line-height:1.45;color:var(--text-muted);background:var(--bg-elev,rgba(127,127,127,.06));
+               border:1px solid var(--border);border-radius:6px;padding:.5rem .6rem;margin-bottom:.8rem}
+    .upd-notes.muted{color:var(--text-muted);font-style:italic}
     .ros-update-row.ok{background:rgba(74,222,128,.07);border:1px solid rgba(74,222,128,.18);color:var(--accent-ok)}
     .ros-update-row.warn{background:rgba(245,159,0,.10);border:1px solid rgba(245,159,0,.3);color:var(--accent-warn)}
     .ros-update-row.pending{background:rgba(99,130,190,.06);border:1px solid var(--border);color:var(--text-muted)}
@@ -1927,7 +1935,7 @@
         </a>
         <a class="nav-item" data-page="rosusers" data-cat="security" href="#">
           <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 11l-3 3-1.5-1.5"/></svg></span>
-          <span class="nav-label">Router Users</span>
+          <span class="nav-label">Device Users</span>
         </a>
       </div>
     </div>
@@ -1950,9 +1958,9 @@
       </div>
     </div>
 
-    <a class="nav-item" data-page="routers" href="#" id="nav-routers">
+    <a class="nav-item" data-page="devices" href="#" id="nav-devices">
       <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="18" width="18" height="4" rx="1"/><circle cx="19" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="13" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="20" r="1" fill="currentColor" stroke="none"/></svg></span>
-      <span class="nav-label">Routers</span>
+      <span class="nav-label">Devices</span>
     </a>
     <a class="nav-item" data-page="reports" href="#">
       <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span>
@@ -2022,7 +2030,7 @@
           <svg class="rtr-dd-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
         <div id="routerDropdown" class="rtr-dd" role="listbox" aria-label="Switch router">
-          <div class="rtr-dd-search"><input id="routerDropdownSearch" type="text" placeholder="Search routers…" autocomplete="off" spellcheck="false"/></div>
+          <div class="rtr-dd-search"><input id="routerDropdownSearch" type="text" placeholder="Search devices…" autocomplete="off" spellcheck="false"/></div>
           <div id="routerDropdownList" class="rtr-dd-list"></div>
         </div>
       </div>
@@ -3633,6 +3641,10 @@
     </div>
     <div class="bw-toolbar">
       <input class="bw-search" id="bwSearch" type="text" placeholder="Search IP / hostname / MAC…">
+      <!-- How many rows survived the four filters beside it. app.js has always
+           computed this and written it here; the element itself was missing, so
+           the count was discarded on every frame. -->
+      <span id="bwStats" class="muted-note" aria-live="polite"></span>
       <select id="bwIface" style="margin-left:auto" aria-label="Interface filter">
         <option value="">All interfaces</option>
       </select>
@@ -4032,7 +4044,7 @@
       <div class="rtr-modal-bg" id="ruUserFormWrap">
        <div class="rtr-modal pmodal">
         <div class="rtr-modal-hdr">
-          <span class="rtr-modal-title" id="ruf_title">Add Router User</span>
+          <span class="rtr-modal-title" id="ruf_title">Add Device User</span>
           <button class="rtr-modal-close" data-modal-close="ruUserFormWrap" aria-label="Close">&#10005;</button>
         </div>
         <div class="rtr-modal-body">
@@ -4381,34 +4393,44 @@
     </div>
   </div>
 
-  <div class="page-view" id="page-routers">
+  <div class="page-view" id="page-devices">
     <div class="container-xl">
       <!-- Fleet summary. Online + Offline account for every device; Alerting
            overlaps both, since a reachable router can still have something
            wrong on it. -->
       <div class="row row-cards mt-3" id="routersSummary">
-        <div class="col-6 col-sm-3">
+        <div class="col-6 col-sm">
           <div class="card"><div class="card-body p-3">
             <div class="text-muted" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em">Total Devices</div>
             <div class="h1 m-0 mt-1" id="rsTotal">—</div>
           </div></div>
         </div>
-        <div class="col-6 col-sm-3">
+        <div class="col-6 col-sm">
           <div class="card"><div class="card-body p-3">
             <div class="text-muted" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em">Online</div>
             <div class="h1 m-0 mt-1" id="rsOnline" style="color:var(--accent-green,#34d399)">—</div>
           </div></div>
         </div>
-        <div class="col-6 col-sm-3">
+        <div class="col-6 col-sm">
           <div class="card"><div class="card-body p-3">
             <div class="text-muted" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em">Offline</div>
             <div class="h1 m-0 mt-1" id="rsOffline">—</div>
           </div></div>
         </div>
-        <div class="col-6 col-sm-3">
+        <div class="col-6 col-sm">
           <div class="card"><div class="card-body p-3">
             <div class="text-muted" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em">Alerting</div>
             <div class="h1 m-0 mt-1" id="rsAlerting">—</div>
+          </div></div>
+        </div>
+        <!-- Sites: how many distinct sites the fleet is spread across. Counted
+             from the rows this socket already receives, which are RBAC-filtered,
+             so it can never disclose a site the viewer has no device in. Built
+             from /api/sites it would, because that endpoint has no gate. -->
+        <div class="col-6 col-sm">
+          <div class="card"><div class="card-body p-3">
+            <div class="text-muted" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em">Sites</div>
+            <div class="h1 m-0 mt-1" id="rsSites">—</div>
           </div></div>
         </div>
       </div>
@@ -4417,9 +4439,12 @@
            filter boxes lived in the table head and cost a row of chrome for
            something one box answers. -->
       <div class="card mt-3 routers-toolbar d-flex flex-row align-items-center gap-2">
+        <select id="routersSiteFilter" class="conn-src-filter" title="Filter by site — a device may belong to more than one" style="min-width:150px">
+          <option value="">All Sites</option>
+        </select>
         <input id="routersSearch" type="search" class="sform-input"
-               placeholder="Search routers…"
-               title="Matches name, host, model and RouterOS version. Also understands online, offline and alerting."
+               placeholder="Search devices…"
+               title="Matches name, host, model, RouterOS version and site. Also understands online, offline and alerting."
                autocomplete="off" style="max-width:22rem">
         <span class="text-muted" id="routersShown" style="font-size:.75rem"></span>
         <select id="routersView" class="conn-src-filter ms-auto" title="View — Compact fits more cards per row; List adds sortable columns" style="min-width:140px">
@@ -4443,11 +4468,11 @@
             <thead>
               <tr>
                 <th data-sort="connected" style="min-width:5.5rem">Status</th>
-                <th data-sort="label">Router</th>
+                <th data-sort="label">Device</th>
                 <th data-sort="host">Host</th>
                 <th data-sort="boardName">Model</th>
                 <th data-sort="version">RouterOS</th>
-                <th class="rtl-num" data-sort="openAlerts" title="Unresolved alerts on this router">Alerts</th>
+                <th class="rtl-num" data-sort="openAlerts" title="Unresolved alerts on this device">Alerts</th>
                 <th class="rtl-num" data-sort="cpu">CPU</th>
                 <th class="rtl-num" data-sort="memPct">RAM</th>
                 <th class="rtl-num" data-sort="hddPct">Disk</th>
@@ -4582,7 +4607,7 @@
 
       <!-- Tab bar -->
       <div class="stab-bar">
-        <button class="stab active" data-tab="routers">Routers</button>
+        <button class="stab active" data-tab="routers">Devices</button>
         <button class="stab" data-tab="general">General</button>
         <button class="stab" data-tab="notifications">Notifications</button>
         <button class="stab" data-tab="appearance">Appearance</button>
@@ -4595,10 +4620,10 @@
         <div class="scard scard--wide">
           <div class="scard-header">
             <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:none;stroke:var(--accent-rx);stroke-width:2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="var(--accent-rx)" stroke="none"/></svg>
-            <span class="scard-title">Routers</span>
+            <span class="scard-title">Devices</span>
             <button class="sbtn sbtn-primary" id="rtrAddBtn" style="padding:.3rem .8rem;font-size:.72rem">
               <svg viewBox="0 0 24 24" style="width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              Add Router
+              Add Device
             </button>
           </div>
           <!-- overflow-x here because .scard is overflow:hidden — without it the
@@ -5122,7 +5147,8 @@
             </div>
             <div style="margin-top:.6rem;padding:.6rem .7rem;background:var(--bg-alt);border-radius:.4rem;border:1px solid var(--border)">
               <p style="font-size:.72rem;color:var(--text-muted);margin:0 0 .3rem;font-weight:600">Available variables</p>
-              <p style="font-size:.72rem;color:var(--text-muted);margin:0;line-height:1.7;font-family:var(--font-mono)">{{alertType}} &nbsp;{{routerName}} &nbsp;{{detail}} &nbsp;{{ifaceName}} &nbsp;{{status}}<br>{{cpuLoad}} &nbsp;{{pingLoss}} &nbsp;{{pingTarget}} &nbsp;{{pingRtt}} &nbsp;{{vpnPeer}} &nbsp;{{host}} &nbsp;{{netwatchName}} &nbsp;{{timestamp}}</p>
+              <p style="font-size:.72rem;color:var(--text-muted);margin:0;line-height:1.7;font-family:var(--font-mono)">{{alertType}} &nbsp;{{routerName}} &nbsp;{{detail}} &nbsp;{{ifaceName}} &nbsp;{{status}} &nbsp;{{comment}}<br>{{cpuLoad}} &nbsp;{{pingLoss}} &nbsp;{{pingTarget}} &nbsp;{{pingRtt}} &nbsp;{{vpnPeer}} &nbsp;{{host}} &nbsp;{{netwatchName}} &nbsp;{{bgpPeer}} &nbsp;{{timestamp}}</p>
+              <p style="font-size:.7rem;color:var(--text-muted);margin:.45rem 0 0;line-height:1.6">A variable that does not apply to an alert renders as empty. <code>{{comment}}</code> is the comment set on the router for whatever the alert is about &mdash; an interface, a NetWatch host, a VPN peer or a BGP peer.</p>
             </div>
           </div>
         </div>
@@ -5344,9 +5370,9 @@
               <label class="stoggle"><span class="stoggle-label">Bridges</span><span class="stoggle-switch"><input type="checkbox" id="s_pageBridges"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">DNS</span><span class="stoggle-switch"><input type="checkbox" id="s_pageDns"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Packages</span><span class="stoggle-switch"><input type="checkbox" id="s_pagePackages"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-              <label class="stoggle"><span class="stoggle-label">Routers</span><span class="stoggle-switch"><input type="checkbox" id="s_pageRouters"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
+              <label class="stoggle"><span class="stoggle-label">Devices</span><span class="stoggle-switch"><input type="checkbox" id="s_pageDevices"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Queues</span><span class="stoggle-switch"><input type="checkbox" id="s_pageQueues"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
-              <label class="stoggle"><span class="stoggle-label">Router Users</span><span class="stoggle-switch"><input type="checkbox" id="s_pageRosusers"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
+              <label class="stoggle"><span class="stoggle-label">Device Users</span><span class="stoggle-switch"><input type="checkbox" id="s_pageRosusers"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Audit</span><span class="stoggle-switch"><input type="checkbox" id="s_pageAudit"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Backups</span><span class="stoggle-switch"><input type="checkbox" id="s_pageBackups"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
               <label class="stoggle"><span class="stoggle-label">Connections</span><span class="stoggle-switch"><input type="checkbox" id="s_pageConnections"><span class="stoggle-track"></span><span class="stoggle-thumb"></span></span></label>
@@ -5429,7 +5455,7 @@
 
           <div class="ptab-panel" id="ptab-sites" role="tabpanel">
             <div class="ptab-head">
-              <span class="ptab-desc">A site groups routers by location. A router belongs to one site, or none — assign it in the router's settings.</span>
+              <span class="ptab-desc">A site groups devices by location. Since #117 a device may belong to several sites, or none — assign them in the device's settings.</span>
               <button class="sbtn sbtn-primary" id="addSiteBtn" style="padding:.25rem .65rem;font-size:.75rem;flex-shrink:0">+ Add Site</button>
             </div>
             <table style="width:100%;border-collapse:collapse;font-size:.78rem" id="siteTable">
@@ -5437,7 +5463,7 @@
                 <tr style="border-bottom:1px solid var(--border)">
                   <th style="text-align:left;padding:.35rem .5rem;color:var(--text-muted);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.06em">Name</th>
                   <th style="text-align:left;padding:.35rem .5rem;color:var(--text-muted);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.06em">Description</th>
-                  <th style="text-align:left;padding:.35rem .5rem;color:var(--text-muted);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.06em">Routers</th>
+                  <th style="text-align:left;padding:.35rem .5rem;color:var(--text-muted);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.06em">Devices</th>
                   <th style="padding:.35rem .5rem"></th>
                 </tr>
               </thead>
@@ -5480,13 +5506,13 @@
                   <button type="button" class="cpick-clear" id="sf_placeClear" title="Clear this site's location">Clear</button>
                 </div>
                 <div class="cpick-list" id="sf_placeList" role="listbox" hidden></div>
-                <div class="cpick-hint">Routers here with no location of their own are shown at this place on the map.</div>
+                <div class="cpick-hint">Devices whose PRIMARY site is this one, and which have no location of their own, are shown here on the map.</div>
               </div>
 
               <div style="margin-top:.6rem">
-                <label class="sform-label">Routers at this site</label>
+                <label class="sform-label">Devices at this site</label>
                 <div id="sf_routers" style="padding:.6rem;background:rgba(99,130,190,.05);border:1px solid var(--border);border-radius:6px;font-size:.78rem;max-height:12rem;overflow-y:auto"></div>
-                <div style="font-size:.7rem;color:var(--text-muted);margin-top:.35rem">A router belongs to one site at most. Ticking it here moves it from whatever site it was in before.</div>
+                <div style="font-size:.7rem;color:var(--text-muted);margin-top:.35rem">Ticking a device adds this site to it. It keeps any other sites it is already in, and unticking removes only this one.</div>
               </div>
               <div class="login-error" id="sf_error" style="display:none;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.25);border-radius:6px;color:#f87171;font-size:.78rem;padding:.45rem .65rem;margin-top:.6rem;text-align:center"></div>
               </div>
@@ -5555,7 +5581,7 @@
 
           <div class="ptab-panel" id="ptab-roles" role="tabpanel">
             <div class="ptab-head">
-              <span class="ptab-desc">A role decides which pages someone sees. Grant it to a user or a group over a scope — the role says <em>what</em>, the scope says <em>which routers</em>. Administrator is built in and always sees everything.</span>
+              <span class="ptab-desc">A role decides which pages someone sees. Grant it to a user or a group over a scope — the role says <em>what</em>, the scope says <em>which devices</em>. Administrator is built in and always sees everything.</span>
               <button class="sbtn sbtn-primary" id="addRoleBtn" style="padding:.25rem .65rem;font-size:.75rem;flex-shrink:0">+ Add Role</button>
             </div>
             <table style="width:100%;border-collapse:collapse;font-size:.78rem" id="roleTable">
@@ -6326,7 +6352,7 @@
   <div class="rtr-modal-bg" id="rtrModalBg">
     <div class="rtr-modal">
       <div class="rtr-modal-hdr">
-        <span class="rtr-modal-title" id="rtrModalTitle">Add Router</span>
+        <span class="rtr-modal-title" id="rtrModalTitle">Add Device</span>
         <button class="rtr-modal-close" id="rtrModalCloseBtn">&#10005;</button>
       </div>
       <div class="rtr-modal-body">
@@ -6337,10 +6363,18 @@
           <input class="sform-input" id="rtrModalLabel" type="text" placeholder="e.g. Office Router">
         </div>
         <div class="sform-group">
-          <label class="sform-label">Site</label>
-          <select class="sform-input" id="rtrModalSite" aria-label="Site this router belongs to">
+          <label class="sform-label">Primary site</label>
+          <!-- MEMBERSHIP IS NOT EDITED HERE. Which sites a device belongs to is
+               an authorization decision — it changes who can reach the device —
+               so it lives in Access Management with the rest of them, behind the
+               same administrator gate. This picker only chooses WHICH of the
+               sites it already belongs to places it on the map when it has no
+               coordinates of its own, so it offers exactly those and nothing
+               else. Saving reorders that list; it never adds or removes. -->
+          <select class="sform-input" id="rtrModalPrimarySite" aria-label="Primary site, used for the map location">
             <option value="">— No site —</option>
           </select>
+          <div class="form-hint">Decides where this device is drawn on the map when it has no location of its own. To change which sites it belongs to, use Settings → Access Management → Sites.</div>
         </div>
         <!-- Location (issue #96). Deliberately a search, not two number boxes:
              coordinates are derived from the town, never typed. Left blank the
@@ -6664,6 +6698,10 @@
         <strong id="upd_to" style="color:var(--accent-warn)">&mdash;</strong>
       </div>
       <div style="text-align:center;font-size:.72rem;color:var(--text-muted);margin-bottom:.8rem" id="upd_channel"></div>
+      <!-- Release notes for the offered version. ABOVE the reboot warning on
+           purpose: what changed is what the operator is deciding on, and the
+           warning is the consequence of that decision, not the input to it. -->
+      <div class="upd-notes muted" id="upd_notes" data-i18n-user-data aria-live="polite" tabindex="0"></div>
       <div style="background:rgba(245,159,0,.1);border:1px solid rgba(245,159,0,.3);border-radius:6px;font-size:.78rem;padding:.55rem .7rem;margin-bottom:.8rem;color:var(--text-main)">
         The router downloads the packages and <strong>reboots immediately</strong>. Every connection through it drops for the duration.
       </div>

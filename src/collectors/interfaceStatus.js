@@ -92,6 +92,11 @@ class InterfaceStatusCollector {
     this._lastMetadataFp = null;
 
     this._ifaces     = new Map(); // name -> committed interface row
+    // The `.section` stamp of the interval cycle currently being accumulated,
+    // and how many interfaces the last COMPLETE cycle held. Together they keep
+    // a truncated list from being installed as the truth (#119).
+    this._ifaceSection  = undefined;
+    this._lastCycleSize = 0;
     this._addrs      = new Map(); // interface name -> [cidr, ...]
     this._eth        = new Map(); // ether name -> committed PHY error row
     this._ifacesNext = new Map(); // accumulator for current metadata tick
@@ -287,6 +292,12 @@ class InterfaceStatusCollector {
 
   _startIfStream() {
     if (this._ifStream || !this.ros.connected) return;
+    // A restart begins its cycle numbering again at 0, so anything half
+    // accumulated from the previous stream belongs to nobody. Dropping it also
+    // stops the first packet of the new stream reading as a cycle boundary and
+    // committing that orphan as a complete list.
+    this._ifacesNext.clear();
+    this._ifaceSection = undefined;
     const intervalSec = Math.max(1, Math.round(this.metaPollMs / 1000));
     console.log('%s', this._lbl + ' streaming /interface/print, interval=' + intervalSec + 's');
     const stream = this.ros.stream(
@@ -302,6 +313,26 @@ class InterfaceStatusCollector {
       if (classified.kind === 'idle') { this._metadataProbes.interfaces.onIdle(); return; }
       if (classified.kind !== 'data' || !packet.name || typeof packet.name !== 'string') return;
       this._metadataProbes.interfaces.noteRealRow();
+      // `.section` IS THE CYCLE DELIMITER, and it was on the wire all along.
+      // RouterOS stamps every packet of an `=interval=N` response with the
+      // cycle it belongs to — 0, 1, 2, … — so a changed section means the
+      // previous cycle ended and the batch we are holding is COMPLETE, rather
+      // than "whatever arrived before a 300 ms timer happened to fire" (#119).
+      //
+      // Verified on a hAP AC2 (RouterOS 7.24): /interface/print =interval=3
+      // delivers nine packets stamped .section=0, then nine stamped 1, and so
+      // on. It is on the monitor-shaped commands too, which is why this and not
+      // `!done` is the delimiter worth relying on: a `print =interval=N`
+      // terminates each cycle with `!done` but `/interface/monitor-traffic`
+      // never does, so only `.section` covers both.
+      //
+      // Guarded on !== undefined rather than truthiness: the first cycle is
+      // section '0'.
+      const _sec = packet['.section'];
+      if (_sec !== undefined && this._ifaceSection !== undefined && _sec !== this._ifaceSection) {
+        this._commitMeta(true);
+      }
+      if (_sec !== undefined) this._ifaceSection = _sec;
       this._ifacesNext.set(packet.name, packet);
       this._scheduleMetaCommit();
     });
@@ -423,16 +454,76 @@ class InterfaceStatusCollector {
     this._buildAndEmit();
   }
 
-  _commitMeta() {
+  /**
+   * @param {boolean} [fromCycleWrap] the interface stream saw a repeated name,
+   *   so the batch it is holding is a whole print cycle.
+   */
+  _commitMeta(fromCycleWrap) {
+    // A wrap can land while the debounce is still pending; leaving it armed
+    // would fire a second commit over the fresh batch.
+    clearTimeout(this._metaDebounce);
     this._metaDebounce = null;
     // Deltas are only meaningful against a fresh counter read. A commit driven
     // solely by the address or ethernet stream leaves _ifaces untouched, and
     // differencing it against itself would report a zero-error window that
     // never actually elapsed.
-    const ifacesTicked = this._ifacesNext.size > 0;
+    //
+    // A BATCH SMALLER THAN THE LAST COMPLETE CYCLE IS NOT TRUSTED unless the
+    // `.section` stamp changed and proved the cycle ended. The debounce cannot
+    // delimit a burst — it measures silence, not completeness — so if any gap
+    // between two packets of one cycle exceeds 300 ms it fires MID-CYCLE, and
+    // this swap would install a partial map as the whole truth. That is issue
+    // #119, the Traffic dropdown losing all but one interface on a CCR2004.
+    //
+    // The size test is not redundant with the section test: it covers the FIRST
+    // cycle after a (re)start, which has no previous section to differ from.
+    // That is what keeps refreshNow() instant — it restarts the streams so a
+    // newly created VETH appears at once rather than a meta interval later,
+    // where its absence reads as a failed save. A bigger cycle commits on the
+    // debounce; a smaller one waits for the section change, which arrives with
+    // the first packet of the next cycle.
+    // "Did the interface batch actually change?", not "is it non-empty?". Now
+    // that a provisional commit LEAVES the batch in place, non-empty is true for
+    // the whole cycle, and a commit driven by the address or ethernet stream
+    // would otherwise re-run _computeDeltas() against rows it had already
+    // differenced — reporting a zero-error window that never elapsed.
+    //
+    // Identity, not deep equality: every packet off the stream is a fresh
+    // object, so a carried-over row is the SAME object and a re-read is not.
+    const _batchChanged = this._ifacesNext.size > 0 && (
+      this._ifaces.size !== this._ifacesNext.size ||
+      [...this._ifacesNext.keys()].some((k) => this._ifaces.get(k) !== this._ifacesNext.get(k))
+    );
+    const ifacesTicked = _batchChanged &&
+                         (fromCycleWrap || this._ifacesNext.size >= this._lastCycleSize);
     if (ifacesTicked) {
-      this._ifaces     = this._ifacesNext;
-      this._ifacesNext = new Map();
+      // A DEBOUNCE COMMIT IS PROVISIONAL: it publishes what has arrived so far
+      // and leaves the batch accumulating, because only a section change ends a
+      // cycle. Handing the batch over and starting a new one mid-cycle is what
+      // kept #119 alive after the section stamp was adopted — an interface that
+      // reports late (a ZeroTier tunnel, in the report) landed ALONE in the
+      // fresh batch, the size guard correctly refused to publish a batch of
+      // one, and then the next cycle's first packet committed it on the wrap,
+      // where the guard is bypassed by design. The reporter's dropdown
+      // contained exactly `zerotier1`.
+      //
+      // So: copy here, hand over only at a real boundary. A straggler then
+      // rejoins the cycle it belongs to instead of replacing it.
+      this._ifaces = new Map(this._ifacesNext);
+    }
+    // THE BOUNDARY RESET IS UNCONDITIONAL, and deliberately outside the block
+    // above. A wrap is a structural fact — the router has started a new cycle —
+    // not a data event. Gating it on the batch having changed meant a cycle
+    // already published provisionally never got cleared, so the next cycle
+    // accumulated ON TOP of it and a deleted interface stayed in the list
+    // forever.
+    //
+    // A completed cycle is also the only thing that can teach us how big a
+    // cycle is: learning that from a provisional commit would set the bar to a
+    // half-arrived burst and defeat the guard on the next one.
+    if (fromCycleWrap && this._ifacesNext.size > 0) {
+      this._lastCycleSize = this._ifacesNext.size;
+      this._ifacesNext    = new Map();
     }
     // Only swap addresses when the new set is non-empty — an empty _addrsNext
     // means the address stream tick fired before the data arrived, not that
@@ -631,8 +722,12 @@ class InterfaceStatusCollector {
     // the idle-suppression this check exists for. Errors, drops and flap counts
     // are in: they hold steady on a healthy link, so any movement is worth
     // pushing immediately, and the 60 s heartbeat carries the totals along.
+    // type, comment and MAC are in for the opposite reason: they never move on
+    // their own, so they cost nothing here, and leaving them out meant an edit
+    // to one of them never reached an open page — the list renders all three.
     const fp = JSON.stringify(interfaces.map(i => ({
-      n: i.name, r: i.running, d: i.disabled,
+      n: i.name, t: i.type, c: i.comment, m: i.macAddr,
+      r: i.running, d: i.disabled,
       rx: +i.rxMbps.toFixed(2), tx: +i.txMbps.toFixed(2),
       ips: i.ips,
       e: i.errors, dr: i.drops, ld: i.linkDowns,

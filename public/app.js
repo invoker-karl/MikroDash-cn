@@ -185,6 +185,13 @@ function _renderSortHeader(theadId, cols, sortState, onSortFn) {
     });
   });
 }
+// The multiplier for a sort direction. `_renderSortHeader` owns the 'asc'/'desc'
+// convention, so every comparator reading a sortState asks here rather than
+// keeping a +1/-1 of its own — nine tables had drifted onto that second
+// convention, which made the header class (`sort-1`) one no stylesheet defines
+// and, because the helper sets `col` before calling back, silently destroyed
+// the sort on the first click.
+function _sortMul(sortState) { return sortState.dir === 'desc' ? -1 : 1; }
 // Parse RouterOS duration string (e.g. "2h10m5s", "30s", "1d2h") to seconds. Returns Infinity for empty/never.
 function parseDurationSec(s){if(!s||s==='never')return Infinity;var m=0;var r=/(\d+)([wdhms])/g,x;while((x=r.exec(s))!==null){var n=parseInt(x[1],10);if(x[2]==='w')m+=n*604800;else if(x[2]==='d')m+=n*86400;else if(x[2]==='h')m+=n*3600;else if(x[2]==='m')m+=n*60;else m+=n;}return m||Infinity;}
 function signalBars(dbm){var bars=dbm>=-55?4:dbm>=-65?3:dbm>=-75?2:dbm>-85?1:0;var h='<span class="signal-bars">';for(var i=1;i<=4;i++)h+='<span'+(i<=bars?' class="lit"':'')+'>&#8203;</span>';return h+'</span>';}
@@ -246,7 +253,6 @@ var autoScroll = true, logFilter = '', logLevel = '';
 var currentIf = '', windowSecs = 60, RIGHT_BUFFER_MS = 1000, _ifaceSelectKey = '', _serverDefaultIf = '', _interfacesReady = false;
 var fwTab = 'filter', fwData = {};
 var connHistory = [], MAX_CONN_HIST = 60;
-var lastTalkers = null, lastLanData = null;
 var allLeases = [], leaseFilter = '', leaseServerFilter = '';
 var _dhcpTotalPoolSize = 0;  // updated from lan:overview; used to render gauge from leases:list
 var _dhcpNetworksData  = null; // last lan:overview payload
@@ -539,7 +545,7 @@ function applyFontSize(sizeId) {
 })();
 
 // ── Page router ────────────────────────────────────────────────────────────
-var PAGE_TITLES = {dashboard:'Dashboard',topology:'Network Topology',connections:'Connections',wifi:'Wifi Networks',wireless:'Wifi Clients',wan:'WAN',interfaces:'Interfaces',dhcp:'DHCP',firewall:'Firewall',vpn:'VPN',logs:'Logs',bandwidth:'Bandwidth',settings:'Settings',routing:'Routing',reports:'Reports',routers:'Routers',vlans:'VLANs',ppp:'PPP',capsman:'CAPsMAN',bridges:'Bridges',dns:'DNS',packages:'Packages',queues:'Queues',rosusers:'Router Users',audit:'Audit',backups:'Backups'};
+var PAGE_TITLES = {dashboard:'Dashboard',topology:'Network Topology',connections:'Connections',wifi:'Wifi Networks',wireless:'Wifi Clients',wan:'WAN',interfaces:'Interfaces',dhcp:'DHCP',firewall:'Firewall',vpn:'VPN',logs:'Logs',bandwidth:'Bandwidth',settings:'Settings',routing:'Routing',reports:'Reports',devices:'Devices',vlans:'VLANs',ppp:'PPP',capsman:'CAPsMAN',bridges:'Bridges',dns:'DNS',packages:'Packages',queues:'Queues',rosusers:'Device Users',audit:'Audit',backups:'Backups'};
 var PAGE_KEYS   = ['dashboard','wan','wifi','wireless','capsman','interfaces','dhcp','dns','vlans','bridges','vpn','ppp','connections','routing','bandwidth','firewall','logs','packages','queues','rosusers','audit'];
 var _currentPage = 'dashboard';
 function pageVisible(name){ return _currentPage === name && !document.hidden; }
@@ -754,9 +760,24 @@ var allPoints = [];
 var MAX_CLIENT_POINTS = 1800; // 30 min at 1 Hz — matches server HISTORY_MINUTES default
 
 
+// Filters the whole buffer rather than walking back from the newest point and
+// stopping at the first sample older than the cutoff. That `break` assumed
+// allPoints is sorted by ts, and ONE out-of-order sample ended the walk, taking
+// every older point still inside the window with it — the chart silently redrew
+// short and refilled, which reads as a slow collector rather than a bug.
+//
+// Two things produce an out-of-order sample: traffic:history is loaded wholesale
+// from the server, so the order is whatever that endpoint returns; and the
+// timestamps are the ROUTER's, so a MikroTik with no battery emits a lower ts
+// than the sample before it when NTP corrects its drifted RTC on boot.
+//
+// Deliberately NOT sorted here: redrawChart() runs every tick and sorting per
+// frame is an expensive fix to a rare condition. The full scan is 1800
+// comparisons at worst, and going forwards with push() also drops the old
+// unshift(), which was O(n^2) at the 30 m window where out holds every point.
 function windowedPoints(){
   var cutoff = Date.now()-(windowSecs*1000)-RIGHT_BUFFER_MS, out=[];
-  for(var i=allPoints.length-1;i>=0;i--){if(allPoints[i].ts<cutoff)break;out.unshift(allPoints[i]);}
+  for(var i=0;i<allPoints.length;i++){if(allPoints[i].ts>=cutoff)out.push(allPoints[i]);}
   return out;
 }
 // Draws evenly-spaced grid lines and timestamp labels at fixed pixel positions.
@@ -901,6 +922,14 @@ function gauge(label, pct, cls) {
   '</div>';
 }
 var _sysMetaWritten = false;
+// Last markup written into #rosUpdateRow. system:update carries cpuLoad and
+// uptime, so it fires on every poll tick and this row was rebuilt every time
+// even though its content almost never changes. Rebuilding destroyed
+// #sysUpdateAction and the Update button inside it, and `.sbtn` has a
+// transition, so a freshly inserted button restarted it and the strip visibly
+// flashed once per tick. Reset on reconnect and on router switch, next to
+// _sysMetaWritten, or the new router's row would be suppressed as unchanged.
+var _lastUpdateRowHtml = null;
 var _pendingSysData = null, _sysRafId = null;
 function _flushSysUpdate() {
   _sysRafId = null;
@@ -935,7 +964,7 @@ function _flushSysUpdate() {
     }
   }
   if(rosUpdateRow){
-    var ur='';
+    var ur='', updEvent=null;
     if(d.updateAvailable&&d.latestVersion){
       var installedBase=(d.version||'').replace(/\s*\(.*\)/,'').trim();
       // The Update button lands in #sysUpdateAction, filled by the upgrade
@@ -945,8 +974,12 @@ function _flushSysUpdate() {
       ur='<div class="ros-update-row warn"><span class="ros-update-dot"></span>&#11014; '+esc(installedBase)+' &rarr; <strong>'+esc(d.latestVersion)+'</strong> available<span id="sysUpdateAction"></span></div>';
       // Published rather than read back off the DOM: the versions are already
       // parsed here, and the upgrade dialog should show what this row showed.
-      document.dispatchEvent(new CustomEvent('mikrodash:updateavailable',
-        { detail: { installed: installedBase, latest: d.latestVersion, channel: d.updateChannel || '' } }));
+      //
+      // Behind the dirty check below, because this event is not free: the
+      // listener redraws the Update button AND emits packages:caps, so firing
+      // it every tick cost a socket round trip per tick and re-created the
+      // button the row had just re-created.
+      updEvent = { installed: installedBase, latest: d.latestVersion, channel: d.updateChannel || '' };
     }else if(d.latestVersion){
       ur='<div class="ros-update-row ok"><span class="ros-update-dot"></span>&#10003; RouterOS <strong>'+esc(d.latestVersion)+'</strong> &mdash; Up to date</div>';
     }else if(d.updateStatus){
@@ -956,7 +989,19 @@ function _flushSysUpdate() {
     }else{
       ur='<div class="ros-update-row pending"><span class="ros-update-dot"></span>Checking for updates…</div>';
     }
-    rosUpdateRow.innerHTML=ur;
+    // Dirty check. Without it the row was rewritten on every poll tick, which
+    // is what made the amber "available" strip and its Update button flash:
+    // innerHTML destroys and recreates the node, and a newly inserted .sbtn
+    // restarts its own transition. The markup IS the fingerprint here, so it
+    // cannot drift out of sync with what is rendered the way a hand-written
+    // field list can.
+    if(ur!==_lastUpdateRowHtml){
+      _lastUpdateRowHtml=ur;
+      rosUpdateRow.innerHTML=ur;
+      // After the write, so the listener's draw() finds the #sysUpdateAction
+      // slot this markup just created rather than the one it replaced.
+      if(updEvent) document.dispatchEvent(new CustomEvent('mikrodash:updateavailable',{ detail: updEvent }));
+    }
   }
 }
 socket.on('system:update',function(d){
@@ -967,11 +1012,17 @@ socket.on('system:update',function(d){
 });
 
 // ── LAN ────────────────────────────────────────────────────────────────────
-// The WAN IP is chrome — it sets the connections map's arc origin and the WAN
-// readout in the network-devices diagram — so it arrives router-wide while the
-// pool and per-network detail is page-scoped (issue #108).
+// The WAN IP is chrome — it feeds the WAN readout in the network-devices
+// diagram — so it arrives router-wide while the pool and per-network detail is
+// page-scoped (issue #108).
+//
+// It used to claim a second consumer, the connections map's arc origin. That
+// was never true: the map takes its origin from /api/localcc, and the only
+// thing that would have connected this event to it was a window._wanGeoDetect
+// hook that nothing in the repository ever assigned. The dead call is gone and
+// the justification for the event's router-wide scope is now one consumer, not
+// two, which is worth knowing before anyone reasons about that scope again.
 socket.on('lan:wan',function(data){
-  if(window._wanGeoDetect) window._wanGeoDetect(data.wanIp);
   var wip=(data.wanIp||'').split('/')[0]||'—';
   var ndWanIp=$('ndWanIp'); if(ndWanIp)ndWanIp.textContent=wip;
   if(wanIpDisplay)wanIpDisplay.textContent=wip;
@@ -1004,7 +1055,15 @@ socket.on('lan:overview',function(data){
         '</div>';
     }
   }
-  // LAN info (other consumers: ndLanCidr, ndGateway on other pages)
+  // LAN info. The two writes below are ORPHANS: neither #ndLanCidr nor
+  // #ndGateway exists in public/index.html, so both $() lookups return null and
+  // both writes are skipped by their own guards, on every page. This comment
+  // used to claim they had "other consumers on other pages" — they have none,
+  // and that sentence is what made them look load-bearing on review.
+  //
+  // Left in place rather than deleted, per CLAUDE.md on pre-existing dead code,
+  // and both ids are pinned in the allow-list in test/orphaned-references.test.js
+  // which fails if that list grows OR if one of them stops being an orphan.
   var nets=data.networks||[];
   var ndLanCidr=$('ndLanCidr'); if(ndLanCidr)ndLanCidr.textContent=nets.length?nets.map(function(n){return n.cidr;}).join(', '):'\u2014';
   var ndGateway=$('ndGateway'); if(ndGateway)ndGateway.textContent=nets.length&&nets[0].gateway?nets[0].gateway:'\u2014';
@@ -1013,8 +1072,7 @@ socket.on('lan:overview',function(data){
   // Same bug as Top Talkers: an empty payload left the last render in place, so
   // the card kept showing networks the router no longer reports — and, after a
   // router switch, the previous router's.
-  if(!nets.length){lastLanData=null;lanOverview.innerHTML='<div class="empty-state">No DHCP networks</div>';return;}
-  lastLanData=data;
+  if(!nets.length){lanOverview.innerHTML='<div class="empty-state">No DHCP networks</div>';return;}
   lanOverview.innerHTML=nets.map(function(n){
     return'<div class="lan-net"><div class="lan-cidr"><span style="color:var(--text-muted);font-size:.65rem;margin-right:.3rem">LAN:</span>'+esc(n.cidr)+'</div>'+
       '<div class="lan-meta">GW: '+esc(n.gateway||'\u2014')+' '+DOT+' DNS: '+esc(n.dns||'\u2014')+' '+DOT+' <strong style="color:rgba(200,215,240,.75)">'+n.leaseCount+'</strong> leases</div></div>';
@@ -1057,7 +1115,16 @@ socket.on('lan:overview',function(data){
 
 function renderDhcpGauge() {
   var totalPool = _dhcpTotalPoolSize;
-  var totalUsed = allLeases.length; // live lease count — always current
+  // The server's count, not the length of the lease TABLE. Those answer
+  // different questions: the table lists every lease including `waiting`
+  // reservations, while the gauge asks how much of the pool a new client could
+  // not be given. Taking the row count here made the gauge read 99% while the
+  // per-subnet bars directly beneath it read 22% (issue #115). Falls back to the
+  // row count only before the first lan:overview arrives, so a cold load still
+  // shows something rather than zero.
+  var totalUsed = _dhcpNetworksData && typeof _dhcpNetworksData.totalLeases === 'number'
+    ? _dhcpNetworksData.totalLeases
+    : allLeases.length;
   var usedPct   = totalPool > 0 ? Math.round((totalUsed / totalPool) * 100) : 0;
   var gaugeFill  = $('dhcpGaugeFill');
   var gaugeTrack = $('dhcpGaugeTrack');
@@ -1173,14 +1240,12 @@ socket.on('conn:update',function(data){
 socket.on('talkers:update',function(data){
   var devices=data.devices||[];
   if(!devices.length){
-    lastTalkers=null;
     var emptyText=(data.unavailable||data.available===false)
-      ? (data.reason||'Device traffic is unavailable')
-      : (data.emptyText||'No devices');
+      ? (data.reason||tr('Device traffic is unavailable'))
+      : (data.emptyText||tr('No devices'));
     talkersTable.innerHTML='<tr><td colspan="4" class="empty-state">'+esc(emptyText)+'</td></tr>';
     return;
   }
-  lastTalkers=devices;
   talkersTable.innerHTML=devices.map(function(d){
     return'<tr data-i18n-user-data><td>'+esc(d.name||'\u2014')+'</td><td style="color:var(--text-muted)">'+esc(d.mac||'\u2014')+'</td>'+
       '<td class="text-end" style="color:var(--accent-rx)">'+fmtMbps(d.rx_mbps)+'</td>'+
@@ -2025,7 +2090,6 @@ socket.on('vpn:update',function(data){
   var wgPeers   = allTunnels.filter(function(t){ return t.type === 'WireGuard'; });
   var connected = wgPeers.filter(function(t){ return t.state === 'active'; });
   var stale     = wgPeers.filter(function(t){ return t.state === 'stale'; });
-  var idle      = wgPeers.filter(function(t){ return t.state !== 'active'; });
 
   // ── Dashboard nav badges ──────────────────────────────────────────────────
   if (vpnPageCount) { vpnPageCount.textContent = wgPeers.length; vpnPageCount.className = 'card-badge' + (wgPeers.length > 0 ? ' active-blue' : ''); }
@@ -2723,7 +2787,7 @@ socket.on('traffic:history',function(data){
   var tc=$('trafficCard');if(tc)tc.classList.remove('is-stale');
 });
 var _pendingTraffic = null, _trafficRafId = null;
-var _lastSampleTs = 0, _lastSampleAt = 0, _serverOffset = 0, _chartKeepaliveId = null, _yMaxTarget = 0, _yMaxCurrent = 0, _lastTickMs = 0;
+var _lastSampleTs = 0, _serverOffset = 0, _chartKeepaliveId = null, _yMaxTarget = 0, _yMaxCurrent = 0, _lastTickMs = 0;
 socket.on('traffic:update',function(sample){
   if(!currentIf||sample.ifName!==currentIf)return;
   // Always buffer into allPoints so history is preserved while the tab is hidden
@@ -2751,7 +2815,7 @@ socket.on('traffic:update',function(sample){
       trafficCtx.style.transition='opacity 0.4s ease';
       trafficCtx.style.opacity='1';
     }
-    _lastSampleTs=p.ts; _lastSampleAt=Date.now();
+    _lastSampleTs=p.ts;
     // Sample arrival timing jitters ±several hundred ms, so each sample's raw offset
     // (p.ts - now) is noisy. Smooth it with an EMA so the keepalive's X axis doesn't
     // swing back and forth. Seed directly on the first sample / after a reset.
@@ -2803,7 +2867,7 @@ var PAGE_NAV_MAP = {
   pageVlans:'vlans', pagePpp:'ppp',
   pageCapsman:'capsman', pageBridges:'bridges', pageDns:'dns', pagePackages:'packages',
   pageRosusers:'rosusers', pageQueues:'queues', pageWan:'wan',
-  pageRouters:'routers', pageAudit:'audit', pageBackups:'backups',
+  pageDevices:'devices', pageAudit:'audit', pageBackups:'backups',
 };
 // Every page the nav can show. Kept in step with src/pages.js — the drift check
 // lives in test/page-registry.test.js.
@@ -2818,7 +2882,7 @@ var ALL_NAV_PAGES = ['dashboard',
                      'bandwidth','queues','connections',
                      'firewall','rosusers',
                      'logs','packages',
-                     'routers','reports','audit','backups','settings'];
+                     'devices','reports','audit','backups','settings'];
 // The two inputs to page visibility, merged by applyPageVisibility(): what the
 // install allows, and what this session's role allows. Both must say yes.
 var _pageInstall = {};
@@ -2881,7 +2945,7 @@ function applyPageVisibility(pages) {
     var byRole    = !_pageAccess || !!_pageAccess[pageName];
     // Routers is meaningless with one router, and that rule composes with the
     // other two rather than overriding them.
-    var byCount   = pageName !== 'routers' || _routersMultiple;
+    var byCount   = pageName !== 'devices' || _routersMultiple;
     var visible   = byInstall && byRole && byCount;
 
     // The user chip is no longer a match here: it carries no data-page at all
@@ -2946,6 +3010,7 @@ socket.on('connect',function(){
   reconnectBanner.classList.remove('show');
   document.body.classList.remove('is-disconnected');
   _sysMetaWritten=false;
+  _lastUpdateRowHtml=null;   // the row is re-rendered from scratch after a reconnect
   currentIf=''; allPoints=[];
   _setInterfacesPending();
   if(_rosCurrentlyDisconnected) {
@@ -4156,49 +4221,117 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     }).join('');
   }
 
+  // Rows are updated in place, not rewritten. conn:update arrives on the
+  // collector's normal cadence, so an open Connections page rebuilt this list
+  // every tick: `.conn-map-row` is cursor:pointer with transition:background,
+  // so the row under the pointer was destroyed and recreated, :hover
+  // re-evaluated on a fresh node and the transition restarted; a click that
+  // began before a tick could finish on a detached node; and a fresh listener
+  // was attached per row per tick.
+  //
+  // A markup fingerprint like the one on the update strip would NOT work here,
+  // and that is worth stating so nobody tries it: every row embeds
+  // drawSparkSVG(_sparkData[cc]) and pushSpark appends a point per country per
+  // tick, so the path differs every tick even when every count is identical.
+  // The comparison would never be equal, giving no suppression and a check
+  // that reads like a fix. Excluding the spark from the fingerprint walks into
+  // the drift failure that rule warns about, so the rows are updated instead.
+  var _ccRows = Object.create(null);   // cc -> row element, reused across ticks
+  var _ccLast = [];                    // latest payload, for the delegated click
+  var _ccClickBound = false;
+
+  function _ccRowEl(cc){
+    var row = document.createElement('div');
+    row.className = 'conn-map-row';
+    row.dataset.cc = cc;
+    row.innerHTML =
+      '<span class="conn-map-flag"></span>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:.4rem">' +
+          '<div class="conn-map-label" style="min-width:0"></div>' +
+          '<div class="conn-map-spark" style="flex-shrink:0"></div>' +
+        '</div>' +
+        '<div class="svc-sub-rows"></div>' +
+        '<div class="conn-proto-bar">' +
+          '<div class="conn-proto-tcp"></div>' +
+          '<div class="conn-proto-udp"></div>' +
+          '<div class="conn-proto-other"></div>' +
+        '</div>' +
+      '</div>' +
+      '<span class="conn-map-count"></span>';
+    return row;
+  }
+
+  // Only what changed. Every write is guarded by a comparison because assigning
+  // an identical innerHTML still replaces the subtree, which is the whole
+  // defect this function exists to avoid.
+  function _ccRowSync(row, e, sel){
+    var q = function(s){ return row.querySelector(s); };
+    var flag = iso2Flag(e.cc);
+    var fl = q('.conn-map-flag'); if(fl.textContent !== flag) fl.textContent = flag;
+
+    var labelHtml = esc(CC_NAMES[e.cc]||e.cc) +
+      (e.city ? ' <span class="conn-map-label-sub">'+esc(e.city)+'</span>' : '');
+    var lab = q('.conn-map-label'); if(lab.innerHTML !== labelHtml) lab.innerHTML = labelHtml;
+
+    // The spark genuinely changes every tick; it is the one write that is
+    // expected to happen each time, and it is a leaf so it costs one subtree.
+    var spark = drawSparkSVG(_sparkData[e.cc]) || '';
+    var sp = q('.conn-map-spark');
+    if(sp.innerHTML !== spark) sp.innerHTML = spark;
+    // Hidden rather than absent: the parent is a flex row with a gap, so an
+    // empty child would still take one gap of width.
+    var spDisp = spark ? '' : 'none';
+    if(sp.style.display !== spDisp) sp.style.display = spDisp;
+
+    var orgsHtml = (e.orgs&&e.orgs.length) ? e.orgs.map(function(o){
+      return '<span class="svc-sub-row">'+svcBadge(o.org,o.cat)+'<span class="svc-sub-count">'+o.count+'</span></span>';
+    }).join('') : '';
+    var og = q('.svc-sub-rows');
+    if(og.innerHTML !== orgsHtml) og.innerHTML = orgsHtml;
+    // .svc-sub-rows carries margin-top, so an empty one would leave dead space.
+    var ogDisp = orgsHtml ? '' : 'none';
+    if(og.style.display !== ogDisp) og.style.display = ogDisp;
+
+    var total=(e.proto.tcp||0)+(e.proto.udp||0)+(e.proto.other||0)||1;
+    var tcpPct=Math.round((e.proto.tcp||0)/total*100);
+    var udpPct=Math.round((e.proto.udp||0)/total*100);
+    var othPct=100-tcpPct-udpPct;
+    var bars=[['.conn-proto-tcp',tcpPct],['.conn-proto-udp',udpPct],['.conn-proto-other',othPct]];
+    for(var b=0;b<bars.length;b++){
+      var el=q(bars[b][0]), v=String(bars[b][1]);
+      if(el.style.flex !== v) el.style.flex = v;
+    }
+
+    var cnt = String(e.count);
+    var ce = q('.conn-map-count'); if(ce.textContent !== cnt) ce.textContent = cnt;
+
+    row.classList.toggle('selected', !!sel);
+  }
+
   function renderCountryList(topCountries, selectedCC){
     var list=$('connMapList'); if(!list) return;
     var sub=$('connMapSub');
     if(!topCountries||!topCountries.length){
+      _ccRows = Object.create(null);
+      _ccLast = [];
       list.innerHTML='<div class="empty-state">No geo data yet</div>'; return;
     }
     if(sub) sub.textContent=topCountries.length+' countries active';
-    list.innerHTML=topCountries.map(function(e){
-      var flag=iso2Flag(e.cc);
-      var total=(e.proto.tcp||0)+(e.proto.udp||0)+(e.proto.other||0)||1;
-      var tcpPct=Math.round((e.proto.tcp||0)/total*100);
-      var udpPct=Math.round((e.proto.udp||0)/total*100);
-      var othPct=100-tcpPct-udpPct;
-      var spark=drawSparkSVG(_sparkData[e.cc]);
-      var sel=(e.cc===selectedCC);
-      return '<div class="conn-map-row'+(sel?' selected':'')+'" data-cc="'+e.cc+'">'+
-        '<span class="conn-map-flag">'+flag+'</span>'+
-        '<div style="flex:1;min-width:0">'+
-          '<div style="display:flex;align-items:center;justify-content:space-between;gap:.4rem">'+
-            '<div class="conn-map-label" style="min-width:0">'+esc(CC_NAMES[e.cc]||e.cc)+(e.city?' <span class="conn-map-label-sub">'+esc(e.city)+'</span>':'')+'</div>'+
-            (spark?'<div style="flex-shrink:0">'+spark+'</div>':'')+
-          '</div>'+
-          (e.orgs&&e.orgs.length?'<div class="svc-sub-rows">'+e.orgs.map(function(o){
-            return'<span class="svc-sub-row">'+svcBadge(o.org,o.cat)+'<span class="svc-sub-count">'+o.count+'</span></span>';
-          }).join('')+'</div>':'')+
-          '<div class="conn-proto-bar">'+
-            '<div class="conn-proto-tcp" style="flex:'+tcpPct+'"></div>'+
-            '<div class="conn-proto-udp" style="flex:'+udpPct+'"></div>'+
-            '<div class="conn-proto-other" style="flex:'+othPct+'"></div>'+
-          '</div>'+
-        '</div>'+
-        '<span class="conn-map-count">'+e.count+'</span>'+
-      '</div>';
-    }).join('');
+    _ccLast = topCountries;
 
-    // Re-bind click handlers for filter
-    list.querySelectorAll('.conn-map-row').forEach(function(row){
-      row.addEventListener('click',function(){
+    // Bound once on the container, not per row per tick. A row can now be moved
+    // or left alone without its handler going with it.
+    if(!_ccClickBound){
+      _ccClickBound = true;
+      list.addEventListener('click', function(ev){
+        var row = ev.target && ev.target.closest ? ev.target.closest('.conn-map-row') : null;
+        if(!row || !list.contains(row)) return;
         var cc=row.dataset.cc;
         _selectedCC=(cc===_selectedCC)?null:cc;
         var lbl=$('connFilterLabel');
         if(lbl) lbl.style.display=_selectedCC?'':'none';
-        renderCountryList(topCountries, _selectedCC);
+        renderCountryList(_ccLast, _selectedCC);
         // Map: highlight only selected country, dim others
         if(_selectedCC){
           Object.keys(_pathEls).forEach(function(c){
@@ -4216,6 +4349,35 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
         // Filter ports and Sankey
         applyCountryFilter(_selectedCC);
       });
+    }
+
+    // Re-seed when the DOM no longer matches the cache. Two paths empty this
+    // list without going through here: the empty state above, and the
+    // router-switch reset that assigns innerHTML = ''. Without this the cache
+    // would still hold detached rows and the next tick would silently re-attach
+    // the previous router's.
+    if(!list.querySelector('.conn-map-row')) _ccRows = Object.create(null);
+
+    var seen = Object.create(null);
+    var prev = null;
+    for(var i=0;i<topCountries.length;i++){
+      var e = topCountries[i];
+      var row = _ccRows[e.cc];
+      if(!row){ row = _ccRowEl(e.cc); _ccRows[e.cc] = row; }
+      _ccRowSync(row, e, e.cc===selectedCC);
+      seen[e.cc] = true;
+      // insertBefore MOVES an existing node rather than cloning it, so identity,
+      // listeners and focus survive a reorder. Skipped when already in place,
+      // because moving a node the pointer is over still disturbs it.
+      var want = prev ? prev.nextSibling : list.firstChild;
+      if(row !== want) list.insertBefore(row, want);
+      prev = row;
+    }
+    Object.keys(_ccRows).forEach(function(cc){
+      if(seen[cc]) return;
+      var el=_ccRows[cc];
+      if(el && el.parentNode) el.parentNode.removeChild(el);
+      delete _ccRows[cc];
     });
   }
 
@@ -5293,10 +5455,18 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   // Router-per-site counts come from the router list the page already holds
   // rather than a join on the server — the numbers are small, and this keeps
   // GET /api/sites a plain table read.
+  // A device may belong to several sites (#117), so it counts once in EACH.
+  // The totals therefore no longer sum to the device count, which is correct:
+  // the column answers "how many devices are in this site".
+  function _siteIdsOf(r) {
+    if (Array.isArray(r.siteIds)) return r.siteIds;
+    return r.siteId ? [r.siteId] : [];
+  }
+
   function _siteRouterCounts() {
     var counts = {};
     (window._allRouters || []).forEach(function (r) {
-      if (r.siteId) counts[r.siteId] = (counts[r.siteId] || 0) + 1;
+      _siteIdsOf(r).forEach(function (id) { counts[id] = (counts[id] || 0) + 1; });
     });
     return counts;
   }
@@ -5308,7 +5478,6 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
         if (!d || !d.ok) throw new Error('load failed');
         _cacheSites(d.sites);
         _renderSiteTable();
-        _populateSiteSelect();
         return _sitesCache;
       })
       .catch(function () {
@@ -5320,7 +5489,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   function _renderSiteTable() {
     var tb = $('siteTbody'); if (!tb) return;
     if (!_sitesCache.length) {
-      tb.innerHTML = '<tr><td colspan="4" style="padding:.75rem .5rem;color:var(--text-muted);font-size:.76rem">No sites yet. Add one to group your routers.</td></tr>';
+      tb.innerHTML = '<tr><td colspan="4" style="padding:.75rem .5rem;color:var(--text-muted);font-size:.76rem">No sites yet. Add one to group your devices.</td></tr>';
       return;
     }
     var counts = _siteRouterCounts();
@@ -5378,15 +5547,21 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     var routers = window._allRouters || [];
     box.innerHTML = routers.length
       ? routers.map(function (r) {
-          var here  = site && r.siteId === site.id;
-          var other = (!here && r.siteId && window._sitesById[r.siteId])
-            ? ' <span style="color:var(--text-muted)">— currently in ' + dataText(window._sitesById[r.siteId].name) + '</span>'
+          var ids   = _siteIdsOf(r);
+          var here  = !!(site && ids.indexOf(site.id) !== -1);
+          // "also in", not "currently in": ticking a device here ADDS this site
+          // now, it no longer moves the device out of the ones it already has.
+          var elsewhere = ids
+            .filter(function (id) { return (!site || id !== site.id) && window._sitesById[id]; })
+            .map(function (id) { return window._sitesById[id].name; });
+          var other = elsewhere.length
+            ? ' <span style="color:var(--text-muted)">— ' + esc(tr('also in')) + ' <span data-i18n-user-data>' + esc(elsewhere.join(', ')) + '</span></span>'
             : '';
           return '<label style="display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem">' +
             '<input type="checkbox" data-site-router="' + esc(r.id) + '"' + (here ? ' checked' : '') + '>' +
             '<span>' + dataText(r.label || r.host) + other + '</span></label>';
         }).join('')
-      : '<span style="color:var(--text-muted)">No routers configured yet.</span>';
+      : '<span style="color:var(--text-muted)">No devices configured yet.</span>';
 
     $('sf_title').textContent = site ? 'Edit Site' : 'Add Site';
     wrap.classList.add('open');
@@ -5441,7 +5616,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
 
   function deleteSite(id, name, routerCount) {
     var warn = routerCount
-      ? '\n\n' + routerCount + ' ' + tr('router(s) will be left without a site. They are not deleted.')
+      ? '\n\n' + routerCount + ' ' + tr('device(s) will lose this site. They keep any other sites, and are not deleted.')
       : '';
     if (!confirm(tr('Delete site') + ' "' + name + '"?' + warn)) return;
     fetch('/api/sites/' + encodeURIComponent(id), { method: 'DELETE', credentials: 'same-origin' })
@@ -5450,21 +5625,13 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       .catch(function () {});
   }
 
-  // Fills the router modal's site picker. Called on every site load so the
-  // options cannot go stale behind an open modal.
-  function _populateSiteSelect() {
-    var sel = $('rtrModalSite'); if (!sel) return;
-    var keep = sel.value;
-    sel.innerHTML = '<option value="">— No site —</option>';
-    _sitesCache.forEach(function (s) {
-      var o = document.createElement('option');
-      o.setAttribute('data-i18n-user-data', '');
-      o.value = s.id; o.textContent = s.name;   // textContent, so no escaping needed
-      sel.appendChild(o);
-    });
-    // Preserve the selection unless the site it named has since been deleted.
-    sel.value = window._sitesById[keep] ? keep : '';
-  }
+  // The device modal used to carry a multi-select for membership, with
+  // _selectedModalSites / _syncPrimarySiteSelect / _populateSiteSelect behind
+  // it. Membership is an authorization decision and now lives on this tab
+  // alone, so the modal keeps only a PRIMARY picker and seeds it from the
+  // device's own siteIds. All four are gone rather than left guarded: a
+  // function that quietly does nothing because its element no longer exists is
+  // how the ndLanCidr orphans survived long enough to look load-bearing.
 
   // Delegated: the table is rebuilt on every load.
   var _siteTbody = $('siteTbody');
@@ -5487,7 +5654,6 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   socket.on('sites:update', function (list) {
     _cacheSites(list);
     _renderSiteTable();
-    _populateSiteSelect();
   });
 
   // ── Principal dialogs ─────────────────────────────────────────────────────
@@ -5896,10 +6062,10 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     }).join('');
 
     var siteOpts = (window._sitesById ? Object.keys(window._sitesById) : []).map(function (id) {
-      return '<option value="site:' + esc(id) + '">Site: ' + esc(window._sitesById[id].name) + '</option>';
+      return '<option data-i18n-user-data value="site:' + esc(id) + '">' + esc(tr('Site:')) + ' ' + esc(window._sitesById[id].name) + '</option>';
     }).join('');
     var rtrOpts = (window._allRouters || []).map(function (r) {
-      return '<option value="router:' + esc(r.id) + '">Router: ' + esc(r.label || r.host) + '</option>';
+      return '<option data-i18n-user-data value="router:' + esc(r.id) + '">' + esc(tr('Router:')) + ' ' + esc(r.label || r.host) + '</option>';
     }).join('');
 
     container.innerHTML = (rows || '<div style="color:var(--text-muted);margin-bottom:.3rem">No access granted yet.</div>') +
@@ -6226,7 +6392,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       var el = $('s_'+f); if (el) el.checked = !!data[f];
     });
     // Page visibility + dashboard widget toggles
-    ['pageWifi','pageWireless','pageInterfaces','pageDhcp','pageVlans','pageVpn','pagePpp','pageConnections','pageFirewall','pageLogs','pageBandwidth','pageRouting','pageTopology','pageCapsman','pageBridges','pageDns','pagePackages','pageQueues','pageWan','pageRosusers','pageRouters','pageAudit','pageBackups'].forEach(function(f) {
+    ['pageWifi','pageWireless','pageInterfaces','pageDhcp','pageVlans','pageVpn','pagePpp','pageConnections','pageFirewall','pageLogs','pageBandwidth','pageRouting','pageTopology','pageCapsman','pageBridges','pageDns','pagePackages','pageQueues','pageWan','pageRosusers','pageDevices','pageAudit','pageBackups'].forEach(function(f) {
       var el = $('s_'+f); if (el) el.checked = data[f] !== false;
     });
     ['notifBackupDrift','notifBackupFail'].forEach(function(f) {
@@ -6354,7 +6520,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     ['routerTls','routerTlsInsecure'].forEach(function(f) {
       var el = $('s_'+f); if (el) out[f] = el.checked;
     });
-    ['pageWifi','pageWireless','pageInterfaces','pageDhcp','pageVlans','pageVpn','pagePpp','pageConnections','pageFirewall','pageLogs','pageBandwidth','pageRouting','pageTopology','pageCapsman','pageBridges','pageDns','pagePackages','pageQueues','pageWan','pageRosusers','pageRouters','pageAudit','pageBackups'].forEach(function(f) {
+    ['pageWifi','pageWireless','pageInterfaces','pageDhcp','pageVlans','pageVpn','pagePpp','pageConnections','pageFirewall','pageLogs','pageBandwidth','pageRouting','pageTopology','pageCapsman','pageBridges','pageDns','pagePackages','pageQueues','pageWan','pageRosusers','pageDevices','pageAudit','pageBackups'].forEach(function(f) {
       var el = $('s_'+f); if (el) out[f] = el.checked;
     });
     var pingEnabledEl = $('s_pingEnabled'); if (pingEnabledEl) out.pingEnabled = pingEnabledEl.checked;
@@ -6960,12 +7126,19 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   // the redraw paints exactly where the keepalive continues from — no forward snap.
   function _syncBwChart(animated) {
     if (!_bwChart) return;
-    var cutoff = Date.now() - (windowSecs * 1000) - RIGHT_BUFFER_MS;
-    var pts = [];
-    for (var i = allPoints.length - 1; i >= 0; i--) {
-      if (allPoints[i].ts < cutoff - 3000) break;
-      pts.unshift(allPoints[i]);
-    }
+    // The second copy of the walk fixed in windowedPoints. This function is
+    // redrawChart with two edits and inherited the defect by being written from
+    // it, so the dashboard chart drew a sample that this one dropped, off the
+    // same buffer, for the same second.
+    //
+    // The extra 3 s is NOT part of the bug and stays: the keepalive prunes at
+    // viewLeft - 3000, so seeding with that slack stops a point being drawn on
+    // one frame and dropped on the next. Only the backward walk was wrong,
+    // because `break` assumes allPoints is sorted by ts and one out-of-order
+    // sample — an NTP correction on a router with a drifted RTC — ended it
+    // early, taking every newer sample with it.
+    var cutoff = Date.now() - (windowSecs * 1000) - RIGHT_BUFFER_MS - 3000;
+    var pts = allPoints.filter(function (p) { return p.ts >= cutoff; });
     _bwChart.data.datasets[0].data = pts.map(function(p){ return {x:p.ts,y:p.rx_mbps}; });
     _bwChart.data.datasets[1].data = pts.map(function(p){ return {x:p.ts,y:p.tx_mbps}; });
     var dMax = 0;
@@ -7687,7 +7860,6 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   var modalTitle= $('rtrModalTitle');
   var modalId   = $('rtrModalId');
   var modalLabel= $('rtrModalLabel');
-  var modalSite = $('rtrModalSite');
   var modalHost = $('rtrModalHost');
   var modalPort = $('rtrModalPort');
   var modalUser = $('rtrModalUser');
@@ -7799,7 +7971,17 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       navSel.innerHTML = '';
       var enabled = _routers.filter(function(r) { return !r.disabled; });
       var sitesById = window._sitesById || {};
-      var anyGrouped = enabled.some(function(r) { return r.siteId && sitesById[r.siteId]; });
+      // Grouped by PRIMARY site (#117). A device may belong to several, but a
+      // <select> cannot list one option under two optgroups without duplicating
+      // its value, and a duplicated value breaks navSel.value round-tripping in
+      // activateRouter. The primary is exactly the "where does this live"
+      // answer, so it is the right one to group by.
+      function _primarySite(r) {
+        var ids = Array.isArray(r.siteIds) ? r.siteIds : (r.siteId ? [r.siteId] : []);
+        for (var i = 0; i < ids.length; i++) if (sitesById[ids[i]]) return ids[i];
+        return null;
+      }
+      var anyGrouped = enabled.some(function(r) { return !!_primarySite(r); });
 
       function _addOpt(parent, r) {
         var opt = document.createElement('option');
@@ -7815,7 +7997,8 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       } else {
         var bySite = {}, loose = [];
         enabled.forEach(function(r) {
-          if (r.siteId && sitesById[r.siteId]) (bySite[r.siteId] = bySite[r.siteId] || []).push(r);
+          var sid = _primarySite(r);
+          if (sid) (bySite[sid] = bySite[sid] || []).push(r);
           else loose.push(r);
         });
         Object.keys(bySite)
@@ -7831,7 +8014,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
         // reachable rather than being hidden by the grouping.
         if (loose.length) {
           var g2 = document.createElement('optgroup');
-          g2.label = 'No site';
+          g2.label = tr('No site');
           loose.forEach(function(r) { _addOpt(g2, r); });
           navSel.appendChild(g2);
         }
@@ -7996,9 +8179,15 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     // the table keeps its eight columns and the empty-state colspan stays right.
     // Nothing renders for a site-less router — an explicit "no site" chip on
     // every row would be noise for the installs that never create one.
-    var _site = (r.siteId && window._sitesById) ? window._sitesById[r.siteId] : null;
-    var siteChip = _site
-      ? '<div style="margin-top:.15rem"><span data-i18n-user-data style="font-size:.6rem;padding:.1rem .4rem;border-radius:4px;background:rgba(99,130,190,.12);color:var(--text-muted);border:1px solid var(--border)">'+esc(_site.name)+'</span></div>'
+    // One chip per site (#117). The table keeps its column count either way;
+    // only this cell grows.
+    var _siteNames = ((Array.isArray(r.siteIds) ? r.siteIds : (r.siteId ? [r.siteId] : []))
+      .map(function (id) { return (window._sitesById && window._sitesById[id]) ? window._sitesById[id].name : null; })
+      .filter(Boolean));
+    var siteChip = _siteNames.length
+      ? '<div style="margin-top:.15rem;display:flex;flex-wrap:wrap;gap:.2rem">' + _siteNames.map(function (n) {
+          return '<span data-i18n-user-data style="font-size:.6rem;padding:.1rem .4rem;border-radius:4px;background:rgba(99,130,190,.12);color:var(--text-muted);border:1px solid var(--border)">'+esc(n)+'</span>';
+        }).join('') + '</div>'
       : '';
     var modelCell   = r.model     ? dataText(r.model) : unknown;
     var serialCell  = r.serial    ? '<span class="rtr-host" data-i18n-user-data>'+esc(r.serial)+'</span>'    : unknown;
@@ -8073,11 +8262,15 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     var tc = $('trafficCard'); if (tc) tc.classList.remove('is-stale');
     if (liveRx) liveRx.textContent = '—';
     if (liveTx) liveTx.textContent = '—';
-    // Clear cached-data guards so the lan:overview and talkers handlers
-    // don't skip incoming payloads from the new router.
-    lastLanData = null;
+    // No cached-data guards to clear here any more: the lan:overview and
+    // talkers handlers now treat an empty payload as news rather than silence,
+    // so there is nothing that could make them skip the new router's payloads.
     // Reset system meta so new router's board info replaces old
     _sysMetaWritten = false;
+    // Same for the update row's dirty check: two routers can sit on identical
+    // versions, so without this the strip would be suppressed as "unchanged"
+    // and keep showing the previous router's row.
+    _lastUpdateRowHtml = null;
     // Clear ping history
     pingHistory = [];
     // Clear connection table fingerprint caches
@@ -8153,7 +8346,12 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     var p = _geoPickerEnsure();
     if (!p) return;
     var geo  = (router && router.geo) || {};
-    var site = (router && router.siteId && window._sitesById) ? window._sitesById[router.siteId] : null;
+    // The PRIMARY site supplies the map fallback, so that is the one this hint
+    // names. Mirrors the server's resolveLocation call, which reads the same
+    // entry — a second answer here is a second answer that can disagree.
+    var _primary = (router && Array.isArray(router.siteIds) && router.siteIds.length)
+      ? router.siteIds[0] : (router ? router.siteId : null);
+    var site = (_primary && window._sitesById) ? window._sitesById[_primary] : null;
 
     if (geo.place) {
       p.set(geo.place);                       // an override the user set earlier
@@ -8179,7 +8377,7 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
         + '. Pick a different town to override it.</span>';
     } else if (site && site.place_name) {
       hint.innerHTML = '<span class="text-muted">From this router’s site, '
-        + esc(site.place_name) + '. Pick a town to override it.</span>';
+        + '<span data-i18n-user-data>' + esc(site.place_name) + '</span>. Pick a town to override it.</span>';
     } else {
       hint.innerHTML = '<span class="text-muted">No location yet. A private or CGNAT WAN '
         + 'address cannot be geolocated — pick a town instead.</span>';
@@ -8189,12 +8387,37 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   function openModal(router) {
     if (!modalBg) return;
     var isEdit = !!router;
-    modalTitle.textContent = isEdit ? 'Edit Router' : 'Add Router';
+    modalTitle.textContent = isEdit ? 'Edit Device' : 'Add Device';
     modalId.value    = router ? router.id        : '';
     modalLabel.value = router ? router.label     : '';
     // A site that has since been deleted falls back to "— No site —" rather
     // than leaving the picker showing whatever happened to be selected before.
-    if (modalSite) modalSite.value = (router && router.siteId && window._sitesById && window._sitesById[router.siteId]) ? router.siteId : '';
+    // Seed membership from the device (#117). Sites the viewer's cache does not
+    // know are dropped rather than shown as a bare id.
+    // MEMBERSHIP IS NOT EDITABLE HERE (it moved to Access Management), so the
+    // primary picker offers exactly the sites this device is already in. It
+    // cannot name one it does not belong to, and there is no control that could
+    // add or remove one by accident.
+    var _mPrim = $('rtrModalPrimarySite');
+    if (_mPrim) {
+      var _have = (router && Array.isArray(router.siteIds)) ? router.siteIds
+                : (router && router.siteId ? [router.siteId] : []);
+      // A site deleted since the device was filed has no name to show, so it is
+      // left out of the picker — but it is NOT dropped from the device: save
+      // reorders the stored list and never rewrites it from these options.
+      var _known = _have.filter(function (id) { return !!(window._sitesById && window._sitesById[id]); });
+      _mPrim.innerHTML = '<option value="">— No site —</option>';
+      _known.forEach(function (id) {
+        var o = document.createElement('option');
+        o.setAttribute('data-i18n-user-data', '');
+        o.value = id;
+        o.textContent = window._sitesById[id].name;
+        _mPrim.appendChild(o);
+      });
+      // The primary is the FIRST entry, which is the order the store keeps.
+      _mPrim.value = (_known.indexOf(_have[0]) !== -1) ? _have[0] : '';
+      _mPrim.disabled = _known.length === 0;
+    }
     _seedGeoPicker(router);
     modalHost.value  = router ? router.host      : '';
     modalPort.value  = router ? router.port      : '8729';
@@ -8288,7 +8511,35 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       id:          modalId  ? modalId.value.trim()   : '',
       label:       modalLabel? modalLabel.value.trim(): '',
       // '' is the "— No site —" option; the server maps it to null.
-      siteId:      modalSite ? modalSite.value        : '',
+      // siteIds, ordered with the primary first — that order IS the primary, and
+      // the server keeps the scalar siteId in step as the rollback mirror, so
+      // the client no longer sends it.
+      // REORDERED, NEVER REWRITTEN. This modal no longer edits membership — that
+      // is an authorization decision and lives in Access Management — so the
+      // list sent back is the device's OWN stored list with the chosen primary
+      // moved to the front, because position 0 is what the store reads as
+      // primary.
+      //
+      // It is built from the stored record rather than from the picker's
+      // options on purpose. A site deleted since the device was filed has no
+      // name and is absent from the picker; rebuilding from the options would
+      // silently drop it from the device. Reordering cannot.
+      //
+      // A device the client has not loaded sends undefined, which the server
+      // reads as "leave membership alone" — the safe answer, and the reason
+      // this is not `|| []`.
+      siteIds:     (function () {
+        var _id  = modalId ? modalId.value.trim() : '';
+        var _rec = _id ? _routers.filter(function (r) { return r.id === _id; })[0] : null;
+        if (!_rec) return undefined;
+        var have = Array.isArray(_rec.siteIds) ? _rec.siteIds.slice()
+                 : (_rec.siteId ? [_rec.siteId] : []);
+        var prim = $('rtrModalPrimarySite') ? $('rtrModalPrimarySite').value : '';
+        if (prim && have.indexOf(prim) !== -1) {
+          have = [prim].concat(have.filter(function (id) { return id !== prim; }));
+        }
+        return have;
+      }()),
       // Only ever `place`. Never `auto`: the store reads an absent `auto` as
       // "keep what you learned", so sending one here would let a save race the
       // background refresh and discard it.
@@ -8731,8 +8982,16 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     var sz=n<=8?44:n<=16?36:n<=24?30:26;
     panel.innerHTML=ifaces.map(function(i){
       var state=i.disabled?'dis':i.running?'up':'down';
+      // esc(), not dcEsc(), because this lands in an ATTRIBUTE. dcEsc round-trips
+      // through a text node, which is the browser's own text escaper: it handles
+      // & < > and deliberately leaves " and ' alone. Correct in text position,
+      // wrong here. Verified on a hAP ac2 running RouterOS 7.24: an interface
+      // named qt"test is accepted by the router and the API returns the raw
+      // quote, so `ether1" onmouseover="x` would close this attribute and open
+      // another. The Interfaces page builds the same markup from the same
+      // payload and has always used esc(); this card is the copy that drifted.
       return '<div class="if-port-item" data-state="'+state+'" title="'+
-        dcEsc(i.name)+(i.ips&&i.ips.length?' — '+dcEsc(i.ips[0]):'')+
+        esc(i.name)+(i.ips&&i.ips.length?' — '+esc(i.ips[0]):'')+
         (i.running?' (up)':i.disabled?' (disabled)':' (down)')+'">'+
         portSvg(sz)+
         '<span class="if-port-label">'+dcEsc(i.name)+'</span>'+
@@ -9074,7 +9333,16 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
   }
 
   socket.on('logs:history', function(data){
-    var entries=data.entries||data||[];
+    // Array.isArray FIRST, matching the Logs page. `data.entries || data` looks
+    // like it handles both shapes and cannot: on a bare array, `data.entries` is
+    // Array.prototype.entries, a truthy FUNCTION, so the first operand wins, the
+    // isArray guard below fails and the handler returns having rendered nothing.
+    // The `|| data` fallback it was built around is unreachable for arrays.
+    //
+    // It matters because the two emit sites disagree: index.js sends a bare
+    // array on connect and { entries } on card focus, so the connect-time replay
+    // was silently dropped and the card stayed empty until a focus arrived.
+    var entries=Array.isArray(data)?data:(data&&data.entries?data.entries:[]);
     if(!Array.isArray(entries)) return;
     _dcLogs=entries.slice(-DC_LOG_MAX);
     _renderDcLogs();
@@ -9098,7 +9366,13 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
     // render empty, which looks identical to a quiet network. Say so instead.
     var geoRow='';
     if(data.geo&&!data.geo.available){
-      geoRow='<div class="diag-row" title="'+dcEsc(data.geo.reason||'geoip-lite failed to load')+'">'+
+      // esc() for the same reason as the Physical Ports title above: attribute
+      // position. This value is our own error text from a failed geoip-lite
+      // require rather than anything the router supplies, so it is the far less
+      // urgent of the two, but it is the identical defect and the same one-line
+      // fix. Leaving it would only preserve the inconsistency that made the
+      // first one easy to miss.
+      geoRow='<div class="diag-row" title="'+esc(data.geo.reason||'geoip-lite failed to load')+'">'+
              '<span class="diag-name">geo lookups</span>'+
              '<span class="diag-count diag-count-zero">unavailable</span></div>';
     }
@@ -9841,9 +10115,24 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
           if (!d || !d.ok || !box) return;
           box.innerHTML = '<div class="bw-table-wrap"><table class="bw-table">' +
             '<thead><tr><th>When</th><th>Result</th><th>Recipients</th><th>Size</th><th>Detail</th></tr></thead><tbody>' +
-            (d.runs.length ? d.runs.map(function(r) {
+            // (d.runs || []): a response carrying ok:true and no runs key threw
+            // inside the .then, and this branch has no .catch, so it left an
+            // unhandled rejection and an untouched history box. The empty state
+            // below is the right answer to that.
+            ((d.runs || []).length ? d.runs.map(function(r) {
               return '<tr><td class="bw-mac" data-i18n-user-data>' + esc(new Date(r.ran_at).toLocaleString()) + '</td>' +
-                '<td>' + esc(r.outcome) + '</td><td>' + esc(String(r.recipients_n)) + '</td>' +
+                '<td>' + esc(r.outcome) + '</td>' +
+                // ?? 0 rather than a bare String(): String(undefined) renders
+                // the word "undefined" into a column an operator reads to see
+                // how many people got the report. Every other column in this
+                // row already defends itself; this was the one bare String().
+                //
+                // Five headers, five cells. The outcome cell above was lost once
+                // while this line was being edited, which shifted every value one
+                // column left and put a plausible recipient count under "Result".
+                // That is worse than the "undefined" it replaced: the word was
+                // obviously wrong, a number in the wrong column is not.
+                '<td>' + esc(String(r.recipients_n ?? 0)) + '</td>' +
                 '<td>' + esc(r.bytes ? fmtBytes(r.bytes) : '—') + '</td>' +
                 '<td class="bw-mac" data-i18n-user-data>' + esc(r.error || '') + '</td></tr>';
             }).join('') : '<tr><td colspan="5" class="rpt-empty">No runs yet.</td></tr>') +
@@ -10154,16 +10443,16 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       statCard(fmtDataMB(s.txTotalMb), 'Total Upload') +
       statCard(s.rxMaxMb == null ? '—' : fmtDataMB(s.rxMaxMb), 'Busiest ' + bucketNoun(agg) + ' ↓') +
       statCard(s.txMaxMb == null ? '—' : fmtDataMB(s.txMaxMb), 'Busiest ' + bucketNoun(agg) + ' ↑') +
-      statCard((agg ? rows.length : (s.samples || 0)).toLocaleString(), countLabel);
+      statCard((agg ? rows.length : (s.bandwidthSamples || 0)).toLocaleString(), countLabel);
     // The stat cards now cover the whole range but the chart and table still
     // only show the rows that fit under the LIMIT. Say so rather than let the
     // two quietly disagree.
     var hint = $('rptBwTruncHint');
     if (hint) {
-      var truncated = !agg && s.samples && s.samples > rows.length;
+      var truncated = !agg && s.bandwidthSamples && s.bandwidthSamples > rows.length;
       hint.style.display = truncated ? '' : 'none';
       if (truncated) hint.textContent = 'Chart and table show ' + rows.length.toLocaleString() +
-        ' of ' + s.samples.toLocaleString() + ' samples — choose an aggregation to cover the full range. Totals above are for the full range.';
+        ' of ' + s.bandwidthSamples.toLocaleString() + ' samples — choose an aggregation to cover the full range. Totals above are for the full range.';
     }
     renderBandwidthChart(rows, s);
     _bwRawRows = rows;
@@ -10262,7 +10551,9 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
       statCard(mbpsOrDash(s.txP95Mbps), '95th %ile TX') +
       statCard(utilPct(s.rxPeakPct) + ' / ' + utilPct(s.txPeakPct),
                'Peak Util RX/TX' + (over ? ' ⚠' : '')) +
-      statCard((agg ? rows.length : (s.samples || 0)).toLocaleString(), sampleLabel);
+      // trafficSamples, not the summary's old ambiguous `samples`: this card
+      // sits under the RATE chart and used to report the VOLUME row count.
+      statCard((agg ? rows.length : (s.trafficSamples || 0)).toLocaleString(), sampleLabel);
     _trafficLastSummary = s;
     renderTrafficChart(rows, s);
     _trafficRawRows = rows;
@@ -10579,8 +10870,25 @@ var MAP_URL = '/vendor/world-atlas/countries-110m.json';
  * see. Alerting is not part of the online/offline split: it counts routers with
  * an unresolved alert, which a reachable router can perfectly well have.
  */
+// Every site id on a row, as a list. A device may belong to several (#117);
+// `siteIds` is the real field and `siteId` is only the primary's mirror, but a
+// payload built by an older server still carries just the scalar.
+function _rtrSiteIds(r) {
+  if (Array.isArray(r.siteIds)) return r.siteIds;
+  return r.siteId ? [r.siteId] : [];
+}
+
+// Display names for those sites. The server resolves them, so the browser never
+// has to consult its own site cache here — that cache comes from an ungated
+// endpoint and would show names for sites this viewer has no device in.
+function _rtrSiteNames(r) {
+  if (Array.isArray(r.siteNames)) return r.siteNames;
+  return r.siteName ? [r.siteName] : [];
+}
+
 function _renderRoutersSummary(rows) {
-  var el = { total: $('rsTotal'), online: $('rsOnline'), offline: $('rsOffline'), alerting: $('rsAlerting') };
+  var el = { total: $('rsTotal'), online: $('rsOnline'), offline: $('rsOffline'),
+             alerting: $('rsAlerting'), sites: $('rsSites') };
   if (!el.total) return;
   var total = rows ? rows.length : 0;
   var online = 0, alerting = 0;
@@ -10592,6 +10900,18 @@ function _renderRoutersSummary(rows) {
   el.online.textContent   = online;
   el.offline.textContent  = total - online;
   el.alerting.textContent = alerting;
+  // Sites the fleet is actually spread across, not sites that exist. A device in
+  // two sites counts once for each, which is the point of the number: it answers
+  // "how many places am I looking after", and it always agrees with what the
+  // filter beside it can usefully select.
+  if (el.sites) {
+    var seen = {};
+    var n = 0;
+    (rows || []).forEach(function (r) {
+      _rtrSiteIds(r).forEach(function (id) { if (!seen[id]) { seen[id] = 1; n++; } });
+    });
+    el.sites.textContent = n;
+  }
   // Colour only when there is something to say: a red zero reads as a problem.
   el.offline.style.color  = (total - online) > 0 ? 'var(--accent-red, #f87171)'  : '';
   el.alerting.style.color = alerting > 0         ? 'var(--accent-amber, #f59f00)' : '';
@@ -10631,7 +10951,11 @@ var RTL_COLS = {
  */
 function _rtrMatches(r, q) {
   if (!q) return true;
-  var hay = [r.label, r.host, r.boardName, r.version].join(' ').toLowerCase();
+  // Site names are in the haystack so typing a site name and picking it from
+  // the filter narrow to the same set. A device in several sites contributes
+  // all their names.
+  var hay = [r.label, r.host, r.boardName, r.version]
+    .concat(_rtrSiteNames(r)).join(' ').toLowerCase();
   return q.split(/\s+/).every(function (term) {
     if (term === 'online')   return !!r.connected;
     if (term === 'offline')  return !r.connected;
@@ -10643,6 +10967,57 @@ function _rtrMatches(r, q) {
 function _rtrQuery() {
   var el = $('routersSearch');
   return el ? el.value.trim().toLowerCase() : '';
+}
+
+// The sentinel for "no site at all". A leading space cannot collide with a real
+// site id, which is /^[A-Za-z0-9_-]{1,64}$/, so it needs no separate flag.
+var RTR_UNASSIGNED = ' unassigned';
+
+function _rtrSiteFilter() {
+  var el = $('routersSiteFilter');
+  return el ? el.value : '';
+}
+
+// Repopulate the site dropdown from the rows, preserving the current selection.
+// Same shape as the interface-type filter: rebuild, restore the value only if
+// it still exists, and mark the control active when it is narrowing.
+function _syncRoutersSiteFilter(rows) {
+  var sel = $('routersSiteFilter');
+  if (!sel) return;
+
+  var names = {};          // id -> display name
+  var anyLoose = false;
+  (rows || []).forEach(function (r) {
+    var ids = _rtrSiteIds(r), nm = _rtrSiteNames(r);
+    if (!ids.length) { anyLoose = true; return; }
+    // Zipped BY INDEX, which is only safe because the server sends one entry per
+    // id and uses '' for a site it could not resolve. It used to drop those, so
+    // a device listing a deleted site shifted every later name onto the wrong
+    // id: a live site appeared under its raw id while the dead one wore a real
+    // site's name, and picking it filtered to the deleted site instead.
+    ids.forEach(function (id, i) { if (!names[id]) names[id] = nm[i] || id; });
+  });
+
+  var ids = Object.keys(names).sort(function (a, b) {
+    return String(names[a]).localeCompare(String(names[b]));
+  });
+  var html = '<option data-i18n-user-data value="">' + esc(tr('All Sites')) + '</option>' +
+    ids.map(function (id) {
+      return '<option data-i18n-user-data value="' + esc(id) + '">' + esc(names[id]) + '</option>';
+    }).join('') +
+    // Only offered when such devices exist, so a fully assigned fleet keeps a
+    // clean list.
+    (anyLoose ? '<option data-i18n-user-data value="' + RTR_UNASSIGNED + '">' + esc(tr('Unassigned')) + '</option>' : '');
+
+  if (sel.innerHTML !== html) {
+    var keep = sel.value;
+    sel.innerHTML = html;
+    // Restoring an option that no longer exists would silently reset the filter
+    // to All Sites while the list still looked filtered.
+    sel.value = (keep === RTR_UNASSIGNED ? (anyLoose ? keep : '')
+                                         : (names[keep] ? keep : ''));
+  }
+  sel.classList.toggle('active', !!sel.value);
 }
 
 function _rtlRefreshHeaders() {
@@ -10762,6 +11137,10 @@ function _renderRoutersList(rows) {
   // two-second refresh cannot wipe what was typed.
   var search = $('routersSearch');
   if (search) search.addEventListener('input', function () { _renderRoutersStats(_lastRtrRows); });
+  // The site filter re-renders through the same path, so one filter point feeds
+  // the card grid, the list and the map and they cannot disagree.
+  var siteSel = $('routersSiteFilter');
+  if (siteSel) siteSel.addEventListener('change', function () { _renderRoutersStats(_lastRtrRows); });
 }());
 
 function _renderRoutersStats(rows) {
@@ -10772,8 +11151,25 @@ function _renderRoutersStats(rows) {
   // typed would stop answering "how many routers do I have".
   _renderRoutersSummary(all);
 
+  // Rebuilt from the rows, not from the site cache: these rows are RBAC-filtered
+  // per socket, so the dropdown can only ever offer sites this viewer actually
+  // has a device in. window._sitesById comes from an ungated endpoint and would
+  // list the whole install.
+  _syncRoutersSiteFilter(all);
+
   var q = _rtrQuery();
-  var visible = q ? all.filter(function (r) { return _rtrMatches(r, q); }) : all;
+  var site = _rtrSiteFilter();
+  var visible = all;
+  if (site) {
+    visible = visible.filter(function (r) {
+      var ids = _rtrSiteIds(r);
+      // '' is All Sites and never reaches here. UNASSIGNED is its own option so
+      // the devices nobody has filed can be found, which is the set someone
+      // tidying up assignments wants.
+      return site === RTR_UNASSIGNED ? ids.length === 0 : ids.indexOf(site) !== -1;
+    });
+  }
+  if (q) visible = visible.filter(function (r) { return _rtrMatches(r, q); });
 
   var shown = $('routersShown');
   if (shown) {
@@ -10964,7 +11360,7 @@ function _mountCityPicker(inputEl, listEl, opts) {
     listEl.innerHTML = results.map(function (p, i) {
       // Place names come from a local database rather than a user, but they are
       // still being put into innerHTML, and the esc() rule has no exceptions.
-      return '<div class="cpick-opt' + (i === active ? ' is-active' : '') + '" role="option"'
+      return '<div class="cpick-opt' + (i === active ? ' is-active' : '') + '" role="option" data-i18n-user-data'
         + ' data-i="' + i + '">' + esc(p.name)
         + '<span class="cpick-cc">' + esc([p.region, p.cc].filter(Boolean).join(' ')) + '</span></div>';
     }).join('');
@@ -11529,7 +11925,7 @@ function _renderRoutersMap(rows) {
     // transform until a town name spanned a continent.
     badgeLayer.innerHTML = '';
     labelled.forEach(function (L) {
-      var t = el('text', { class: 'rtrmap-place', x: L.x, y: L.ly,
+      var t = el('text', { class: 'rtrmap-place', x: L.x, y: L.ly, 'data-i18n-user-data': '',
                            'font-size': 8 / scale, 'stroke-width': 2.5 / scale });
       t.textContent = L.text;
       badgeLayer.appendChild(t);
@@ -11554,7 +11950,7 @@ function _renderRoutersMap(rows) {
     tray.innerHTML = '<span class="rmt-label">No location ('
       + unlocated.length + '):</span>'
       + unlocated.map(function (r) {
-        return '<span class="rmt-pill" data-open-router="' + esc(r.id) + '" title="'
+        return '<span class="rmt-pill" data-i18n-user-data data-open-router="' + esc(r.id) + '" title="'
           + esc(r.host) + '"><span class="rtl-dot" style="background:'
           + (r.connected ? 'var(--accent-green,#2fb344)' : 'var(--accent-red,#f87171)')
           + '"></span>' + esc(r.label) + '</span>';
@@ -12002,7 +12398,7 @@ function _renderRoutersMap(rows) {
   if (!tbody || !theadRow) return;
 
   var _data = null;
-  var _sort = { col: 'vlanId', dir: 1 };
+  var _sort = { col: 'vlanId', dir: 'asc' };
   var _showDynamic = false;
 
   var COLS = [
@@ -12106,14 +12502,11 @@ function _renderRoutersMap(rows) {
     });
     rows = rows.slice().sort(function (a, b) {
       var av = sortVal(a, _sort.col), bv = sortVal(b, _sort.col);
-      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
-      return _sort.dir * (av - bv);
+      if (typeof av === 'string') return _sortMul(_sort) * av.localeCompare(bv);
+      return _sortMul(_sort) * (av - bv);
     });
 
-    _renderSortHeader('vlansThead', COLS, _sort, function (key) {
-      _sort.dir = _sort.col === key ? -_sort.dir : 1;
-      _sort.col = key; render();
-    });
+    _renderSortHeader('vlansThead', COLS, _sort, function () { render(); });
 
     $('vlansBadge').textContent = _data.vlans.length;
     $('vlansBadge').className = 'card-badge' + (_data.vlans.length ? ' active-blue' : '');
@@ -12203,7 +12596,7 @@ function _renderRoutersMap(rows) {
   if (!tbody || !theadRow) return;
 
   var _data = null;
-  var _sort = { col: 'name', dir: 1 };
+  var _sort = { col: 'name', dir: 'asc' };
 
   var COLS = [
     { key:'name',     label:'User' },
@@ -12230,14 +12623,11 @@ function _renderRoutersMap(rows) {
       return (s.name + ' ' + s.address + ' ' + s.callerId).toLowerCase().indexOf(q) !== -1;
     }).slice().sort(function (a, b) {
       var av = sortVal(a, _sort.col), bv = sortVal(b, _sort.col);
-      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
-      return _sort.dir * (av - bv);
+      if (typeof av === 'string') return _sortMul(_sort) * av.localeCompare(bv);
+      return _sortMul(_sort) * (av - bv);
     });
 
-    _renderSortHeader('pppThead', COLS, _sort, function (key) {
-      _sort.dir = _sort.col === key ? -_sort.dir : 1;
-      _sort.col = key; render();
-    });
+    _renderSortHeader('pppThead', COLS, _sort, function () { render(); });
 
     $('pppBadge').textContent = _data.sessions.length;
     $('pppBadge').className = 'card-badge' + (_data.sessions.length ? ' active-blue' : '');
@@ -12328,7 +12718,7 @@ function _renderRoutersMap(rows) {
   if (!tbody || !theadRow) return;
 
   var _data = null;
-  var _sort = { col: 'identity', dir: 1 };
+  var _sort = { col: 'identity', dir: 'asc' };
   var _open = {};              // identity -> expanded client list
 
   var COLS = [
@@ -12375,14 +12765,11 @@ function _renderRoutersMap(rows) {
     });
     rows = rows.slice().sort(function (a, b) {
       var av = sortVal(a, _sort.col), bv = sortVal(b, _sort.col);
-      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
-      return _sort.dir * (av - bv);
+      if (typeof av === 'string') return _sortMul(_sort) * av.localeCompare(bv);
+      return _sortMul(_sort) * (av - bv);
     });
 
-    _renderSortHeader('capsmanThead', COLS, _sort, function (key) {
-      _sort.dir = _sort.col === key ? -_sort.dir : 1;
-      _sort.col = key; render();
-    });
+    _renderSortHeader('capsmanThead', COLS, _sort, function () { render(); });
 
     $('capsmanBadge').textContent = (_data.caps || []).length;
     $('capsmanBadge').className = 'card-badge' + ((_data.caps || []).length ? ' active-blue' : '');
@@ -12393,7 +12780,14 @@ function _renderRoutersMap(rows) {
         ? 'This router runs the legacy wireless package, which has no CAPsMAN here.'
         : (_data.role === 'cap'
             ? 'This router is a CAP, not a manager — it has no CAPs of its own.'
-            : 'No CAPs are connected to this manager.');
+            // The search rung goes AFTER the two structural ones on purpose: a
+            // CAP with a search term typed into it is still a CAP, and saying
+            // so is more useful than reporting the filter. Without this rung a
+            // viewer who filtered on a name none of their CAPs match was told
+            // the manager has nothing connected, which is a statement about the
+            // router rather than about what they just typed.
+            : (q ? 'No CAPs match that search.'
+                 : 'No CAPs are connected to this manager.'));
       tbody.innerHTML = '<tr><td colspan="8" class="empty-state">' + msg + '</td></tr>';
     } else {
       tbody.innerHTML = rows.map(function (c) {
@@ -12498,9 +12892,9 @@ function _renderRoutersMap(rows) {
   if (!tbody || !theadRow) return;
 
   var _data = null;
-  var _sortB = { col: 'name',      dir: 1 };
-  var _sortP = { col: 'interface', dir: 1 };
-  var _sortH = { col: 'mac',       dir: 1 };
+  var _sortB = { col: 'name',      dir: 'asc' };
+  var _sortP = { col: 'interface', dir: 'asc' };
+  var _sortH = { col: 'mac',       dir: 'asc' };
   var _tab   = 'ports';
 
   var COLS_B = [
@@ -12544,15 +12938,12 @@ function _renderRoutersMap(rows) {
   function sorted(rows, sort, valFn) {
     return rows.slice().sort(function (a, b) {
       var av = valFn(a, sort.col), bv = valFn(b, sort.col);
-      if (typeof av === 'string') return sort.dir * av.localeCompare(bv);
-      return sort.dir * (av - bv);
+      if (typeof av === 'string') return _sortMul(sort) * av.localeCompare(bv);
+      return _sortMul(sort) * (av - bv);
     });
   }
   function bind(theadId, cols, sort) {
-    _renderSortHeader(theadId, cols, sort, function (key) {
-      sort.dir = sort.col === key ? -sort.dir : 1;
-      sort.col = key; render();
-    });
+    _renderSortHeader(theadId, cols, sort, function () { render(); });
   }
 
   function render() {
@@ -12726,7 +13117,7 @@ function _renderRoutersMap(rows) {
   if (!settingsBody) return;
 
   var _data = null;
-  var _sortS = { col: 'name', dir: 1 };
+  var _sortS = { col: 'name', dir: 'asc' };
 
   var COLS_S = [
     { key:'name',    label:'Name' },
@@ -12767,7 +13158,7 @@ function _renderRoutersMap(rows) {
     return rows.slice().sort(function (a, b) {
       var av = (a[sort.col] || '').toString().toLowerCase();
       var bv = (b[sort.col] || '').toString().toLowerCase();
-      return sort.dir * av.localeCompare(bv);
+      return _sortMul(sort) * av.localeCompare(bv);
     });
   }
 
@@ -12778,10 +13169,7 @@ function _renderRoutersMap(rows) {
       if (!q) return true;
       return ((e.name || e.regexp) + ' ' + e.address).toLowerCase().indexOf(q) !== -1;
     });
-    _renderSortHeader('dnsStaticThead', COLS_S, _sortS, function (key) {
-      _sortS.dir = _sortS.col === key ? -_sortS.dir : 1;
-      _sortS.col = key; render();
-    });
+    _renderSortHeader('dnsStaticThead', COLS_S, _sortS, function () { render(); });
     $('dnsStaticBadge').textContent = rows.length;
     $('dnsStaticTable').innerHTML = list.length ? sorted(list, _sortS).map(function (e) {
       return '<tr' + (e.disabled ? ' style="opacity:.55"' : '') + resRow(e.id, e.name) + '>' +
@@ -12844,7 +13232,7 @@ function _renderRoutersMap(rows) {
   // Default to state, not name: what is scheduled matters most, then what is
   // actually on the router. Alphabetical order buries both under the packages
   // MikroTik merely offers.
-  var _sort = { col: 'state', dir: 1 };
+  var _sort = { col: 'state', dir: 'asc' };
   var _busy = '';
   var STATE_RANK = { scheduled: 0, installed: 1, disabled: 2, available: 3, unknown: 4 };
 
@@ -12855,8 +13243,16 @@ function _renderRoutersMap(rows) {
     var el = $('pkgStatus');
     if (!el) return;
     el.textContent = text || '';
+    // Marked while a message is showing. render() writes this same element from
+    // _caps.permitted and runs again on the next payload — the server calls
+    // refreshNow() after every write — so unmarked it erased the message in the
+    // same tick on a failure, and one round trip later on a success. The 8 s
+    // timer never got to expire and the operator saw nothing either way.
+    if (text) el.dataset.status = '1'; else delete el.dataset.status;
     if (_statusTimer) clearTimeout(_statusTimer);
-    if (text) _statusTimer = setTimeout(function () { el.textContent = ''; }, 8000);
+    if (text) _statusTimer = setTimeout(function () {
+      el.textContent = ''; delete el.dataset.status;
+    }, 8000);
   }
 
   var COLS = [
@@ -12910,19 +13306,17 @@ function _renderRoutersMap(rows) {
         return (p[k] || '').toString().toLowerCase();
       };
       var av = f(a, _sort.col), bv = f(b, _sort.col);
-      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
-      return _sort.dir * (av - bv);
+      if (typeof av === 'string') return _sortMul(_sort) * av.localeCompare(bv);
+      return _sortMul(_sort) * (av - bv);
     });
 
-    _renderSortHeader('packagesThead', COLS, _sort, function (key) {
-      _sort.dir = _sort.col === key ? -_sort.dir : 1;
-      _sort.col = key; render();
-    });
+    _renderSortHeader('packagesThead', COLS, _sort, function () { render(); });
 
     $('packagesBadge').textContent = (_data.packages || []).length;
     $('packagesBadge').className = 'card-badge' + ((_data.packages || []).length ? ' active-blue' : '');
     var an = $('pkgActionNote');
-    if (an) an.textContent = _caps.permitted ? '' : 'read-only — you do not have write access to this router';
+    // Never clears a message it did not write — see setStatus.
+    if (an && !an.dataset.status) an.textContent = _caps.permitted ? '' : 'read-only — you do not have write access to this router';
 
     tbody.innerHTML = rows.length ? rows.map(function (p) {
       return '<tr>' +
@@ -13084,8 +13478,16 @@ function _renderRoutersMap(rows) {
     var el = $('wanActionNote');
     if (!el) return;
     el.textContent = text || '';
+    // Marked while a message is showing. render() writes this same element from
+    // _caps.permitted and runs again on the next payload — the server calls
+    // refreshNow() after every write — so unmarked it erased the message in the
+    // same tick on a failure, and one round trip later on a success. The 8 s
+    // timer never got to expire and the operator saw nothing either way.
+    if (text) el.dataset.status = '1'; else delete el.dataset.status;
     if (_statusTimer) clearTimeout(_statusTimer);
-    if (text) _statusTimer = setTimeout(function () { el.textContent = ''; }, 8000);
+    if (text) _statusTimer = setTimeout(function () {
+      el.textContent = ''; delete el.dataset.status;
+    }, 8000);
   }
 
   var COLS = [{key:'',label:'Uplink'},{key:'',label:'Address'},{key:'',label:'Gateway'},
@@ -13169,7 +13571,8 @@ function _renderRoutersMap(rows) {
     }).join('') : '<tr><td colspan="7" class="empty-state">' + emptyState() + '</td></tr>';
 
     var note = $('wanActionNote');
-    if (note) note.textContent = _caps.permitted ? '' : 'read-only — you do not have write access to this router';
+    // Never clears a message it did not write — see setStatus.
+    if (note && !note.dataset.status) note.textContent = _caps.permitted ? '' : 'read-only — you do not have write access to this router';
     renderNotice();
     renderSummary();
   }
@@ -13327,14 +13730,31 @@ function _renderRoutersMap(rows) {
     var el = $('qActionNote');
     if (!el) return;
     el.textContent = text || '';
+    // Marked while a message is showing. render() writes this same element from
+    // _caps.permitted and runs again on the next payload — the server calls
+    // refreshNow() after every write — so unmarked it erased the message in the
+    // same tick on a failure, and one round trip later on a success. The 8 s
+    // timer never got to expire and the operator saw nothing either way.
+    if (text) el.dataset.status = '1'; else delete el.dataset.status;
     if (_statusTimer) clearTimeout(_statusTimer);
-    if (text) _statusTimer = setTimeout(function () { el.textContent = ''; }, 8000);
+    if (text) _statusTimer = setTimeout(function () {
+      el.textContent = ''; delete el.dataset.status;
+    }, 8000);
   }
 
   // Order first, and it is not cosmetic — see the header.
-  var SIMPLE_COLS = [{key:'',label:'#'},{key:'name',label:'Name'},{key:'target',label:'Target'},
+  // Every key is blank on purpose. _renderSortHeader gives any column with a
+  // truthy key a pointer cursor and a click listener, and this page passes a
+  // no-op callback with a throwaway sort state — correct, because the order
+  // here is the router's. Five of these carried keys anyway, so the header
+  // invited a click, mutated a state object discarded on the next render, and
+  // called a function that does nothing. That reads as a broken sort.
+  //
+  // Making them sortable is not the fix. A simple queue is first-match-wins, so
+  // position IS semantics, and a sorted view would misrepresent which rule wins.
+  var SIMPLE_COLS = [{key:'',label:'#'},{key:'',label:'Name'},{key:'',label:'Target'},
                      {key:'',label:'Limits'},{key:'',label:'Rate'},{key:'',label:''}];
-  var TREE_COLS   = [{key:'name',label:'Name'},{key:'parent',label:'Parent'},{key:'packetMark',label:'Packet Mark'},
+  var TREE_COLS   = [{key:'',label:'Name'},{key:'',label:'Parent'},{key:'',label:'Packet Mark'},
                      {key:'',label:'Max Limit'},{key:'',label:'Rate'},{key:'',label:''}];
 
   function q() { var e = $('qSearch'); return (e && e.value || '').toLowerCase().trim(); }
@@ -13569,7 +13989,8 @@ function _renderRoutersMap(rows) {
       add.style.display = _caps.permitted ? '' : 'none';
     }
     var note = $('qActionNote');
-    if (note) {
+    // Never clears a message it did not write — see setStatus.
+    if (note && !note.dataset.status) {
       note.textContent = !_caps.permitted ? 'read-only — you do not have write access to this router'
                        : (_data && _data.stats === 'none') ? 'this router reports no queue statistics' : '';
     }
@@ -13803,8 +14224,16 @@ function _renderRoutersMap(rows) {
     var el = $('ruActionNote');
     if (!el) return;
     el.textContent = text || '';
+    // Marked while a message is showing. render() writes this same element from
+    // _caps.permitted and runs again on the next payload — the server calls
+    // refreshNow() after every write — so unmarked it erased the message in the
+    // same tick on a failure, and one round trip later on a success. The 8 s
+    // timer never got to expire and the operator saw nothing either way.
+    if (text) el.dataset.status = '1'; else delete el.dataset.status;
     if (_statusTimer) clearTimeout(_statusTimer);
-    if (text) _statusTimer = setTimeout(function () { el.textContent = ''; }, 8000);
+    if (text) _statusTimer = setTimeout(function () {
+      el.textContent = ''; delete el.dataset.status;
+    }, 8000);
   }
 
   // A keyless column is not sortable — see _renderSortHeader. The action column
@@ -13976,7 +14405,8 @@ function _renderRoutersMap(rows) {
       add.style.display = (_caps.permitted && _tab !== 'sessions') ? '' : 'none';
     }
     var note = $('ruActionNote');
-    if (note) note.textContent = _caps.permitted ? '' : 'read-only — you do not have write access to this router';
+    // Never clears a message it did not write — see setStatus.
+    if (note && !note.dataset.status) note.textContent = _caps.permitted ? '' : 'read-only — you do not have write access to this router';
     renderNotice();
     renderSummary();
   }
@@ -13992,7 +14422,7 @@ function _renderRoutersMap(rows) {
   // ── Dialogs ───────────────────────────────────────────────────────────────
 
   function openUserForm(u) {
-    $('ruf_title').textContent  = u ? 'Edit Router User' : 'Add Router User';
+    $('ruf_title').textContent  = u ? 'Edit Device User' : 'Add Device User';
     $('ruf_id').value           = u ? u.id : '';
     $('ruf_expectedName').value = u ? u.name : '';
     $('ruf_name').value    = u ? u.name : '';
@@ -14214,7 +14644,7 @@ function _renderRoutersMap(rows) {
 
   var _rows = [], _total = 0, _offset = 0, _facets = { actors: [], actions: [] };
   var PAGE = 200;
-  var _sort = { col: 'ts', dir: -1 };
+  var _sort = { col: 'ts', dir: 'desc' };
 
   var COLS = [
     { key:'ts',      label:'When' },
@@ -14239,6 +14669,17 @@ function _renderRoutersMap(rows) {
     if (!raw) return '<span style="color:var(--text-muted)">&mdash;</span>';
     var d;
     try { d = JSON.parse(raw); } catch (e) { return esc(String(raw).slice(0, 120)); }
+    // The try covers the PARSE only, and JSON.parse('null') does not throw — it
+    // returns null, and `d.changes` on the next line then does. That exception
+    // escapes detailCell and render and lands in load()'s empty .catch, so ONE
+    // row whose detail column holds the four characters `null` left the whole
+    // Audit table blank with the filters above it looking normal. An audit
+    // trail showing no entries is the most reassuring possible way to fail.
+    //
+    // Only null does this: 12345 and "a string" both parse, have no `changes`
+    // and render the dash correctly. null is the one result that is falsy AND
+    // has no properties, which is what made the other non-objects look safe.
+    if (!d || typeof d !== 'object') return '<span style="color:var(--text-muted)">&mdash;</span>';
     var bits = [];
     (d.changes || []).slice(0, 4).forEach(function (c) {
       bits.push('<span style="color:var(--text-muted)">' + esc(c.field) + '</span> ' +
@@ -14268,15 +14709,12 @@ function _renderRoutersMap(rows) {
   }
 
   function render() {
-    _renderSortHeader('auditThead', COLS, _sort, function (key) {
-      _sort.dir = _sort.col === key ? -_sort.dir : 1;
-      _sort.col = key; render();
-    });
+    _renderSortHeader('auditThead', COLS, _sort, function () { render(); });
 
     var rows = _rows.map(flat).sort(function (a, b) {
       var av = a[_sort.col], bv = b[_sort.col];
-      if (typeof av === 'string') return _sort.dir * av.localeCompare(bv);
-      return _sort.dir * ((av || 0) - (bv || 0));
+      if (typeof av === 'string') return _sortMul(_sort) * av.localeCompare(bv);
+      return _sortMul(_sort) * ((av || 0) - (bv || 0));
     });
 
     $('auditBadge').textContent = _total;
@@ -14537,11 +14975,21 @@ function _renderRoutersMap(rows) {
       // blank box — even for a field whose declared type is free text.
       body = selectHtml(f, id, value, choices);
     } else if (f.input === 'select') {
+      // The router's value is kept as an option even when our list does not
+      // name it. A required select emits no blank option, so without this
+      // nothing matches, the browser falls back to selectedIndex 0, and Save
+      // rewrites the record as whatever option zero happens to be — silently,
+      // and with no sign on screen that the form was not showing the record.
+      // selectHtml already does this for router-supplied choices; a list
+      // declared here is no more exhaustive than one the router sent.
+      var selOpts = (f.options || []).slice();
+      var selCur  = (value === undefined || value === null) ? '' : String(value);
+      if (selCur && selOpts.indexOf(selCur) === -1) selOpts.unshift(selCur);
       body = '<select class="sform-input" id="' + id + '">' +
              (f.required ? '' : '<option value=""></option>') +
-             (f.options || []).map(function (o) {
+             selOpts.map(function (o) {
                return '<option value="' + esc(o) + '"' +
-                      (String(value) === o ? ' selected' : '') + '>' + esc(o) + '</option>';
+                      (selCur === o ? ' selected' : '') + '>' + esc(o) + '</option>';
              }).join('') + '</select>';
     } else {
       var attrs = ' type="' + esc(f.input) + '"';
@@ -15186,8 +15634,31 @@ function _renderRoutersMap(rows) {
 
   var _caps = { permitted: false, routerName: '' };
   var _upd  = { installed: '', latest: '', channel: '' };
+  // The version the OPEN dialog is asking about. A reply naming anything else
+  // is stale — the operator switched routers, or reopened on a newer release
+  // while the first fetch was still in flight — and must not be painted into a
+  // dialog that is now about a different upgrade.
+  var _notesFor = '';
 
   function el(id) { return document.getElementById(id); }
+
+  /**
+   * Paint the release-notes box.
+   *
+   * `muted` is for our own status lines, which are the only text here that is
+   * ours. Everything else is EXTERNAL CONTENT — fetched from mikrotik.com, not
+   * produced by this app or its router — so it goes through esc() before it
+   * reaches innerHTML, per the hard constraint in CLAUDE.md. white-space is
+   * pre-wrap in CSS, which keeps the "*) area - what changed;" layout without
+   * parsing or trusting a line of it.
+   */
+  function _setNotes(text, muted) {
+    var box = el('upd_notes');
+    if (!box) return;
+    box.className = 'upd-notes' + (muted ? ' muted' : '');
+    box.innerHTML = esc(text);
+    box.scrollTop = 0;
+  }
 
   function draw() {
     var slot = el('sysUpdateAction');
@@ -15200,6 +15671,17 @@ function _renderRoutersMap(rows) {
   socket.on('packages:caps', function (d) {
     _caps = d || { permitted: false, routerName: '' };
     draw();
+  });
+
+  socket.on('packages:notes', function (d) {
+    d = d || {};
+    // Discard a reply for a version this dialog is no longer about. Without
+    // this, switching routers with the dialog open paints the previous router's
+    // changelog under the new router's version numbers, which is worse than
+    // showing nothing.
+    if (!_notesFor || d.version !== _notesFor) return;
+    if (d.notes) _setNotes(d.notes, false);
+    else         _setNotes(tr('Release notes unavailable'), true);
   });
 
   // The System card publishes what it drew, so this module never re-reads the
@@ -15240,7 +15722,7 @@ function _renderRoutersMap(rows) {
 
     go.disabled = true;
     go.innerHTML = '<span class="sbtn-spin"></span>' +
-                   (state === 'rebooting' ? 'Rebooting&hellip;' : 'Issuing&hellip;');
+                   esc(tr(state === 'rebooting' ? 'Rebooting…' : 'Issuing…'));
     // Once the command is out there is nothing left to confirm, and "Cancel"
     // would imply the upgrade could still be called off. It cannot.
     if (confirm) confirm.disabled = true;
@@ -15261,7 +15743,15 @@ function _renderRoutersMap(rows) {
     if (e.target.closest('#sysUpdateBtn')) {
       el('upd_from').textContent    = _upd.installed || '—';
       el('upd_to').textContent      = _upd.latest || '—';
-      el('upd_channel').textContent = _upd.channel ? 'channel: ' + _upd.channel : '';
+      el('upd_channel').textContent = _upd.channel ? tr('channel:') + ' ' + _upd.channel : '';
+      // Asked for HERE, on open, and never on the mikrodash:updateavailable
+      // path: that fires on every poll tick, which is what made the update
+      // strip flash before _lastUpdateRowHtml was added. Nobody who never opens
+      // the dialog should cost a fetch.
+      _notesFor = _upd.latest || '';
+      _setNotes(tr('Loading release notes…'), true);
+      if (_notesFor) socket.emit('packages:notes', { version: _notesFor });
+      else _setNotes(tr('Release notes unavailable'), true);
       el('upd_confirm').value       = '';
       el('upd_confirm').placeholder = _caps.routerName || '';
       el('upd_error').style.display = 'none';
@@ -15282,11 +15772,11 @@ function _renderRoutersMap(rows) {
     if (!d || !modal || !modal.classList.contains('open')) return;
     var box = el('upd_error');
     box.textContent =
-      d.code === 'confirm-mismatch'    ? 'That is not this router’s name. Type "' + (d.routerName || '') + '".' :
-      d.code === 'nothing-to-update'   ? 'This router is already on the newest version it knows about.' :
-      d.code === 'denied'              ? 'You do not have permission to update this router.' :
-      d.code === 'router-write-policy' ? 'The RouterOS user MikroDash connects with lacks the write policy.' :
-      'The router refused the upgrade.';
+      d.code === 'confirm-mismatch'    ? tr('That is not this router’s name. Type') + ' "' + (d.routerName || '') + '".' :
+      d.code === 'nothing-to-update'   ? tr('This router is already on the newest version it knows about.') :
+      d.code === 'denied'              ? tr('You do not have permission to update this router.') :
+      d.code === 'router-write-policy' ? tr('The RouterOS user MikroDash connects with lacks the write policy.') :
+      tr('The router refused the upgrade.');
     box.style.display = '';
     // Nothing was issued, so the operator can correct the name and try again.
     updState('idle');

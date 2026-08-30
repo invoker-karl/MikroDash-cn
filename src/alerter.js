@@ -155,6 +155,47 @@ function _ifaceTypeKey(type) {
   return map[type] || 'notifIfaceOther';
 }
 
+const STATE_MAX = 500;
+
+/**
+ * Bound a prev-state map by dropping entries that no longer EXIST.
+ *
+ * This used to be `if (m.size > STATE_MAX) m.clear()`, called inside the
+ * per-item loop before every write. Crossing the bound therefore forgot the
+ * previous state of the entire fleet, mid-iteration: measured, 501 interfaces
+ * going down produced ONE alert instead of 501, because everything after the
+ * clear read `prev === undefined` and an unknown previous state is not a
+ * transition. Then the map refilled from the clear point and the split simply
+ * moved. One entry over the line silenced the fleet.
+ *
+ * NOT A TRIM, and this is the trap. `Map.set` on an EXISTING key does not move
+ * it, so insertion order is not recency: an interface that has been present
+ * since startup and is re-set on every single pass keeps position 0 forever,
+ * while the churning pppoe/l2tp/WireGuard peers that caused the growth sit at
+ * the end. An oldest-first trim evicts exactly what must be kept and keeps
+ * exactly what should go. Verified rather than assumed.
+ *
+ * So: prune what is absent from the CURRENT payload. Only that can never
+ * forget something still live — clearing forgets everything periodically, and
+ * LRU forgets the least-recently-seen, which for a stable fleet is still
+ * something real.
+ *
+ * STILL GATED ON THE BOUND, deliberately. Under STATE_MAX this touches
+ * nothing, which matters because a payload is not always the whole fleet:
+ * ifstatus:update can carry a provisional snapshot mid-cycle (see
+ * interfaceStatus._commitMeta), and pruning against a partial list would drop
+ * live state and recreate the very bug. Above the bound that risk is worth
+ * taking, because the alternative there is discarding all of it.
+ *
+ * If more than STATE_MAX entries are genuinely live the map simply stays that
+ * size. That is correct: the bound exists to stop CHURN accumulating, not to
+ * cap a large fleet, and a real fleet is not a leak.
+ */
+function _capMap(m, live) {
+  if (m.size <= STATE_MAX || !live) return;
+  for (const k of m.keys()) if (!live.has(k)) m.delete(k);
+}
+
 // ── Per-router evaluator factory ──────────────────────────────────────────────
 // Returns an isolated { evaluate(event, data) } with its own cooldown and state maps.
 // getNameFn() is called at fire-time to get the router label for {{routerName}}.
@@ -201,7 +242,10 @@ function createEvaluator(getNameFn, getRouterFn) {
   // The version last alerted on, not a boolean. system:update fires every poll
   // (~2 s), so a boolean would re-fire as soon as the cooldown lapsed. Keying
   // on the version gives one alert per release, and a later release still
-  // notifies instead of being swallowed as "already alerting".
+  // notifies instead of being swallowed as "already alerting" — which needs the
+  // supersede flag passed to fire() below, because both alerts key on
+  // (routeros_update, null) and the second would otherwise be dropped by the
+  // hasOpenAlert guard. The keying alone did NOT achieve what this said.
   let   prevUpdateVersion = null;
   const prevBgpState      = new Map();  // peer key → last state string
   const prevBgpPfx        = new Map();  // peer key → prefix count at last established reading
@@ -213,13 +257,12 @@ function createEvaluator(getNameFn, getRouterFn) {
   // but the prev-state maps are populated from that same churning source and
   // had no cap at all — dynamic pppoe/l2tp/WireGuard peers grew them for the
   // lifetime of the evaluator. Same bound, same reasoning.
-  const STATE_MAX = 500;
-  function _capMap(m) { if (m.size > STATE_MAX) m.clear(); }
 
   // Fraction the advertised prefix count must move to be worth an alert.
   const BGP_PFX_THRESH = 0.2;
 
-  function fire(key, vars, isUp, notifKeys) {
+  function fire(key, vars, isUp, notifKeys, opts) {
+    opts = opts || {};
     // The install-wide toggles suppress for everyone, and they do it here —
     // before the event is recorded, before the bell, before anyone's push.
     //
@@ -266,7 +309,29 @@ function createEvaluator(getNameFn, getRouterFn) {
         // persists — an available update, most visibly — rings the bell again
         // every time the evaluator is rebuilt, and acknowledging it achieves
         // nothing because the next rebuild files a fresh one.
-        if (db.hasOpenAlert(router.id, alertType, subject)) return;
+        if (db.hasOpenAlert(router.id, alertType, subject)) {
+          // ...UNLESS the caller says this one SUPERSEDES the open row. The
+          // RouterOS-update alert keys on the version so a later release still
+          // notifies, and that keying did nothing: both alerts carry alertType
+          // `routeros_update` and a null subject, so the second was swallowed
+          // here, and a router left un-updated across two releases was only ever
+          // told about the first.
+          //
+          // NOT fixed by putting the version in `subject`. The recovery event
+          // resolves on (routeros_update, null), so a versioned subject would
+          // match nothing and every update alert would stay open forever.
+          // Superseding keeps one open row per router, always naming the latest
+          // release, and leaves resolution untouched.
+          if (!opts.supersede) return;
+          const stale = db.resolveAlertEvent(router.id, alertType, subject);
+          if (stale && stale.length) {
+            _emit(router.id, 'alert:resolved', {
+              ids: stale, routerId: router.id, routerName: getNameFn(),
+              alertType, subject, label: labelFor(alertType),
+              detail: vars.detail || null, resolvedAt: Date.now(),
+            });
+          }
+        }
         const id = db.insertAlertEvent(router.id, alertType, subject, vars.detail || null);
         _emit(router.id, 'alert:fired', {
           id, routerId: router.id, routerName: getNameFn(),
@@ -337,12 +402,19 @@ function createEvaluator(getNameFn, getRouterFn) {
         // Only on a version we have not announced. Without this the alert
         // would repeat on every poll once the cooldown expired.
         if (prevUpdateVersion !== latest) {
+          // SUPERSEDE ONLY WHEN WE ACTUALLY SAW THE EARLIER VERSION. This is
+          // in-memory, so a rebuilt evaluator starts at null and every open
+          // alert would look like a new release — which is exactly the
+          // "rings the bell again on every rebuild" failure the hasOpenAlert
+          // guard exists to prevent. Null means "we have not announced anything
+          // yet", and the guard should stand.
+          const _supersede = prevUpdateVersion !== null;
           prevUpdateVersion = latest;
           fire('update:router:down', {
             alertType: 'RouterOS Update',
             detail:    'RouterOS ' + latest + ' is available (running ' +
                        ((data.version || '').replace(/\s*\(.*\)/, '').trim() || 'unknown') + ')',
-          }, false, ['notifRouterUpdate']);
+          }, false, ['notifRouterUpdate'], { supersede: _supersede });
         }
       } else if (!data.updateAvailable && prevUpdateVersion !== null) {
         // Router reached the version, or the channel changed. Clear the open
@@ -388,7 +460,12 @@ function createEvaluator(getNameFn, getRouterFn) {
     }
 
     if (event === 'ifstatus:update' && Array.isArray(data.interfaces)) {
+      // Collected as we go and applied ONCE after the loop. The cap used to run
+      // before every write, which is how it managed to clear the map halfway
+      // through a fleet.
+      const _live = new Set();
       for (const iface of data.interfaces) {
+        _live.add(iface.name);
         const prev       = prevIfState.get(iface.name);
         const wasRunning = prev ? prev.running : undefined;
         const isRunning  = !!iface.running;
@@ -406,18 +483,20 @@ function createEvaluator(getNameFn, getRouterFn) {
           // the push — and both then travel on to each recipient.
           const ifKeys = ['notifIfaceUpDown', _ifaceTypeKey(_ifaceType(iface.name, iface.type))];
           if (!isRunning) {
-            fire('iface:' + iface.name + ':down', { alertType:'Interface Down', ifaceName:iface.name, status:'down', detail:iface.name + ' went down' }, false, ifKeys);
+            fire('iface:' + iface.name + ':down', { alertType:'Interface Down', ifaceName:iface.name, comment:iface.comment || '', status:'down', detail:iface.name + ' went down' }, false, ifKeys);
           } else {
-            fire('iface:' + iface.name + ':up',   { alertType:'Interface Up',   resolveType:'interface_down', ifaceName:iface.name, status:'up',   detail:iface.name + ' came up'   }, true, ifKeys);
+            fire('iface:' + iface.name + ':up',   { alertType:'Interface Up',   resolveType:'interface_down', ifaceName:iface.name, comment:iface.comment || '', status:'up',   detail:iface.name + ' came up'   }, true, ifKeys);
           }
         }
-        _capMap(prevIfState);
         prevIfState.set(iface.name, { running: isRunning, disabled: isDisabled });
       }
+      _capMap(prevIfState, _live);
     }
 
     if (event === 'vpn:update' && Array.isArray(data.tunnels)) {
+      const _live = new Set();
       for (const tunnel of data.tunnels) {
+        _live.add(tunnel.name);
         // VpnCollector.peerState emits 'active' | 'stale' | 'never' — there is no
         // 'connected'. It previously emitted 'connected'/'idle' and this compared
         // against that; when the collector's contract changed this consumer was
@@ -429,18 +508,23 @@ function createEvaluator(getNameFn, getRouterFn) {
         const isConn  = tunnel.state === 'active';
         if (prev !== undefined && wasConn !== isConn) {
           if (!isConn) {
-            fire('vpn:' + tunnel.name + ':down', { alertType:'VPN Disconnected', vpnPeer:tunnel.name, status:'down', detail:'VPN peer ' + tunnel.name + ' disconnected' }, false, ['notifVpn']);
+            fire('vpn:' + tunnel.name + ':down', { alertType:'VPN Disconnected', vpnPeer:tunnel.name, comment:tunnel.comment || '', status:'down', detail:'VPN peer ' + tunnel.name + ' disconnected' }, false, ['notifVpn']);
           } else {
-            fire('vpn:' + tunnel.name + ':up',   { alertType:'VPN Connected',    resolveType:'vpn_disconnected', vpnPeer:tunnel.name, status:'up',   detail:'VPN peer ' + tunnel.name + ' connected'    }, true, ['notifVpn']);
+            fire('vpn:' + tunnel.name + ':up',   { alertType:'VPN Connected',    resolveType:'vpn_disconnected', vpnPeer:tunnel.name, comment:tunnel.comment || '', status:'up',   detail:'VPN peer ' + tunnel.name + ' connected'    }, true, ['notifVpn']);
           }
         }
-        _capMap(prevVpnState);
         prevVpnState.set(tunnel.name, tunnel.state);
       }
+      _capMap(prevVpnState, _live);
     }
 
     if (event === 'netwatch:update' && Array.isArray(data.hosts)) {
+      const _live = new Set();
       for (const host of data.hosts) {
+        // Added before the `unknown` skip below: a host being re-probed is still
+        // live, and pruning it would throw away the state its next reading is
+        // compared against.
+        _live.add(host.id);
         if (host.status === 'unknown') continue; // transient re-probe state — skip to avoid premature fire/resolve
         const prev    = prevNetwatchState.get(host.id);
         const wasDown = prev === 'down';
@@ -449,14 +533,14 @@ function createEvaluator(getNameFn, getRouterFn) {
           const netwatchName = host.name || host.host;
           const netwatchDesc = netwatchName !== host.host ? netwatchName + ' (' + host.host + ')' : host.host;
           if (isDown) {
-            fire('netwatch:' + host.id + ':down', { alertType:'Host Down',                            host:host.host, netwatchName, status:'down', detail:'NetWatch host ' + netwatchDesc + ' is unreachable' }, false, ['notifNetwatch']);
+            fire('netwatch:' + host.id + ':down', { alertType:'Host Down',                            host:host.host, netwatchName, comment:host.comment || '', status:'down', detail:'NetWatch host ' + netwatchDesc + ' is unreachable' }, false, ['notifNetwatch']);
           } else {
-            fire('netwatch:' + host.id + ':up',   { alertType:'Host Up', resolveType:'host_down',     host:host.host, netwatchName, status:'up',   detail:'NetWatch host ' + netwatchDesc + ' is reachable'   }, true, ['notifNetwatch']);
+            fire('netwatch:' + host.id + ':up',   { alertType:'Host Up', resolveType:'host_down',     host:host.host, netwatchName, comment:host.comment || '', status:'up',   detail:'NetWatch host ' + netwatchDesc + ' is reachable'   }, true, ['notifNetwatch']);
           }
         }
-        _capMap(prevNetwatchState);
         prevNetwatchState.set(host.id, host.status);
       }
+      _capMap(prevNetwatchState, _live);
     }
 
     // BGP. These used to live in public/app.js and fired straight at the browser
@@ -472,28 +556,32 @@ function createEvaluator(getNameFn, getRouterFn) {
     // true. A cooldown cannot express "tell me once until it changes"; an edge
     // can, and it is also what gives the bell something to resolve.
     if (event === 'routing:update' && Array.isArray(data.peers)) {
+      const _live = new Set();
       for (const p of data.peers) {
         const key   = p.key;
         if (!key) continue;
+        _live.add(key);
         const peer  = p.name || p.remoteAddr || key;
         const where = p.remoteAddr ? peer + ' (' + p.remoteAddr + ')' : peer;
+        // `p.description` IS the peer's RouterOS comment — routing.js reads the
+        // comment field into it under that name. That is why every {{comment}}
+        // below reads `description`; it is not the wrong field.
         const isEst = p.state === 'established';
         const prev  = prevBgpState.get(key);
 
         if (prev !== undefined && prev !== isEst) {
           if (!isEst) {
             fire('bgp:' + key + ':down', {
-              alertType: 'BGP Peer Down', bgpPeer: peer,
+              alertType: 'BGP Peer Down', bgpPeer: peer, comment: p.description || '',
               detail: 'BGP peer ' + where + ' left established (' + (p.state || 'unknown') + ')',
             }, false, ['notifBgp']);
           } else {
             fire('bgp:' + key + ':up', {
-              alertType: 'BGP Peer Up', resolveType: 'bgp_peer_down', bgpPeer: peer,
+              alertType: 'BGP Peer Up', resolveType: 'bgp_peer_down', bgpPeer: peer, comment: p.description || '',
               detail: 'BGP peer ' + where + ' is established',
             }, true, ['notifBgp']);
           }
         }
-        _capMap(prevBgpState);
         prevBgpState.set(key, isEst);
 
         // Prefix swing. Compared against the previous ESTABLISHED reading, so a
@@ -506,7 +594,7 @@ function createEvaluator(getNameFn, getRouterFn) {
             if (swung && !prevBgpPfxAlert.get(key)) {
               const dir = p.prefixes > oldPfx ? '+' : '-';
               fire('bgp-pfx:' + key + ':down', {
-                alertType: 'BGP Prefix Change', bgpPeer: peer,
+                alertType: 'BGP Prefix Change', bgpPeer: peer, comment: p.description || '',
                 detail: peer + ': ' + dir + Math.abs(p.prefixes - oldPfx) + ' prefixes (' +
                         oldPfx + ' → ' + p.prefixes + ')',
               }, false, ['notifBgp']);
@@ -515,12 +603,11 @@ function createEvaluator(getNameFn, getRouterFn) {
               // The count held steady for a reading, so the table has settled.
               fire('bgp-pfx:' + key + ':up', {
                 alertType: 'BGP Prefixes Settled', resolveType: 'bgp_prefix_change',
-                bgpPeer: peer, detail: peer + ': prefix count steady at ' + p.prefixes,
+                bgpPeer: peer, comment: p.description || '', detail: peer + ': prefix count steady at ' + p.prefixes,
               }, true, ['notifBgp']);
               prevBgpPfxAlert.set(key, false);
             }
           }
-          _capMap(prevBgpPfx);
           prevBgpPfx.set(key, p.prefixes);
         }
 
@@ -528,16 +615,15 @@ function createEvaluator(getNameFn, getRouterFn) {
         if (flapping !== !!prevBgpFlap.get(key)) {
           if (flapping) {
             fire('bgp-flap:' + key + ':down', {
-              alertType: 'BGP Session Flapping', bgpPeer: peer,
+              alertType: 'BGP Session Flapping', bgpPeer: peer, comment: p.description || '',
               detail: 'BGP session ' + where + ' is flapping',
             }, false, ['notifBgp']);
           } else if (prevBgpFlap.has(key)) {
             fire('bgp-flap:' + key + ':up', {
               alertType: 'BGP Session Stable', resolveType: 'bgp_session_flapping',
-              bgpPeer: peer, detail: 'BGP session ' + where + ' has stopped flapping',
+              bgpPeer: peer, comment: p.description || '', detail: 'BGP session ' + where + ' has stopped flapping',
             }, true, ['notifBgp']);
           }
-          _capMap(prevBgpFlap);
           prevBgpFlap.set(key, flapping);
         }
 
@@ -546,19 +632,25 @@ function createEvaluator(getNameFn, getRouterFn) {
         if (badHold !== !!prevBgpHold.get(key)) {
           if (badHold) {
             fire('bgp-hold:' + key + ':down', {
-              alertType: 'BGP Hold Timer Warning', bgpPeer: peer,
+              alertType: 'BGP Hold Timer Warning', bgpPeer: peer, comment: p.description || '',
               detail: peer + ': hold-time=' + p.holdTime + 's, keepalive=0',
             }, false, ['notifBgp']);
           } else if (prevBgpHold.has(key)) {
             fire('bgp-hold:' + key + ':up', {
               alertType: 'BGP Hold Timer OK', resolveType: 'bgp_hold_timer_warning',
-              bgpPeer: peer, detail: peer + ': hold timer no longer misconfigured',
+              bgpPeer: peer, comment: p.description || '', detail: peer + ': hold timer no longer misconfigured',
             }, true, ['notifBgp']);
           }
-          _capMap(prevBgpHold);
           prevBgpHold.set(key, badHold);
         }
       }
+      // All five share one key set. prevBgpPfxAlert was never bounded at all —
+      // it is written on the same churning key and was simply missed.
+      _capMap(prevBgpState,    _live);
+      _capMap(prevBgpPfx,      _live);
+      _capMap(prevBgpFlap,     _live);
+      _capMap(prevBgpHold,     _live);
+      _capMap(prevBgpPfxAlert, _live);
     }
   }
 
@@ -686,4 +778,9 @@ function updateSettings(settings) {
   _settings = settings;
 }
 
-module.exports = { init, updateSettings, createEvaluator, evaluateForRouter, dropEvaluator, fireConnectivityAlert, labelFor };
+module.exports = {
+  // Exported so the prune can be asserted on the MAP. It lived in the
+  // evaluator closure, where the only way to reach it was through alert counts
+  // — and those are identical whether it runs or not, so the whole suite stayed
+  // green with the body removed. A rule nobody can test is a rule nobody checks.
+  _capMap, STATE_MAX, init, updateSettings, createEvaluator, evaluateForRouter, dropEvaluator, fireConnectivityAlert, labelFor };

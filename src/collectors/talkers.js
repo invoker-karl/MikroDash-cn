@@ -213,7 +213,19 @@ class TopTalkersCollector {
   // and useless for polling, where a 3 s interval means a 23 s deadline. That is
   // the hAP AC2 case: it runs collection mode "poll", so the card still went
   // stale ~30 s in, and only recovered when dormancy fired ~20 s after that.
-  get _heartbeatMs() { return this.streamMode ? 60000 : Math.max(5000, this.pollMs); }
+  // Clamped at the call site, not only upstream. `pollMs` is already bounded to
+  // POLL_BOUNDS.pollTalkers ([1000, 60000]) by Settings.load() and again by
+  // clampPollValue(), so the ceiling is a no-op today — it is here because every
+  // other collector's timer bounds itself inline too, and this getter was the
+  // one place that trusted its caller.
+  //
+  // Written inline rather than through clampPoll() deliberately: CodeQL's
+  // js/resource-exhaustion does not follow the bound across a call, so the
+  // helper version stayed flagged while the literal form is what closed the
+  // same alert on system.js and interfaceStatus.js. `|| 5000` keeps the NaN
+  // and zero handling clampPoll was giving us — Math.min(60000, NaN) is NaN,
+  // and a NaN interval means a 1 ms busy loop, not a slow one.
+  get _heartbeatMs() { return this.streamMode ? 60000 : Math.max(5000, Math.min(60000, this.pollMs || 5000)); }
 
   /**
    * Treat prolonged silence on an open stream as the empty answer.

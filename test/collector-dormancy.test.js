@@ -12,7 +12,14 @@
 const test   = require('node:test');
 const assert = require('node:assert');
 
-const TopTalkersCollector = require('../src/collectors/talkers');
+// Tracked, because several tests here call probe(), which resumes the collector
+// and starts a 9 s silence timer and a 60 s heartbeat. Those are meant to keep a
+// SERVER alive; in a test they keep the RUNNER alive. This file was the reason
+// the suite needed --test-force-exit, and that flag is what made the reported
+// test count unstable — it killed the process the moment the runner thought it
+// was done, intermittently truncating the tail of the largest file.
+const { track } = require('./helpers/collector-cleanup');
+const TopTalkersCollector = track(require('../src/collectors/talkers'));
 
 function harness({ clientsCount = 1, connected = true } = {}) {
   const emitted = [];
@@ -528,13 +535,22 @@ test('an empty payload clears the table instead of leaving the last one up', () 
     'talkers:update must not treat an empty payload as "no news"');
   assert.ok(!/if\(lastLanData\)return;/.test(APP_JS),
     'the LAN overview had the identical bug');
-  assert.ok(/lastTalkers=null;/.test(APP_JS), 'and must drop the cached rows');
-  assert.ok(/lastLanData=null;/.test(APP_JS));
+  // These used to assert `lastTalkers=null;` and `lastLanData=null;` — the
+  // MECHANISM of the fix rather than its effect. Both variables turned out to
+  // be written and never read (ToDo #15), so they were deleted and there is no
+  // cache left to drop. What actually delivers the behaviour is the empty
+  // branch rendering an empty state and returning, so pin that instead: it
+  // survives the next refactor of how the handler stores things, and it fails
+  // if someone restores an early return that leaves the old rows on screen.
+  assert.ok(/if\(!devices\.length\)\{[\s\S]{0,400}?talkersTable\.innerHTML=/.test(APP_JS),
+    'an empty talkers payload must write the table, not return silently');
+  assert.ok(/if\(!nets\.length\)\{lanOverview\.innerHTML='<div class="empty-state">/.test(APP_JS),
+    'and the LAN overview must do the same');
 });
 
 test('an unsupported talkers payload says so rather than guessing "no devices"', () => {
   assert.ok(/data\.unavailable\|\|data\.available===false/.test(APP_JS) &&
-    /data\.reason\|\|'Device traffic is unavailable'/.test(APP_JS),
+    /data\.reason\|\|tr\('Device traffic is unavailable'\)/.test(APP_JS),
     '"No devices" on a router with no kid-control menu is a claim we cannot support');
 });
 

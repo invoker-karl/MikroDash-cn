@@ -110,6 +110,9 @@ const WanCollector          = require('./collectors/wan');
 const WifiCollector         = require('./collectors/wifi');
 const alerter               = require('./alerter');
 const notifier              = require('./notifier');
+// The only other module in here that reaches outside this machine. See its
+// header for why the release notes cannot come from the router.
+const Changelog             = require('./changelog');
 const alertSessions         = require('./alertSessions');
 const wifiScanLib           = require('./wifiScan');
 const overviewSessions      = require('./overviewSessions');
@@ -618,7 +621,13 @@ const STARTUP_GRACE_MS = 15000; // 15 s covers staggered collector startup
 
 // Per-entry ros:status broadcast — scoped to the router's room.
 // `router:status` (router reachability for the list UI) stays as io.emit (global).
-function broadcastRosStatus(connected, reason, entry) {
+function broadcastRosStatus(connected, reason, entry, session) {
+  // A torn-down session must not narrate. Its ROS events can still fire after
+  // teardown, and entry.routerIo addresses the room by ROUTER id — which after
+  // a rebuild belongs to the LIVE session. A zombie's stale connected:true
+  // would then clear the banner for a router that is genuinely down, which is
+  // the one way this fix could have masked a real outage. (#118)
+  if (session && session._destroyed) return;
   if (entry) entry.rosConnected = connected;
   const target = entry ? entry.routerIo : io;
   target.emit('ros:status', { connected, reason: reason || null });
@@ -760,7 +769,7 @@ function wireRosEvents(session, entry) {
     session.cachedInterfaces = null; // invalidate on reconnect — interfaces may have changed
     session._ifacesFetch    = null;
     if (entry) { entry.lastError = null; entry.lastErrorTs = 0; } // recovered (#92)
-    broadcastRosStatus(true, null, entry);
+    broadcastRosStatus(true, null, entry, session);
     _emitRouterStatus(true);
     // Restore page-aware streams for any pages still open after the reconnect.
     // Collector reconnect handlers (in constructors) fire before this listener
@@ -783,7 +792,7 @@ function wireRosEvents(session, entry) {
     }
     session.connTableCache.invalidate();
     console.log('%s', `[${ros.routerLabel}][ROS] connection to ${host}:${port} closed`);
-    broadcastRosStatus(false, 'RouterOS connection closed', entry);
+    broadcastRosStatus(false, 'RouterOS connection closed', entry, session);
     _emitRouterStatus(false);
   });
   ros.on('connectionError', (e) => {
@@ -797,13 +806,44 @@ function wireRosEvents(session, entry) {
     const safeReason = classified ? reason : sanitizeErr(e);
     // Remember it so the Routers page can say *why* this router is offline (#92).
     if (entry) { entry.lastError = safeReason; entry.lastErrorTs = Date.now(); }
-    broadcastRosStatus(false, safeReason, entry);
+    broadcastRosStatus(false, safeReason, entry, session);
     _emitRouterStatus(false);
   });
   ros.on('connected', () => startCollectors(session, entry));
 }
 
+/**
+ * Replay full state to every socket already sitting in this router's room.
+ *
+ * On first startup there are none yet, so it is a no-op. On a hot-swap the
+ * Socket.IO connections stay alive — existing browser clients never receive a
+ * 'connection' event, so without this they would not get the new router's data
+ * until they manually refreshed the page.
+ *
+ * Called from TWO places, and the second is the one that was missing (#118).
+ * The tail of startCollectors covers a session that is starting. switchRouter
+ * covers sockets relocated onto a session that was ALREADY running, where
+ * ensureRouterSession returns the pooled entry early and startCollectors never
+ * runs again — so nothing else would ever replay for them. That left those
+ * sockets with no initial state and, worse, no traffic.bindSocket, meaning the
+ * traffic chart was not stale but unbound until the page was reloaded.
+ */
+function _replayToRoomSockets(session, entry) {
+  for (const [, socket] of io.sockets.sockets) {
+    if (socket.routerId !== session.routerId) continue;
+    session.traffic.bindSocket(socket);
+    sendInitialState(socket, entry).catch((e) => {
+      console.error('[MikroDash] sendInitialState failed for socket', socket.id, ':', e && e.message ? e.message : e);
+    });
+  }
+}
+
 async function startCollectors(session, entry) {
+  // Teardown won the race. The collectorsStarted guard below CANNOT catch this
+  // on its own, because teardownSession resets that very flag to false — so a
+  // late 'connected' from a connection that was closing would sail past it and
+  // start 27 collectors on a session the pool has already dropped. (#118)
+  if (session._destroyed) return;
   if (entry.collectorsStarted) return;
   entry.collectorsStarted = true;
   const _delay = ms => new Promise(r => setTimeout(r, ms));
@@ -901,18 +941,7 @@ async function startCollectors(session, entry) {
     if (!routerRoom || routerRoom.size === 0) _idleSuspend(session, entry);
     else _idleResume(session, entry);
 
-    // Broadcast initial state to sockets watching this router.
-    // On first startup there are none yet, so this is a no-op.
-    // On a hot-swap the Socket.IO connections stay alive — existing browser
-    // clients never receive a 'connection' event, so without this they would
-    // not get the new router's data until they manually refreshed the page.
-    for (const [, socket] of io.sockets.sockets) {
-      if (socket.routerId !== session.routerId) continue;
-      session.traffic.bindSocket(socket);
-      sendInitialState(socket, entry).catch((e) => {
-        console.error('[MikroDash] sendInitialState failed for socket', socket.id, ':', e && e.message ? e.message : e);
-      });
-    }
+    _replayToRoomSockets(session, entry);
   } catch (e) {
     entry.startupReady = false;
     entry.collectorsStarted = false;
@@ -970,8 +999,29 @@ async function switchRouter(newRouterId) {
       }
     }
 
-    // Build and start new session
-    ensureRouterSession(newRouterId);
+    // Build and start new session.
+    const newEntry = ensureRouterSession(newRouterId);
+
+    // When that session was ALREADY pooled and connected, ensureRouterSession
+    // returned early: no ros.on('connected') fires, and that event is the only
+    // producer of ros:status{connected:true} (see wireRosEvents). The client
+    // clears both the RouterOS banner and the switching MODAL on that event and
+    // on nothing else, so switching to a healthy router left the banner up and,
+    // in authMode 'none' — where router:switched is never emitted — the user
+    // behind a modal until they reloaded. Say it explicitly instead. (#118)
+    //
+    // true only. A synthetic false would be the client's SECOND false and would
+    // dismiss the switching overlay while the new router is still connecting.
+    // It also cannot mask a real outage: rosConnected is set false synchronously
+    // by the close/connectionError handlers, so a stale true cannot outlive one
+    // turn of the event loop.
+    if (newEntry && newEntry.rosConnected) {
+      io.to('router-' + newRouterId).emit('ros:status', { connected: true, reason: null });
+      // Gated on startupReady: if collectors are mid-start, the tail of that
+      // in-flight startCollectors replays shortly and doing it here as well
+      // would cost every socket a duplicate fetchInterfaces.
+      if (newEntry.startupReady && newEntry.session) _replayToRoomSockets(newEntry.session, newEntry);
+    }
     return { ok: true };
   } finally {
     _switching = false;
@@ -2420,7 +2470,24 @@ app.put('/api/routers/:id', Rbac.requirePerm('router:manage', Rbac.fromParam('id
     const _beforeRouter = Routers.getById(req.params.id);
     const _beforeFp = _beforeRouter ? collectionFingerprint(Settings.load(), _beforeRouter) : null;
 
-    // A siteId change alters who can reach this router, so every cached
+    // Site membership is an AUTHORIZATION decision, not router config, so it is
+    // administrator-only here — matching PUT /api/sites/:id/routers, which has
+    // always been requireGlobalAdmin for exactly this reason.
+    //
+    // This route is gated on router:manage for the target router, which write
+    // access to the Devices page confers and which is NOT global-only. Before
+    // #117 that let a non-admin MOVE a device between sites: an escalation, but
+    // self-limiting and loud, because the device vanished from the old site's
+    // users. Many-to-many would have made it purely ADDITIVE — a repeatable,
+    // invisible way to inject a device into any scope, with every site id
+    // enumerable from the ungated GET /api/sites. So the field is dropped
+    // rather than honoured for anyone who cannot manage principals.
+    if (!Rbac.can(req.authSession, 'system:principals')) {
+      delete body.siteIds;
+      delete body.siteId;
+    }
+
+    // A membership change alters who can reach this router, so every cached
     // authorization view is stale. Easy to miss: it reads as router config.
     const _before = Routers.getById(req.params.id);
     const router = Routers.update(req.params.id, body);
@@ -2572,12 +2639,56 @@ app.post('/api/routers/test', Rbac.requireGlobalAdmin, _testConnLimiter, async (
 
   const testTls = (body.tls !== false && body.tls !== 'false');
   const testTlsInsecure = !!(body.tlsInsecure || body.tlsInsecure === 'true');
+
+  const _testHost = String(body.host).trim();
+  const _testPort = parseInt(body.port || '8729', 10);
+  const _testUser = String(body.username || 'admin').trim();
+  let   _testPass = body.password && body.password !== '••••••••' ? String(body.password) : '';
+
+  // EDITING AN EXISTING DEVICE MAY REUSE ITS STORED PASSWORD, but only for the
+  // destination it is already stored against.
+  //
+  // The modal blanks the password on edit and its placeholder says "leave blank
+  // to keep current" — while Save refuses to write until a connection test
+  // passes. With no password the test could never pass, so that promise was
+  // false and NO field of an existing device could be saved without retyping
+  // the credential. Reported on #117 as sites not being removable; it was never
+  // about sites, and it has been true since the test gate landed in 0.5.33.
+  //
+  // THE MATCH IS THE WHOLE SECURITY PROPERTY. A bare "look it up by id" turns
+  // this route into a credential oracle: submit a stored id with an
+  // attacker-chosen host and the server posts the saved password to it. So the
+  // stored secret is only reused when every field deciding WHERE it goes and
+  // HOW it travels is unchanged:
+  //
+  //   host, port, username — where it is sent
+  //   tls, tlsInsecure     — whether an observer, or a forged certificate, can
+  //                          read it in transit
+  //
+  // tlsInsecure matters as much as the host: turning it on accepts any
+  // certificate, which makes the same hostname a man-in-the-middle. Change any
+  // of the five and the admin types the password again, which is exactly the
+  // moment explicit consent is worth asking for.
+  //
+  // requireGlobalAdmin already gates this route and is NOT sufficient on its
+  // own: the point is to stop a stored secret reaching a destination nobody
+  // stored it against, including at the hands of an admin.
+  if (!_testPass && body.id) {
+    const _stored = Routers.getById(String(body.id));
+    if (_stored && _stored.password && Routers.sameEndpoint(_stored, {
+      host: _testHost, port: _testPort, username: _testUser,
+      tls: testTls, tlsInsecure: testTlsInsecure,
+    })) {
+      _testPass = String(_stored.password);
+    }
+  }
+
   const testRos = new ROS({
-    host:           String(body.host).trim(),
-    port:           parseInt(body.port || '8729', 10),
+    host:           _testHost,
+    port:           _testPort,
     tls:            testTls ? { rejectUnauthorized: !testTlsInsecure } : false,
-    username:       String(body.username || 'admin').trim(),
-    password:       body.password && body.password !== '••••••••' ? String(body.password) : '',
+    username:       _testUser,
+    password:       _testPass,
     writeTimeoutMs: 8000,
   });
 
@@ -2710,7 +2821,14 @@ function _parseSiteBody(body, { partial } = {}) {
   const b   = body || {};
 
   if (b.name !== undefined || !partial) {
-    const name = String(b.name === undefined ? '' : b.name).trim();
+    // `== null`, loose, matching the description check below — a JSON null is a
+    // MISSING name, not the four-character string "null". With the strict
+    // `=== undefined` this fell through to String(null), which passes the 1-64
+    // check and creates a record literally called "null"; posting a second one
+    // then answers 409 "a site with that name already exists", about a field
+    // the caller sent as empty. `{"name": null}` is what a cleared form field
+    // serialises to, so this is reachable from the UI, not just from curl.
+    const name = String(b.name == null ? '' : b.name).trim();
     if (!name || name.length > 64) return { error: 'Name must be 1-64 characters' };
     out.name = name;
   }
@@ -2752,7 +2870,14 @@ function _parseSiteBody(body, { partial } = {}) {
 function _parseName(body, { partial } = {}) {
   const out = {}, b = body || {};
   if (b.name !== undefined || !partial) {
-    const name = String(b.name === undefined ? '' : b.name).trim();
+    // `== null`, loose, matching the description check below — a JSON null is a
+    // MISSING name, not the four-character string "null". With the strict
+    // `=== undefined` this fell through to String(null), which passes the 1-64
+    // check and creates a record literally called "null"; posting a second one
+    // then answers 409 "a site with that name already exists", about a field
+    // the caller sent as empty. `{"name": null}` is what a cleared form field
+    // serialises to, so this is reachable from the UI, not just from curl.
+    const name = String(b.name == null ? '' : b.name).trim();
     if (!name || name.length > 64) return { error: 'Name must be 1-64 characters' };
     out.name = name;
   }
@@ -3099,23 +3224,30 @@ app.put('/api/sites/:id/routers', Rbac.requireGlobalAdmin, (req, res) => {
     const all = Routers.loadAll();
     let changed = 0;
     for (const r of all) {
+      // THIS site is added or removed; the device keeps every other site it is
+      // in (#117). Before that, ticking a device here wrote a scalar siteId,
+      // and the overwrite WAS the removal — so adding a device to a second site
+      // silently took it out of the first, with the old site never consulted.
+      //
+      // The loop still walks every device, not just this site's members,
+      // because a device that was here and is no longer listed has to be
+      // detached, which a per-device save never sees.
+      const before       = Array.isArray(r.siteIds) ? r.siteIds : (r.siteId ? [r.siteId] : []);
       const shouldBeHere = wanted.includes(r.id);
-      const isHere       = r.siteId === req.params.id;
-      if (shouldBeHere && !isHere) {
-        Routers.update(r.id, { siteId: req.params.id }); changed++;
-        audit.fromReq(req).record({ action: 'router.site', targetType: 'router', targetId: r.id,
-          targetName: r.label || r.host, routerId: r.id,
-          before: { siteId: r.siteId || '' }, after: { siteId: req.params.id } });
-      } else if (!shouldBeHere && isHere) {
-        Routers.update(r.id, { siteId: '' }); changed++;
-        audit.fromReq(req).record({ action: 'router.site', targetType: 'router', targetId: r.id,
-          targetName: r.label || r.host, routerId: r.id,
-          before: { siteId: r.siteId || '' }, after: { siteId: '' } });
-      }
+      const isHere       = before.indexOf(req.params.id) !== -1;
+      if (shouldBeHere === isHere) continue;
+
+      const after = shouldBeHere
+        ? before.concat(req.params.id)                                  // add, keeping the rest
+        : before.filter((sid) => sid !== req.params.id);                // remove only this one
+      Routers.update(r.id, { siteIds: after }); changed++;
+      audit.fromReq(req).record({ action: 'router.site', targetType: 'router', targetId: r.id,
+        targetName: r.label || r.host, routerId: r.id,
+        before: { siteIds: before }, after: { siteIds: after } });
     }
     if (changed) {
       // A router's site determines who can reach it through a site-scoped grant.
-      Rbac.bump(); _broadcastPermsChanged(); _broadcastPermsChanged();
+      Rbac.bump(); _broadcastPermsChanged();
       _broadcastRoutersList();
     }
     res.json({ ok: true, changed });
@@ -4074,6 +4206,8 @@ function _buildRoutersStats(socket) {
     const sysPay    = s ? s.system.lastPayload    : (bg ? bg.systemPayload   : null);
     const ifPay     = s ? s.ifStatus.lastPayload  : (bg ? bg.ifStatusPayload : null);
     const wanIf     = ifPay ? (ifPay.interfaces || []).find(i => i.name === defaultIf) : null;
+    // Membership, tolerating a record read before normalisation (#117).
+    const _rIds     = Array.isArray(r.siteIds) ? r.siteIds : (r.siteId ? [r.siteId] : []);
 
     return {
       id:        r.id,
@@ -4100,14 +4234,30 @@ function _buildRoutersStats(socket) {
         const lp = s ? s.dhcpLeases.lastPayload : (bg ? bg.dhcpLeasesPayload : null);
         return lp ? lp.leases.length : null;
       })(),
-      siteId:    r.siteId || null,
-      siteName:  (r.siteId && sitesById.get(r.siteId)) ? sitesById.get(r.siteId).name : null,
+      // A device may belong to several sites (#117). siteIds/siteNames are the
+      // real fields; the two scalars below are the primary's mirrors, kept so a
+      // browser served an older bundle still renders something sensible.
+      // THE TWO ARRAYS ARE ZIPPED BY INDEX on the client, so they must stay the
+      // same length. An unresolvable id sends '' rather than being dropped: a
+      // site can be deleted while a device still lists it, and .filter(Boolean)
+      // removed an element from the middle of the names while leaving the ids
+      // intact, so every name after the first dangling membership attached to
+      // the wrong site. Do not reintroduce the filter — take the blank out at
+      // the point of display instead.
+      siteIds:   _rIds,
+      siteNames: _rIds.map((sid) => ((sitesById.get(sid) || {}).name || '')),
+      siteId:    _rIds[0] || null,
+      siteName:  (_rIds[0] && sitesById.get(_rIds[0])) ? sitesById.get(_rIds[0]).name : null,
       // Where to draw it, and how confident to look (#96). Resolved server-side
       // so the browser holds one answer per router rather than reimplementing
       // the priority order — a second implementation is one that can disagree.
       // null means unlocated: the map's tray, never a marker at 0,0.
       geo: (() => {
-        const loc = GeoPlace.resolveLocation(r, r.siteId ? sitesById.get(r.siteId) : null);
+        // The PRIMARY site supplies the geo tier. resolveLocation takes one site
+        // row and has no tie-break, so a device in several needed a defined
+        // answer — read from _rIds[0] rather than the siteId mirror, so this
+        // says which site it means.
+        const loc = GeoPlace.resolveLocation(r, _rIds[0] ? sitesById.get(_rIds[0]) : null);
         if (!loc) return null;
         if (loc.wanIp !== undefined && !maySeeWanIp) delete loc.wanIp;
         return loc;
@@ -4156,6 +4306,16 @@ async function sendInitialState(socket, entry) {
       : 'Waiting for RouterOS connection…' });
     try { await s.ros.waitUntilConnected(10000); } catch (_) {}
   }
+  // Both polarities. This used to report only the bad news, so a socket landing
+  // on an already-connected session was never told it was connected — and
+  // ros:status{connected:true} is what clears the RouterOS banner and dismisses
+  // the switching modal. Its only other producer is ros.on('connected'), which
+  // for a pooled session fired long before this socket joined the room, so the
+  // banner from a PREVIOUS router stayed up until a manual refresh. (#118)
+  //
+  // Deliberately after the waitUntilConnected above, so a router that comes up
+  // during that 10 s wait is reported as connected rather than missed.
+  if (s.ros.connected) socket.emit('ros:status', { connected: true, reason: null });
 
   try {
     const ifs = await refreshSessionInterfaces(s);
@@ -4696,7 +4856,7 @@ io.on('connection', (socket) => {
     // returns before both.
     if (!_pageAllowed(socket, name)) return;
     socket.join('router-' + rid + '-page-' + name);
-    if (name === 'routers') {
+    if (name === 'devices') {
       if (!_routersPageSockets.has(socket.id)) {
         _routersPageSockets.add(socket.id);
         if (_routersPageSockets.size === 1) overviewSessions.resume();
@@ -4751,7 +4911,7 @@ io.on('connection', (socket) => {
     const e = rid ? _routerSessions.get(rid) : null;
     if (!e) return;
     if (_PAGE_STREAM_ROOMS[name]) _updatePageStream(e.session, e, name);
-    if (name === 'routers') {
+    if (name === 'devices') {
       if (_routersTimer) { clearInterval(_routersTimer); _routersTimer = null; }
       if (_routersPageSockets.delete(socket.id) && _routersPageSockets.size === 0) overviewSessions.suspend();
     }
@@ -4880,6 +5040,39 @@ io.on('connection', (socket) => {
       permitted: _socketCan(socket, 'router:write', rid) && _pageAllowed(socket, 'packages', 'write'),
       routerName: (Routers.getById(rid) || {}).label || '',
     });
+  });
+
+  // The release notes for the version the Update dialog is offering.
+  //
+  // READ, not write: this shows text and acts on nothing, so it takes the same
+  // `packages` READ that already lets this socket see the Update button, rather
+  // than the router:write that the upgrade itself needs. Gating it harder would
+  // hide the notes from exactly the people deciding whether to ask someone else
+  // to run the upgrade.
+  //
+  // Everything here fails soft. The notes come from outside (see
+  // src/changelog.js — the router does not have them), so an install with no
+  // route to the internet must still be able to upgrade: on any failure the box
+  // says so and the rest of the dialog is untouched.
+  socket.on('packages:notes', async (req) => {
+    const version = String((req && req.version) || '').trim();
+    // NEVER _pkgErr() from here. That channel is the UPGRADE's, and the dialog
+    // renders `denied` on it as "You do not have permission to update this
+    // router" — which would be false and alarming for someone who can update
+    // perfectly well and merely cannot be shown a changelog. A notes failure
+    // answers on the notes channel and says only that the notes are missing.
+    const _no = (why) => socket.emit('packages:notes', { version, error: why });
+    const { rid, session, off } = _pkgSession();
+    if (!rid || !session || off) return _no('unavailable');
+    if (!_pageAllowed(socket, 'packages', 'read')) return _no('denied');
+    try {
+      socket.emit('packages:notes', { version, notes: await Changelog.fetchNotes(version) });
+    } catch (e) {
+      // sanitizeErr before anything reaches the browser, per CLAUDE.md. The
+      // version is echoed back so a slow reply for a router the operator has
+      // since switched away from can be discarded by the client.
+      socket.emit('packages:notes', { version, error: sanitizeErr(e) });
+    }
   });
 
   socket.on('packages:schedule', async (req) => {
@@ -5545,13 +5738,16 @@ io.on('connection', (socket) => {
       if (editing) await session.ros.write(_QUEUE_MENUS[menu] + '/set', ['=.id=' + r.id].concat(args));
       else         await session.ros.write(_QUEUE_MENUS[menu] + '/add', args);
 
+      // Both sides through one vocabulary — see queueGuard.auditSides. Built
+      // inline here, the router's bps and the form's `50M/25M` were different
+      // strings for the same limit, so every save of every queue with a limit
+      // recorded changes nobody made; and a field left blank was recorded as
+      // cleared when the write had omitted it and the router had kept it.
+      const sides = queueGuard.auditSides(menu, target, name, r);
       audit.fromSocket(socket).record({ action, targetType: 'queue',
         targetId: editing ? r.id : null, targetName: name, routerId: rid,
-        before: target ? { name: target.name, target: target.target || '', parent: target.parent || '',
-                           maxLimit: target['max-limit'] || '', limitAt: target['limit-at'] || '',
-                           disabled: target.disabled === 'true' } : {},
-        after: { name, target: r.target || '', parent: r.parent || '',
-                 maxLimit: r.maxLimit || '', limitAt: r.limitAt || '', disabled: !!r.disabled },
+        before: sides.before,
+        after: sides.after,
         // The acknowledgement is the interesting fact in the trail, not the queue.
         extra: Object.assign({ menu }, r.ack ? { selfThrottleAcknowledged: true } : null) });
       // A set can zero a counter, and the next window would otherwise be
@@ -6118,9 +6314,26 @@ io.on('connection', (socket) => {
     const out = {};
     for (const f of resource.fields) {
       if (!Object.prototype.hasOwnProperty.call(values, f.name)) continue;
-      out[f.name] = f.type === 'secret'
-        ? (values[f.name] ? audit.SET : audit.UNSET)
-        : values[f.name];
+      if (f.type === 'secret') {
+        out[f.name] = values[f.name] ? audit.SET : audit.UNSET;
+      } else if (f.type === 'bool') {
+        // The two sides of the diff say the same thing in different words:
+        // rowValues() gives a real boolean, validate() gives 'yes'/'no', and
+        // audit.diff compares with ===. Left alone, `false` against `'no'` reads
+        // as a change, so EVERY save of every resource carrying a checkbox
+        // recorded one nobody made — noise in the one table that cannot be
+        // pruned selectively, and it buries the edit that did happen. A field
+        // the router omits altogether (match-subdomain on a DNS entry) is the
+        // same shape: null against 'no' is not a change either.
+        //
+        // Normalised here rather than in rowValues() or validate(), because
+        // those two feed the FORM and the WRITE. This is a reporting problem,
+        // and _resAuditValues already exists to make the two sides comparable.
+        out[f.name] = values[f.name] === true || values[f.name] === 'yes'
+                   || values[f.name] === 'true';
+      } else {
+        out[f.name] = values[f.name];
+      }
     }
     return out;
   };
@@ -6660,7 +6873,15 @@ io.on('connection', (socket) => {
       // The load reboots, so this call is not expected to answer. A rejection
       // here is normal and must not be reported as a failed restore.
       session.ros.write('/system/backup/load',
-        ['=name=' + dst, '=password=' + (router.backup && router.backup.password) || ''])
+        // Brackets matter: `+` binds tighter than `||`, so without them this
+        // read as ('=password=' + …) || '', whose left side always starts with
+        // '=password=' and is therefore never falsy. The fallback was dead, and
+        // a router record with no backup block sent the literal eight
+        // characters `undefined` as the password. RouterOS accepts that and
+        // fails to decrypt, so the operator saw a restore that failed ON THE
+        // ROUTER with a password error pointing at their stored credential
+        // rather than at a missing block.
+        ['=name=' + dst, '=password=' + ((router.backup && router.backup.password) || '')])
         .catch(() => { /* the connection drops as the router reboots */ });
 
       socket.emit('backups:restored', { routerId: rid, id: row.id });

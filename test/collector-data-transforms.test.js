@@ -1391,7 +1391,7 @@ test('dhcp leases collector filters active leases after initial load and streame
   streamHandler(null, { address: '192.168.1.3', 'mac-address': 'A3', status: '' });
   streamHandler(null, { address: '192.168.1.4', 'mac-address': 'A4', status: 'expired' });
 
-  const active = collector.getActiveLeaseIPs();
+  const active = collector.getInUseLeaseIPs();
   assert.ok(active.includes('192.168.1.1'));
   assert.ok(active.includes('192.168.1.2'));
   assert.ok(active.includes('192.168.1.3'));
@@ -1428,6 +1428,162 @@ test('interface status collector normalizes booleans and computes Mbps', () => {
   assert.deepEqual(ifaces[0].ips, ['192.168.1.1/24', '10.0.0.1/24']);
   assert.equal(ifaces[1].running, true);
   assert.equal(ifaces[1].rxMbps, 0);
+});
+
+// ── A split print cycle must not truncate the interface list (issue #119) ───
+//
+// `/interface/print` runs with `=interval=N`, so the router re-prints the WHOLE
+// list every cycle, one packet per interface. _commitMeta then REPLACES _ifaces
+// with whatever accumulated in _ifacesNext.
+//
+// The only thing deciding when a cycle has ended was a 300 ms debounce, reset on
+// every packet. A debounce cannot delimit a burst: if any gap between two
+// packets of one cycle exceeds it, the timer fires MID-CYCLE and installs a
+// partial map as the complete truth. The rest of that cycle then lands in a
+// fresh map, so the next commit installs an even smaller set.
+//
+// Reported on a CCR2004 — many interfaces, so many packets and more chances of
+// a gap — as the Traffic dropdown losing all but one interface after a couple
+// of minutes. A couple of minutes is one or two ticks at the default 60 s meta
+// interval.
+test('a print cycle split by a slow packet does not shrink the interface list', async () => {
+  const { EventEmitter } = require('node:events');
+  const fake = new EventEmitter(); fake.stop = () => {};
+  const ros = { connected: true, on() {}, stream: () => fake };
+  const _chain = { emit() {} }; _chain.to = () => _chain;
+  const io = { engine: { clientsCount: 1 }, emit() {}, to: () => _chain };
+  const collector = new InterfaceStatusCollector({ ros, io, pollMs: 5000, metaPollMs: 60000, state: {} });
+
+  const row = (n, sec) => ({ name: n, type: 'ether', running: 'true', disabled: 'false', '.section': String(sec) });
+  const NAMES = ['ether1', 'ether2', 'ether3', 'sfp-sfpplus1'];
+  const settle = () => new Promise(r => setTimeout(r, 400));   // > the 300 ms debounce
+
+  collector._startIfStream();
+
+  // A clean cycle: every packet inside the debounce window, one section.
+  for (const n of NAMES) fake.emit('data', row(n, 0));
+  await settle();
+  assert.equal(collector._ifaces.size, 4, 'a whole cycle must commit whole');
+
+  // The same cycle, delivered with one slow packet in the middle. This is the
+  // reported fault: the router sent all four, and the collector must end up
+  // holding all four however they were spread over the wire.
+  fake.emit('data', row('ether1', 1));
+  fake.emit('data', row('ether2', 1));
+  await settle();                       // the debounce fires here, mid-cycle
+  fake.emit('data', row('ether3', 1));
+  fake.emit('data', row('sfp-sfpplus1', 1));
+  await settle();
+
+  assert.deepEqual([...collector._ifaces.keys()].sort(), [...NAMES].sort(),
+    'a cycle split across the debounce must not truncate the list');
+
+  collector.stop();
+});
+
+// The two behaviours the size guard in _commitMeta depends on. It trusts a
+// batch that is NOT SMALLER than the last complete cycle, which is what keeps a
+// newly added interface instant while making a shrinking list wait for proof.
+test('a new interface still appears without waiting for the next cycle', async () => {
+  // refreshNow() restarts the meta streams precisely so a freshly created VETH
+  // shows up at once rather than a meta interval later. A rule of "only commit
+  // on a wrap" would have broken that, silently, and it would have read as a
+  // failed save.
+  const { EventEmitter } = require('node:events');
+  const fake = new EventEmitter(); fake.stop = () => {};
+  const ros = { connected: true, on() {}, stream: () => fake };
+  const _chain = { emit() {} }; _chain.to = () => _chain;
+  const io = { engine: { clientsCount: 1 }, emit() {}, to: () => _chain };
+  const collector = new InterfaceStatusCollector({ ros, io, pollMs: 5000, metaPollMs: 60000, state: {} });
+
+  const row = (n, sec) => ({ name: n, type: 'ether', running: 'true', disabled: 'false', '.section': String(sec) });
+  const settle = () => new Promise(r => setTimeout(r, 400));
+
+  collector._startIfStream();
+  for (const n of ['ether1', 'ether2']) fake.emit('data', row(n, 0));
+  await settle();
+  assert.equal(collector._ifaces.size, 2);
+
+  // A cycle carrying one MORE interface commits on the debounce, without
+  // waiting for the next section to arrive.
+  for (const n of ['ether1', 'ether2', 'veth1']) fake.emit('data', row(n, 1));
+  await settle();
+  assert.ok(collector._ifaces.has('veth1'), 'a bigger cycle must not wait for a boundary');
+
+  collector.stop();
+});
+
+test('a deleted interface leaves the list once the cycle proves it is gone', async () => {
+  // The inverse, and the cost of the guard: a SMALLER cycle looks exactly like a
+  // truncated one, so it is held until a repeated name proves the cycle ended.
+  // Worth pinning because "removal is delayed by up to one meta interval" is a
+  // deliberate trade, not an oversight.
+  const { EventEmitter } = require('node:events');
+  const fake = new EventEmitter(); fake.stop = () => {};
+  const ros = { connected: true, on() {}, stream: () => fake };
+  const _chain = { emit() {} }; _chain.to = () => _chain;
+  const io = { engine: { clientsCount: 1 }, emit() {}, to: () => _chain };
+  const collector = new InterfaceStatusCollector({ ros, io, pollMs: 5000, metaPollMs: 60000, state: {} });
+
+  const row = (n, sec) => ({ name: n, type: 'ether', running: 'true', disabled: 'false', '.section': String(sec) });
+  const settle = () => new Promise(r => setTimeout(r, 400));
+
+  collector._startIfStream();
+  for (const n of ['ether1', 'ether2', 'veth1']) fake.emit('data', row(n, 0));
+  await settle();
+  assert.equal(collector._ifaces.size, 3);
+
+  // veth1 deleted. This cycle is smaller, so the debounce alone must not
+  // install it — a smaller batch is indistinguishable from a truncated one.
+  fake.emit('data', row('ether1', 1));
+  fake.emit('data', row('ether2', 1));
+  await settle();
+  assert.ok(collector._ifaces.has('veth1'), 'a smaller batch alone must not drop it');
+
+  // The next cycle's first packet carries a new section, which ends the
+  // previous cycle and commits it exactly as it stood.
+  fake.emit('data', row('ether1', 2));
+  assert.ok(!collector._ifaces.has('veth1'), 'the section change must commit the smaller list');
+  assert.equal(collector._ifaces.size, 2);
+
+  collector.stop();
+});
+
+// The delimiter is the router's own, not our inference. `.section` is stamped on
+// every packet of an `=interval=N` response and increments per cycle — verified
+// on a hAP AC2 (RouterOS 7.24), where /interface/print =interval=3 delivered
+// nine packets stamped 0, then nine stamped 1.
+//
+// It matters that this is `.section` and not `!done`: a print terminates each
+// cycle with `!done`, but /interface/monitor-traffic never does, so only
+// `.section` is a delimiter both shapes carry.
+test('a cycle boundary is taken from the router\'s own section stamp', async () => {
+  const { EventEmitter } = require('node:events');
+  const fake = new EventEmitter(); fake.stop = () => {};
+  const ros = { connected: true, on() {}, stream: () => fake };
+  const _chain = { emit() {} }; _chain.to = () => _chain;
+  const io = { engine: { clientsCount: 1 }, emit() {}, to: () => _chain };
+  const collector = new InterfaceStatusCollector({ ros, io, pollMs: 5000, metaPollMs: 60000, state: {} });
+
+  const row = (n, sec) => ({ name: n, type: 'ether', running: 'true', disabled: 'false', '.section': String(sec) });
+  const settle = () => new Promise(r => setTimeout(r, 400));
+
+  collector._startIfStream();
+  for (const n of ['ether1', 'ether2', 'ether3']) fake.emit('data', row(n, 0));
+  await settle();
+  assert.equal(collector._ifaces.size, 3);
+
+  // Section 0 is falsy as a string only if mishandled — this pins that the
+  // FIRST cycle is not skipped by a truthiness check on the stamp.
+  assert.equal(collector._ifaceSection, '0', 'section 0 must be recorded, not treated as absent');
+
+  // A boundary commits the cycle SYNCHRONOUSLY, with no timer involved: the
+  // first packet of section 1 is proof that section 0 finished.
+  fake.emit('data', row('ether1', 1));
+  assert.equal(collector._ifaces.size, 3, 'the completed cycle stands until the new one completes');
+  assert.equal(collector._ifacesNext.size, 1, 'the new cycle starts accumulating immediately');
+
+  collector.stop();
 });
 
 test('interface status collector clamps malformed throughput fields to zero', () => {
@@ -1983,7 +2139,7 @@ test('dhcp networks collector counts leases per CIDR and extracts WAN IP', async
   };
   const io = { to() { return io; }, emit(ev, data) { emitted.push({ ev, data }); } };
   const leases = {
-    getActiveLeaseIPs: () => ['192.168.1.10', '192.168.1.11', '10.0.0.5'], getAllLeaseIPs: () => ['192.168.1.10', '192.168.1.11', '10.0.0.5'],
+    getInUseLeaseIPs: () => ['192.168.1.10', '192.168.1.11', '10.0.0.5'],
   };
   const collector = new DhcpNetworksCollector({ ros, io, pollMs: 15000, dhcpLeases: leases, state: {}, wanIface: 'WAN1' });
   await collector._fetchOnce();
@@ -2007,7 +2163,7 @@ test('dhcp networks collector handles one query failing gracefully', async () =>
     },
   };
   const io = { to() { return io; }, emit(ev, data) { emitted.push({ ev, data }); } };
-  const collector = new DhcpNetworksCollector({ ros, io, pollMs: 15000, dhcpLeases: { getActiveLeaseIPs: () => [], getAllLeaseIPs: () => [] }, state: {}, wanIface: 'WAN1' });
+  const collector = new DhcpNetworksCollector({ ros, io, pollMs: 15000, dhcpLeases: { getInUseLeaseIPs: () => [] }, state: {}, wanIface: 'WAN1' });
   await collector._fetchOnce();
 
   assert.equal(emitted[0].data.networks.length, 0);
@@ -2027,7 +2183,7 @@ test('dhcp networks collector clears WAN IP when the configured WAN interface is
   };
   const state = { lastWanIp: '203.0.113.5/30' };
   const io = { to() { return io; }, emit(ev, data) { emitted.push({ ev, data }); } };
-  const collector = new DhcpNetworksCollector({ ros, io, pollMs: 15000, dhcpLeases: { getActiveLeaseIPs: () => [], getAllLeaseIPs: () => [] }, state, wanIface: 'WAN1' });
+  const collector = new DhcpNetworksCollector({ ros, io, pollMs: 15000, dhcpLeases: { getInUseLeaseIPs: () => [] }, state, wanIface: 'WAN1' });
   await collector._fetchOnce();
 
   assert.equal(emitted[0].data.wanIp, '');
@@ -2280,6 +2436,54 @@ test('routing collector BGP peer removed via .dead=true clears session', async (
 });
 
 // ── Route stream delta ────────────────────────────────────────────────────────
+
+// A static route and a connected one, so routeCounts has something in more
+// than one bucket to count.
+const ROUTE_ROWS = [
+  { '.id': '*1', 'dst-address': '0.0.0.0/0',   gateway: '1.2.3.1', distance: '1', '.flags': 'AS' },
+  { '.id': '*2', 'dst-address': '10.0.0.0/24', gateway: 'bridge',  distance: '0', '.flags': 'AC' },
+];
+
+test('a route crosses the wire without its internals', async () => {
+  // The destructure named `_flags` and _mapRoute calls the field `flags`, so
+  // the exclusion silently did nothing and every route carried its whole flags
+  // object. Nothing renders it: `active`, `type` and `protocol` are derived
+  // from those flags server-side and are what the table shows.
+  const emitted = [];
+  const io = { to(room) { return { emit(ev, d) { emitted.push(d); } }; } };
+  const collector = new RoutingCollector({ ros: makeRoutingRos({ printRows: ROUTE_ROWS }),
+                                           io, pollMs: 10000, state: {} });
+  await collector._loadRoutes();
+  collector._emit(null);
+
+  const route = emitted[0].routes[0];
+  assert.ok(route, 'a route to inspect');
+  for (const internal of ['flags', '_flags', '_raw', '_id']) {
+    assert.ok(!(internal in route), internal + ' must not cross the wire');
+  }
+  // And what the page does render is still all there.
+  for (const shown of ['id', 'dst', 'gateway', 'distance', 'active',
+                       'comment', 'type', 'protocol', 'family']) {
+    assert.ok(shown in route, shown + ' is rendered and must survive the projection');
+  }
+});
+
+test('stripping flags from the wire leaves the route counts intact', async () => {
+  // routeCounts is computed from the STORED routes, which keep their flags —
+  // a fix that reached into those would empty the summary instead.
+  const emitted = [];
+  const io = { to(room) { return { emit(ev, d) { emitted.push(d); } }; } };
+  const collector = new RoutingCollector({ ros: makeRoutingRos({ printRows: ROUTE_ROWS }),
+                                           io, pollMs: 10000, state: {} });
+  await collector._loadRoutes();
+  collector._emit(null);
+
+  const c = emitted[0].routeCounts;
+  assert.ok(c.total > 0, 'routes are still counted');
+  for (const k of ['connect', 'static', 'dynamic', 'bgp', 'ospf']) {
+    assert.equal(typeof c[k], 'number', k + ' must still be counted');
+  }
+});
 
 test('routing collector route stream delta adds new route', async () => {
   const emitted = [];
@@ -3208,4 +3412,226 @@ test('bands and client counts come from the registration table', () => {
   const quiet = ssids.find(s => s.ssid === 'Quiet');
   assert.strictEqual(quiet.clients, 0);
   assert.deepStrictEqual(quiet.bands, []);
+});
+
+// ── DHCP utilisation on a large subnet (issue #115) ──────────────────────────
+//
+// A CCR2004 with two /23 pools showed them ~100% used — 507 of 512 — while only
+// ~110 addresses were actually held. The denominator was never wrong:
+// poolRangeSize works off 32-bit integers and is prefix-agnostic. The numerator
+// counted every lease the table held, `waiting` reservations included, and a
+// `waiting` lease is precisely one nobody is using.
+
+/** A /23 network + pool, and a lease stub with a given status mix. */
+function makeSlash23(leaseStub) {
+  const emitted = [];
+  const ros = {
+    connected: true,
+    on() {},
+    write: async (cmd) => {
+      if (cmd.includes('network')) return [{ address: '10.10.0.0/23', gateway: '10.10.0.1' }];
+      if (cmd.includes('pool'))    return [{ name: 'big', ranges: '10.10.0.10-10.10.1.254' }];
+      return [];
+    },
+  };
+  const io = { to() { return io; }, emit(ev, data) { emitted.push({ ev, data }); } };
+  const collector = new DhcpNetworksCollector({
+    ros, io, pollMs: 15000, dhcpLeases: leaseStub, state: {},
+  });
+  return { collector, emitted };
+}
+
+/**
+ * n addresses inside 10.10.0.0/23, by offset from 10.10.0.0.
+ *
+ * The /23 spans offsets 0-511, so `from + n` must stay under 512 or the tail
+ * falls outside the subnet and ipInCidr correctly refuses to count it — which
+ * is a bug in the fixture, not in the collector.
+ */
+function slash23Ips(n, from = 10) {
+  assert.ok(from + n <= 512, 'fixture overflows the /23: ' + (from + n) + ' > 512');
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const v = from + i;
+    out.push('10.10.' + Math.floor(v / 256) + '.' + (v % 256));
+  }
+  return out;
+}
+
+test('a /23 counts the addresses in use, not every lease row', async () => {
+  // The reported shape: 110 held, 397 reservations nobody is using.
+  const held = slash23Ips(110);
+  const RESERVED = 397;                    // waiting rows the router also holds
+  const { collector, emitted } = makeSlash23({ getInUseLeaseIPs: () => held });
+  await collector._fetchOnce();
+
+  const net = emitted[0].data.networks[0];
+  assert.equal(net.poolSize, 501, 'the denominator was never wrong: 10.10.0.10-10.10.1.254');
+  assert.equal(net.leaseCount, 110);
+  assert.notEqual(net.leaseCount, held.length + RESERVED,
+    'issue #115: 507 was 110 held plus 397 reservations, counted as if all were used');
+});
+
+test('and still counts them all when they really are all in use', async () => {
+  // The inverse. Without this, a filter that returned nothing would pass above.
+  const all = slash23Ips(507, 0);
+  const { collector, emitted } = makeSlash23({ getInUseLeaseIPs: () => all });
+  await collector._fetchOnce();
+  assert.equal(emitted[0].data.networks[0].leaseCount, 507);
+});
+
+test('only `waiting` frees an address; every other status holds one', async () => {
+  // A deny-list, not an allow-list. `testing` and `authorizing` are
+  // mid-allocation, and a `declined`/`conflict` address stays busy for the lease
+  // time — all of them are unavailable to another client. An empty status counts
+  // too: it comes from a partial stream row, never from an untaken reservation.
+  const ros = makeLeaseRos([
+    { address: '10.10.0.1', 'mac-address': 'A1', status: 'bound' },
+    { address: '10.10.0.2', 'mac-address': 'A2', status: 'offered' },
+    { address: '10.10.0.3', 'mac-address': 'A3', status: 'testing' },
+    { address: '10.10.0.4', 'mac-address': 'A4', status: 'authorizing' },
+    { address: '10.10.0.5', 'mac-address': 'A5', status: 'declined' },
+    { address: '10.10.0.6', 'mac-address': 'A6', status: 'conflict' },
+    { address: '10.10.0.7', 'mac-address': 'A7', status: '' },
+    { address: '10.10.0.8', 'mac-address': 'A8', status: 'waiting' },
+  ]);
+  const collector = new DhcpLeasesCollector({ ros, io: { emit() {} }, pollMs: 15000, state: {} });
+  await collector._loadInitial();
+
+  const inUse = collector.getInUseLeaseIPs();
+  assert.equal(inUse.length, 7);
+  assert.ok(!inUse.includes('10.10.0.8'), 'the waiting reservation is the one that is free');
+  for (const ip of ['10.10.0.1', '10.10.0.2', '10.10.0.3', '10.10.0.4',
+                    '10.10.0.5', '10.10.0.6', '10.10.0.7']) {
+    assert.ok(inUse.includes(ip), ip + ' holds an address and must count');
+  }
+  collector.stop();
+});
+
+test('the lease table still lists a reservation the utilisation excludes', async () => {
+  // Two different questions. The table says what exists; the bar says what a new
+  // client could not be given. A future "fix" that filters the table too would
+  // hide reservations from the page that exists to show them.
+  const emitted = [];
+  const ros = makeLeaseRos([
+    { address: '10.10.0.1', 'mac-address': 'A1', status: 'bound' },
+    { address: '10.10.0.8', 'mac-address': 'A8', status: 'waiting' },
+  ]);
+  const collector = new DhcpLeasesCollector({
+    ros, io: { emit(ev, d) { emitted.push({ ev, d }); } }, pollMs: 15000, state: {},
+  });
+  await collector._loadInitial();
+
+  const listed = emitted.filter(e => e.ev === 'leases:list').pop().d.leases;
+  assert.equal(listed.length, 2, 'both leases are listed');
+  assert.ok(listed.some(l => l.ip === '10.10.0.8' && l.status === 'waiting'));
+  assert.equal(collector.getInUseLeaseIPs().length, 1, 'but only one holds an address');
+  collector.stop();
+});
+
+test('a full re-read drops a lease the router no longer has', async () => {
+  // /print is the whole table, so it replaces rather than merges. _applyLease
+  // only prunes on a `.dead` that arrives on the listen stream, so in poll mode
+  // nothing was ever pruned and a vanished lease stayed for good — keeping its
+  // last status, usually `bound`, where no status filter can reach it.
+  const rows = [
+    { address: '10.10.0.1', 'mac-address': 'A1', status: 'bound' },
+    { address: '10.10.0.2', 'mac-address': 'A2', status: 'bound' },
+    { address: '10.10.0.3', 'mac-address': 'A3', status: 'bound' },
+  ];
+  const ros = makeLeaseRos(rows);
+  const collector = new DhcpLeasesCollector({ ros, io: { emit() {} }, pollMs: 15000, state: {} });
+  await collector._loadInitial();
+  assert.equal(collector.getInUseLeaseIPs().length, 3);
+
+  rows.splice(1, 2);                       // two clients go away
+  await collector._loadInitial();
+
+  assert.equal(collector.getInUseLeaseIPs().length, 1, 'the snapshot is authoritative');
+  assert.ok(!collector.getNameByIP('10.10.0.2'), 'and the name lookup forgets them too');
+  assert.ok(collector.getNameByIP('10.10.0.1'), 'while the survivor is untouched');
+  collector.stop();
+});
+
+test('a failed re-read leaves the last good table standing', async () => {
+  // The clear happens AFTER the await, never before. Blanking on a failed read
+  // would empty the lease table and every name lookup hanging off it.
+  const rows = [
+    { address: '10.10.0.1', 'mac-address': 'A1', status: 'bound' },
+    { address: '10.10.0.2', 'mac-address': 'A2', status: 'bound' },
+  ];
+  let fail = false;
+  const ros = {
+    connected: true,
+    on() {},
+    async write(path) {
+      if (path === '/ip/dhcp-server/print' || path === '/interface/vlan/print') return [];
+      if (fail) throw new Error('timeout');
+      return rows;
+    },
+    stream() { return { stop() {} }; },
+  };
+  const collector = new DhcpLeasesCollector({ ros, io: { emit() {} }, pollMs: 15000, state: {} });
+  await collector._loadInitial();
+  assert.equal(collector.getInUseLeaseIPs().length, 2);
+
+  fail = true;
+  await collector._loadInitial();
+  assert.equal(collector.getInUseLeaseIPs().length, 2, 'a failed read must not blank the table');
+  collector.stop();
+});
+
+// ── A packet arriving late in its OWN cycle must not become the whole list ──
+//
+// Issue #119, still reproducing on a CCR2004 after the .section fix, and this is
+// why. The section stamp correctly identifies where a cycle ENDS. What it did
+// not fix is that a debounce commit HANDED THE BATCH OVER and started a new one:
+//
+//     this._ifaces     = this._ifacesNext;
+//     this._ifacesNext = new Map();      // <- mid-cycle, the cycle is not over
+//
+// A debounce commit is PROVISIONAL. Only a section change ends a cycle. So on a
+// router where one interface reports late — a ZeroTier tunnel in the reported
+// case, and the reporter's dropdown contained exactly `zerotier1` and nothing
+// else — the sequence was:
+//
+//   1. the main burst arrives, debounce commits it, batch reset to empty
+//   2. the straggler lands ALONE in the fresh batch
+//   3. the size guard correctly refuses to commit a batch of 1...
+//   4. ...and then the next cycle's first packet changes the section, which
+//      commits on the wrap and BYPASSES the size guard by design
+//
+// Step 4 is the fix from the previous release completing the bug rather than
+// preventing it.
+test('an interface reporting late in its cycle joins the list rather than replacing it', async () => {
+  const { EventEmitter } = require('node:events');
+  const fake = new EventEmitter(); fake.stop = () => {};
+  const ros = { connected: true, on() {}, stream: () => fake };
+  const _chain = { emit() {} }; _chain.to = () => _chain;
+  const io = { engine: { clientsCount: 1 }, emit() {}, to: () => _chain };
+  const collector = new InterfaceStatusCollector({ ros, io, pollMs: 5000, metaPollMs: 60000, state: {} });
+
+  const row = (n, sec) => ({ name: n, type: 'ether', running: 'true', disabled: 'false', '.section': String(sec) });
+  const settle = () => new Promise(r => setTimeout(r, 400));
+  const FLEET = ['ether1', 'ether10', 'ether11', 'sfp-sfpplus1', 'Bridge-LAN', 'MGMT', 'lo'];
+
+  collector._startIfStream();
+
+  // Cycle 0: the fleet arrives promptly, then the tunnel reports late — still
+  // section 0, because it belongs to this cycle.
+  for (const n of FLEET) fake.emit('data', row(n, 0));
+  await settle();
+  fake.emit('data', row('zerotier1', 0));
+  await settle();
+
+  // Cycle 1 begins. The section change ends cycle 0.
+  fake.emit('data', row('ether1', 1));
+
+  const names = [...collector._ifaces.keys()].sort();
+  assert.deepEqual(names, [...FLEET, 'zerotier1'].sort(),
+    'the late interface must be ADDED to its cycle, not become the entire list');
+  assert.ok(collector._ifaces.size > 1,
+    'the dropdown showed exactly one interface because a batch of one was committed as a whole cycle');
+
+  collector.stop();
 });
