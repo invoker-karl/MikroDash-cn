@@ -3,7 +3,8 @@ name: Tests
 # Runs the suite on every PR and on pushes to main. Tests execute inside a
 # built image rather than on a bare runner, so a PR that breaks the Dockerfile,
 # the node-routeros patch step or a native build fails here too.
-# test/ is excluded from every image, so it is mounted in.
+# test/ and .github/ are excluded from every image, so the test sources and the
+# release-workflow fixture they audit are mounted read-only at run time.
 #
 # TWO images are built, and the distinction matters. The suite runs in the
 # `test` stage, which is the runtime image plus devDependencies: the runtime
@@ -62,7 +63,10 @@ jobs:
       # command the Dockerfile documents.
       - name: Run test suite
         run: |
-          docker run --rm -v "$PWD/test:/app/test:ro" mikrodash:ci-test
+          docker run --rm \
+            -v "$PWD/test:/app/test:ro" \
+            -v "$PWD/.github:/app/.github:ro" \
+            mikrodash:ci-test
 
       # Catches startup-only failures the suite cannot see: src/index.js is not
       # covered by any test, so a bad config value or a dependency behaviour
