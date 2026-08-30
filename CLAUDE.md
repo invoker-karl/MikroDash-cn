@@ -51,14 +51,21 @@ docker compose build && docker compose up -d
 # View live logs
 docker logs -f mikrodash
 
-# Run all tests (test/ is excluded from the image — copy first)
-# Quote the glob: Node 24's test runner treats a bare directory argument as a
-# module to load and fails with MODULE_NOT_FOUND.
+# Run all tests. The `test` stage is the runtime image plus devDependencies, so
+# a test needing a dev-only tool (jsdom, espree) can actually load. test/ is
+# excluded from every image, so mount it rather than copying it in.
+docker build --target test -t mikrodash-test .
+docker run --rm -v "$PWD/test:/app/test:ro" mikrodash-test
+
+# Run a single test file. Quote any glob: Node 24's test runner treats a bare
+# directory argument as a module to load and fails with MODULE_NOT_FOUND.
+docker run --rm -v "$PWD/test:/app/test:ro" mikrodash-test \
+  node --test /app/test/production-resilience-regressions.test.js
+
+# Against the running container instead — faster for a quick loop, but it has no
+# devDependencies, so a test needing one fails to load. Prefer the test image.
 docker cp test/. mikrodash:/app/test
 docker exec mikrodash node --test '/app/test/*.test.js'
-
-# Run a single test file
-docker exec mikrodash node --test /app/test/production-resilience-regressions.test.js
 
 # Run locally without Docker (after npm install + node patch-routeros.js)
 node src/index.js
@@ -155,6 +162,12 @@ RouterOS binary API (TCP)
 
 - The container rebuilds **once per turn**, not once per edit — a Stop hook runs `docker compose build && docker compose up -d`, checksum-gated over `src/`, `public/`, `patch-routeros.js`, `package*.json`, `Dockerfile` and `docker-compose.yml`. Run the rebuild by hand only when you need it mid-turn (running the tests, driving the UI); the gate then makes the turn-end run a no-op.
 - Append to `Changes.md` after every file edit (not in a batch at the end).
+- **Screenshots go in `.screenshots/`.** Every browser screenshot — Playwright MCP, Claude in
+  Chrome, anything else — is written there as `.screenshots/<name>.png`, never to the repo root.
+  Pass the directory explicitly in the `filename`; tools that default to the working directory
+  will otherwise drop the file beside `package.json`. The folder is gitignored, and so is `/*.png`
+  as a second line of defence. 178 stray screenshots had collected in the root before this rule.
+  `screenshots/` (no dot) and `public/` hold tracked assets and are a different thing entirely.
 - Always confirm before `git push` or Docker push.
 - A `v*.*.*` git tag is required alongside every version bump so GitHub Actions publishes the Docker image.
 

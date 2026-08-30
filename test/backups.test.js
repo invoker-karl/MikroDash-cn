@@ -412,6 +412,17 @@ test('a router that was off at 02:00 catches up rather than skipping the day', (
     'three days without a backup must not wait for tomorrow');
 });
 
+test('a chosen time is not held back by the elapsed interval', () => {
+  // The bug: the interval gate ran before the wall-clock anchor, so a run that
+  // happened late in the day pushed the next one past its own target. A manual
+  // backup at 11:45 left "daily at 08:00" undue at 08:00 the next morning —
+  // and once it finally fired at 11:45 it stayed there, which is exactly the
+  // drift the anchor exists to prevent.
+  assert.equal(Scheduler.isDue(daily('08:00'), at('2026-08-20T09:45:00Z'),
+    at('2026-08-21T06:05:00Z'), SCHEDULES, TZ), true,
+    '08:05 local is past the target, and the last run was yesterday');
+});
+
 test('hourly ignores the time', () => {
   // An hourly backup that waits for 02:00 is a daily backup.
   const hourly = { backup: { enabled: true, schedule: 'hourly', time: '02:00' } };
@@ -569,4 +580,46 @@ test('a restore is audited before the router is touched', () => {
   assert.ok(handler.includes('confirm-mismatch'), 'the operator must type the router name');
   assert.ok(handler.includes('acceptVersion'),
     'a version mismatch warns rather than blocking — you may need it most after a bad upgrade');
+});
+
+// ── Pruning only touches pairs this app made ────────────────────────────────
+//
+// selectForPruning promises "the newest pair is never removed" and enforced it
+// by protecting sorted[0] AFTER a string sort. That is a time sort only while
+// every stem is a timestamp: 'n' > '2', so `not-a-timestamp` sorted above every
+// real backup, took the protected slot, and left every genuine restore point
+// doomed — silently, so the loss would look like backups never taken.
+
+const REAL = [{ stem: '2026-03-15T093000' }, { stem: '2026-03-14T093000' },
+              { stem: '2026-03-13T093000' }];
+
+test('the newest pair survives even when a stray file sorts above it', () => {
+  const withStray = [{ stem: 'not-a-timestamp' }].concat(REAL);
+  const doomed = Store.selectForPruning(withStray, { keepCount: 1 });
+  assert.ok(!doomed.includes('2026-03-15T093000'), 'the newest backup must never be doomed');
+  assert.deepEqual(doomed, ['2026-03-14T093000', '2026-03-13T093000'],
+    'and the stray changes nothing about which real pairs go');
+});
+
+test('a stem this app did not write is never selected for deletion', () => {
+  // pruneFor's header: a file it did not make is not its to delete. The selector
+  // now knows that too, so a stray is neither pruned nor counted as a backup.
+  for (const stray of ['not-a-timestamp', 'README', '~tmp', 'backup-copy']) {
+    const doomed = Store.selectForPruning([{ stem: stray }].concat(REAL),
+                                          { keepCount: 1, keepDays: 1 }, Date.parse('2030-01-01'));
+    assert.ok(!doomed.includes(stray), stray + ' is not ours to delete');
+  }
+});
+
+test('pruning still works on ordinary input', () => {
+  // The guard must not have turned pruning off.
+  assert.deepEqual(Store.selectForPruning(REAL, { keepCount: 1 }),
+    ['2026-03-14T093000', '2026-03-13T093000']);
+  assert.deepEqual(Store.selectForPruning(REAL, { keepCount: 3 }), [], 'keeping all keeps all');
+  assert.deepEqual(Store.selectForPruning([REAL[0]], { keepCount: 0 }), [],
+    'a lone pair is never removed');
+  // keepDays ages out the old ones and still spares the newest.
+  const byAge = Store.selectForPruning(REAL, { keepDays: 1 }, Date.parse('2026-03-16T00:00:00Z'));
+  assert.ok(!byAge.includes('2026-03-15T093000'));
+  assert.deepEqual(byAge, ['2026-03-14T093000', '2026-03-13T093000']);
 });

@@ -458,12 +458,23 @@ test('the audit trail masks a field whose declared type is secret', () => {
   assert.ok(/_resAuditValues/.test(body), '_resAuditValues is gone');
   assert.ok(/f\.type === 'secret'/.test(body),
     'masking must key on the declared type, not on the field name');
-  // audit.js masks on NAME, and `presharedKey` does not match its pattern —
-  // which is exactly why the engine must not rely on it.
+  // This used to assert that CRED_PATTERN does NOT match `presharedKey`, as the
+  // proof that the type check was load-bearing. Saying so here, as that
+  // assertion asked: the pattern has since been widened to cover the spellings
+  // RouterOS actually uses (`private-key`, `pre-shared-key`), and
+  // `pre[-_]?shared[-_]?key` catches the camelCase form too.
+  //
+  // The type check stays, and the reason is now stronger than the old one. A
+  // name pattern is a guess about what a field holds; `type: 'secret'` is a
+  // statement of it. A future secret field named something nobody anticipated is
+  // covered the moment it is declared, and only the type check can promise that.
+  // Name matching is the second line, for callers that never had a declared type
+  // to consult.
   const m = SRC('audit.js').match(/const CRED_PATTERN = \/([^/]+)\/i;/);
   assert.ok(m, 'CRED_PATTERN moved; check whether the type-based masking is still needed');
-  assert.ok(!new RegExp(m[1], 'i').test('presharedKey'),
-    'if audit.js now matches this name, say so here rather than deleting the type check');
+  assert.ok(new RegExp(m[1], 'i').test('presharedKey'),
+    'the widened pattern should catch this name; if it stops, the type check above '
+    + 'is the only thing standing between a pre-shared key and the audit table');
 });
 
 // ── The upgrade button ───────────────────────────────────────────────────────
@@ -844,4 +855,62 @@ test('the gap is the same red as the drop pill, carried by colour alone', () => 
   assert.ok(cell !== undefined, 'the cell rule is gone');
   assert.ok(!/border/.test(cell), 'colour alone — no border on the gap cell');
   assert.ok(!/!important/.test(cell), 'and so no !important needed');
+});
+
+test('each write page owns the status handler its socket callbacks call', () => {
+  // setStatus in the Packages IIFE is not visible to the three IIFEs below it.
+  // Without a local handler, a successful write completes on RouterOS and then
+  // throws ReferenceError in the browser instead of reporting the result.
+  const pages = [
+    ['── WAN page', '── Queues page', 'wanActionNote'],
+    ['── Queues page', '── Router Users page', 'qActionNote'],
+    ['── Router Users page', '── Audit page', 'ruActionNote'],
+  ];
+  for (const [start, end, noteId] of pages) {
+    const at = APP.indexOf(start);
+    const to = APP.indexOf(end, at);
+    assert.ok(at > 0 && to > at, `found ${start}`);
+    const block = APP.slice(at, to);
+    assert.match(block, /function setStatus\(text\)/, `${start} needs a local setStatus`);
+    assert.ok(block.includes(`$('${noteId}')`), `${start} writes to ${noteId}`);
+  }
+});
+
+test('a status message is not erased by the render that follows it', () => {
+  // #112 gave WAN, Queues and Router Users a setStatus, which stopped the
+  // ReferenceError. The message still reached nobody: render() writes the same
+  // element from _caps.permitted, and it runs again on the next payload because
+  // the server calls refreshNow() after every write. On a failure it wiped the
+  // text in the same tick; on a success, one round trip later. Packages, which
+  // those three were copied from, had it too.
+  //
+  // The rule: setStatus marks the element, render() skips a marked one.
+  const pages = [
+    ['── Packages', '── WAN page', 'pkgActionNote'],
+    ['── WAN page', '── Queues page', 'wanActionNote'],
+    ['── Queues page', '── Router Users page', 'qActionNote'],
+    ['── Router Users page', '── Audit page', 'ruActionNote'],
+  ];
+  for (const [start, end, noteId] of pages) {
+    const at = APP.indexOf(start);
+    const to = APP.indexOf(end, at);
+    assert.ok(at > 0 && to > at, `found ${start}`);
+    const block = APP.slice(at, to);
+
+    assert.match(block, /function setStatus\(text\)/, `${start} needs a local setStatus`);
+    assert.ok(block.includes(`$('${noteId}')`), `${start} writes to ${noteId}`);
+    // setStatus marks while a message shows, and clears the mark when it goes.
+    assert.match(block, /dataset\.status = '1'/, `${start}: setStatus must mark the element`);
+    assert.match(block, /delete \w+\.dataset\.status/, `${start}: the mark must be cleared`);
+
+    // Every write of the note that is NOT setStatus's own must check the mark.
+    // Read a window rather than a line: the Queues guard wraps a two-line
+    // ternary, so the `if` and the assignment are not on the same line.
+    for (let i = block.indexOf(noteId); i !== -1; i = block.indexOf(noteId, i + 1)) {
+      const near = block.slice(i, i + 320);
+      if (!/read-only|no queue statistics/.test(near)) continue;   // setStatus's own write
+      assert.match(near, /!\w+\.dataset\.status/,
+        `${start}: render() must not clear a message it did not write`);
+    }
+  }
 });

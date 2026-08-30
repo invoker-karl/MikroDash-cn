@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const ROS = require('../src/routeros/client');
 const ConnectionsCollector = require('../src/collectors/connections');
@@ -155,9 +157,9 @@ test('all node-routeros compatibility patches are required at startup', () => {
   assert.equal(hasExactPatchMarker('if (this.streaming) break; // MIKRODASH_PATCHED_MULTI_BLOCK_V2',
     'MIKRODASH_PATCHED_MULTI_BLOCK_V2'), true, 'inline end-of-line markers are valid');
   assert.equal(hasExactPatchMarker('xMIKRODASH_PATCHED_MULTI_BLOCK',
-    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'a lowercase identifier prefix is not a token boundary');
+    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'an identifier prefix is not a token boundary');
   assert.equal(hasExactPatchMarker('MIKRODASH_PATCHED_MULTI_BLOCKx',
-    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'a lowercase identifier suffix is not a token boundary');
+    'MIKRODASH_PATCHED_MULTI_BLOCK'), false, 'an identifier suffix is not a token boundary');
 });
 
 test('patch verification fails when only MULTI_BLOCK_V2 is present', () => {
@@ -184,6 +186,22 @@ test('Docker copies the shared patch verifier before running the dependency patc
   assert.ok(verifierCopy < patchCopy && patchCopy < patchRun,
     'both patch files exist before the patch script runs');
   assert.ok(patchRun < fullCopy, 'the full source tree is not copied early and dependency caching is retained');
+});
+
+test('the dependency patch command exits nonzero when required files are absent', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mikrodash-patch-fail-'));
+  try {
+    fs.mkdirSync(path.join(temp, 'src', 'routeros'), { recursive: true });
+    fs.mkdirSync(path.join(temp, 'node_modules', 'node-routeros', 'dist'), { recursive: true });
+    fs.copyFileSync(path.join(__dirname, '..', 'patch-routeros.js'), path.join(temp, 'patch-routeros.js'));
+    fs.copyFileSync(path.join(__dirname, '..', 'src', 'routeros', 'patchVerification.js'),
+      path.join(temp, 'src', 'routeros', 'patchVerification.js'));
+    const result = spawnSync(process.execPath, ['patch-routeros.js'], { cwd: temp, encoding: 'utf8' });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /FAILED.*refusing to continue/i);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test('ROS write timeout closes the active connection before rejecting', async () => {

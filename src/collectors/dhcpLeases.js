@@ -31,17 +31,31 @@ class DhcpLeasesCollector {
   getNameByIP(ip)  { return this.byIP.get(ip);  }
   getNameByMAC(mac){ return this.byMAC.get(mac); }
 
-  // Returns IPs of all known leases regardless of status (bound, waiting, expired, etc.)
-  // Used by DhcpNetworksCollector to count total leases per subnet.
-  getAllLeaseIPs() {
-    return Array.from(this.byIP.keys());
-  }
-
-  getActiveLeaseIPs() {
+  /**
+   * The addresses a new client could NOT be given — which is what "used" means
+   * on a utilisation bar.
+   *
+   * RouterOS lease statuses are `waiting | testing | declined | offered | bound
+   * | authorizing | conflict`. Only `waiting` leaves the address available: it
+   * means a STATIC reservation whose client is not currently holding it. Every
+   * other status holds the address against other clients, the unhappy ones
+   * included — a `declined` or `conflict` address stays busy for the lease
+   * time, and `testing`/`authorizing` are mid-allocation.
+   *
+   * A deny-list rather than an allow-list, deliberately. If RouterOS gains a
+   * status it counts as used and the worst case is a slight over-count; an
+   * allow-list would silently drop those addresses out of the total instead.
+   * An empty status counts as used for the same reason: it comes from a partial
+   * stream row, never from an untaken reservation, which reports `waiting`.
+   *
+   * Counting every status is what made a /23 read 507 of 512 used while ~110
+   * addresses were actually held (issue #115). The lease TABLE is a different
+   * question and still lists everything, `waiting` included.
+   */
+  getInUseLeaseIPs() {
     const out = [];
     for (const [ip, v] of this.byIP.entries()) {
-      const st = String(v.status || '').toLowerCase();
-      if (!st || st === 'bound' || st === 'offered') out.push(ip);
+      if (String(v.status || '').toLowerCase() !== 'waiting') out.push(ip);
     }
     return out;
   }
@@ -160,6 +174,9 @@ class DhcpLeasesCollector {
         ['=.proplist=.id,.dead,address,active-address,mac-address,active-mac-address,status,comment,host-name,server,dynamic']);
       // Build into detached maps, then publish the complete snapshot. Reusing
       // the old maps made a successful empty /print retain every deleted lease.
+      // The swap happens only after the complete snapshot is built, so an
+      // unexpected row-processing failure leaves the last known-good table in
+      // place rather than exposing a partial lease list.
       const oldByIP = this.byIP;
       const oldByMAC = this.byMAC;
       this.byIP = new Map();
@@ -193,7 +210,11 @@ class DhcpLeasesCollector {
             this._restartTimer = setTimeout(() => {
               this._restarting = false;
               this._restartTimer = null;
-              if (this.ros.connected) this._startStream();
+              // Re-read before resuming, as arp.js does. Every removal that
+              // happened while the stream was down arrived as a `.dead` we
+              // never saw, so resuming without a fresh snapshot leaves those
+              // leases in the map permanently.
+              if (this.ros.connected) this._loadInitial().then(() => this._startStream());
             }, this._restartDelayMs);
           }
           return;

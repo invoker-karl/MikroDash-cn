@@ -102,7 +102,7 @@ test('dashboard DOM clears talkers and distinguishes unavailable from a legal em
   const context = {
     socket: { on(name, handler) { handlers[name] = handler; } },
     talkersTable: dom.window.document.getElementById('talkersTable'),
-    lastTalkers: [{ mac: 'old' }], esc: value => String(value), fmtMbps: String,
+    lastTalkers: [{ mac: 'old' }], esc: value => String(value), tr: value => String(value), fmtMbps: String,
   };
   vm.runInNewContext(source, context);
   handlers['talkers:update']({ devices: [] });
@@ -126,7 +126,7 @@ test('Detect Internet rejection is distinct from a successful empty result and p
   };
   const collector = new DhcpNetworksCollector({
     ros, io: collectorIo(events), pollMs: 15000,
-    dhcpLeases: { getAllLeaseIPs: () => [] }, state: {}, wanIface: 'wan',
+    dhcpLeases: { getInUseLeaseIPs: () => [] }, state: {}, wanIface: 'wan',
   });
   await collector._fetchOnce();
   assert.equal(collector.lastPayload.networks.length, 1);
