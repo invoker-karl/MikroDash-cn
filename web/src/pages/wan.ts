@@ -13,6 +13,7 @@
 // page that made the judgement itself could be talked out of it by a browser.
 
 import { esc, el, renderSortHeader, type SortCol, type SortState } from '../dom';
+import { tr } from '../i18n';
 import type { Socket } from '../socket';
 
 export interface WANDhcp {
@@ -232,7 +233,7 @@ export function initWanPage(socket: Socket, isVisible: (page: string) => boolean
     const msg = verb === 'release'
       ? 'Release the DHCP lease on "' + name + '"?\n\nThe uplink goes down until the client rebinds — usually seconds, but it is a real outage.'
       : 'Renew the DHCP lease on "' + name + '"?\n\nThe uplink blips briefly while the lease is renewed.';
-    if (!window.confirm(msg)) return;
+    if (!window.confirm(tr(msg))) return;
     send(verb, id, name);
   });
 

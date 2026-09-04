@@ -30,6 +30,7 @@
 // the self-throttle acknowledgement, are their own piece of work.
 
 import { esc, el, renderSortHeader, fmtBytes, type SortCol } from '../dom';
+import { tr } from '../i18n';
 import type { Socket } from '../socket';
 
 export interface RatePair { up: number | null; down: number | null }
@@ -510,8 +511,8 @@ export function initQueuesPage(socket: Socket, isVisible: (page: string) => bool
       return;
     }
     if (act === 'remove') {
-      if (!window.confirm('Remove the queue "' + name +
-          '"?\n\nTraffic it was limiting will no longer be shaped.')) return;
+      if (!window.confirm(tr('Remove the queue "' + name +
+          '"?\n\nTraffic it was limiting will no longer be shaped.'))) return;
       busy = id; render();
       socket.emit('queue:remove', { id, expectedName: name, menu });
     }

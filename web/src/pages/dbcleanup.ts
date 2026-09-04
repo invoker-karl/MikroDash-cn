@@ -31,6 +31,7 @@
  */
 
 import { el, esc, fmtBytes } from '../dom';
+import { tr } from '../i18n';
 
 export interface DbRouter { id: string; label?: string | null; host?: string | null }
 export interface DbRouterRows { routerId: string; rows: number }
@@ -349,7 +350,7 @@ export function initDbCleanup(): void {
   n.delBtn.addEventListener('click', () => {
     const opts = currentOpts();
     if (!opts.types.length) return;
-    if (!confirm('Delete this data permanently? This cannot be undone.')) return;
+    if (!confirm(tr('Delete this data permanently? This cannot be undone.'))) return;
     const count = pendingCount;
     pendingCount = 0; // the preview is spent either way
     setBusy(

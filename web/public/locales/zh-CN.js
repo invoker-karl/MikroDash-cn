@@ -57,6 +57,7 @@
       'General': '常规',
       'Appearance': '外观',
       'Authentication': '身份验证',
+      'Authentication algorithm': '认证算法',
       'Notifications': '通知',
       'Diagnostics': '诊断',
       'Limits': '限制',
@@ -114,6 +115,7 @@
       'Organisation': '组织',
       'Private / Internal': '私有 / 内部',
       'Regional': '区域网络',
+      'Regional settings': '区域设置',
       'Cloud / CDN': '云服务 / CDN',
       'Content / Social': '内容 / 社交',
       'Security': '安全',
@@ -279,6 +281,7 @@
       'Poor': '较差',
       'Handshake': '握手',
       'Peer': '对端',
+      'IPsec Peers': 'IPsec 对端',
       'Allowed IPs': '允许的 IP',
       'Endpoint': '端点',
       'Throughput': '吞吐量',
@@ -501,8 +504,8 @@
       ,'Links': '相关链接'
       ,'All types': '所有类型'
       ,'Upstream': '上游'
-      ,'Upd Out': '发出更新'
-      ,'Upd In': '收到更新'
+      ,'Upd Out': '发送更新'
+      ,'Upd In': '接收更新'
       ,'Offline threshold': '离线判定时间'
       ,'seconds': '秒'
       ,'Status badge and alerts only change after the router has been unreachable for this long. Set to 0 to react immediately.': '路由器持续无法访问达到此时间后，状态标记和告警才会变化。设置为0可立即响应。'
@@ -564,7 +567,7 @@
     'Delete stored history on demand. Retention above prunes automatically over time; this removes data right now. The database file is compacted afterwards so the space is actually returned to disk.': '按需删除已存储的历史数据。上方保留策略会随时间自动清理；此操作会立即删除数据，之后压缩数据库文件以真正释放磁盘空间。',
     'Description': '说明', 'Device type filter': '设备类型筛选', 'Discard saved positions and lay out again': '丢弃已保存位置并重新布局', 'Disk': '磁盘', 'Display timezone': '显示时区', 'Down Time': '中断时间', 'Download capacity, Mbps': '下载容量（Mbps）', 'Drops': '丢弃',
     'Each user signs in with their own account. Access comes from the roles granted to them here, and from any group they belong to.': '每位用户使用自己的账户登录。访问权限来自此处直接授予的角色及其所属组。',
-    'Email': '电子邮件', 'Encryption': '加密', 'Errors': '错误', 'Everything (no age limit)': '全部（不限时间）', 'Filter leases by DHCP server': '按 DHCP 服务器筛选租约', 'Find a device by name, IP or MAC…': '按名称、IP 或 MAC 查找设备…', 'First-line monitoring: logs and reports': '一线监控：日志与报表', 'Fit': '适应', 'Fit to view': '适应视图', 'Flaps': '抖动', 'Flow': '流量动画', 'Gbps': 'Gbps', 'Groups': '组',
+    'Email': '电子邮件', 'Encryption': '加密', 'Encryption algorithm': '加密算法', 'Errors': '错误', 'Everything (no age limit)': '全部（不限时间）', 'Filter leases by DHCP server': '按 DHCP 服务器筛选租约', 'Find a device by name, IP or MAC…': '按名称、IP 或 MAC 查找设备…', 'First-line monitoring: logs and reports': '一线监控：日志与报表', 'Fit': '适应', 'Fit to view': '适应视图', 'Flaps': '抖动', 'Flow': '流量动画', 'Gbps': 'Gbps', 'Groups': '组',
     'Handshook before, but not within the last 3 minutes': '曾成功握手，但最近 3 分钟内没有握手', 'Head Office': '总部', 'IP version filter': 'IP 版本筛选', 'IX / Route Server': 'IX / 路由服务器', 'In use': '使用中', 'Interface filter': '接口筛选', 'Interface font': '界面字体', 'Interface font size': '界面字号', 'Last Up': '最近上线',
     'Lets each user add their own Telegram, Pushbullet, ntfy or email destination under': '允许每位用户在以下位置添加自己的 Telegram、Pushbullet、ntfy 或电子邮件目标：',
     'Link integrity faults: CRC/FCS, alignment, collisions. A rising count means a cable or duplex problem': '链路完整性故障：CRC/FCS、对齐错误、冲突。计数持续上升通常表示线缆或双工问题',
@@ -572,12 +575,12 @@
     'My Access': '我的权限', 'My Account': '我的账户', 'My Alerts': '我的告警', 'My Notification Channels': '我的通知频道', 'NAT': 'NAT', 'NOC Tier 1': 'NOC 一级', 'Network Operators': '网络操作员', 'Network Topology': '网络拓扑', 'Network topology map': '网络拓扑图', 'Never Connected': '从未连接', 'New Password': '新密码', 'Night': '夜间',
     'Notification cooldown, seconds': '通知冷却时间（秒）', 'Notify once per release when RouterOS has a newer version available': 'RouterOS 有新版本时每个版本通知一次', 'Number of devices to show': '显示设备数量',
     'Off means no login at all — anyone who can reach this page has full control. Only sensible on a trusted network.': '关闭表示完全无需登录——任何能访问此页面的人都拥有完整控制权。仅适用于可信网络。',
-    'Oldest record': '最早记录', 'OpenConfirm': '打开确认', 'OpenSent': '打开已发送', 'PPP Sessions': 'PPP 会话', 'Packets discarded rather than corrupted: full queue, no buffer. A rising count means congestion': '因队列已满或无缓冲区而丢弃的数据包。计数持续上升通常表示拥塞', 'Page access': '页面访问权限', 'Pages': '页面', 'Ping history': 'Ping 历史', 'Ping loss alert threshold, percent': 'Ping 丢包告警阈值（百分比）',
+    'Oldest record': '最早记录', 'PPP Sessions': 'PPP 会话', 'Packets discarded rather than corrupted: full queue, no buffer. A rising count means congestion': '因队列已满或无缓冲区而丢弃的数据包。计数持续上升通常表示拥塞', 'Page access': '页面访问权限', 'Pages': '页面', 'Ping history': 'Ping 历史', 'Ping loss alert threshold, percent': 'Ping 丢包告警阈值（百分比）',
     'Poll suits lower-end hardware: it replaces persistent API streams with periodic requests, which is what actually strains a small router. Logs and the traffic graph always stream — polling them would drop log lines and cost more than it saves.': '轮询适合低端硬件：它以周期请求代替持续 API 流，后者更容易给小型路由器造成压力。日志和流量图始终使用流式采集——轮询会遗漏日志且得不偿失。',
-    'Preview': '预览', 'Pro': '专业', 'Pushbullet': 'Pushbullet', 'RAM': '内存', 'RST': 'RST', 'RX / TX': '接收 / 发送', 'Rates': '速率', 'Raw': '原始', 'Re-layout': '重新布局', 'Read the full licence': '阅读完整许可证', 'Require sign-in': '要求登录', 'Reset view — zoom right out to the whole world': '重置视图——缩放到整个世界', 'Roles': '角色', 'Route type filter': '路由类型筛选',
+    'Preview': '预览', 'Pushbullet': 'Pushbullet', 'RAM': '内存', 'RST': 'RST', 'RX / TX': '接收 / 发送', 'Rates': '速率', 'Raw': '原始', 'Re-layout': '重新布局', 'Read the full licence': '阅读完整许可证', 'Require sign-in': '要求登录', 'Reset view — zoom right out to the whole world': '重置视图——缩放到整个世界', 'Roles': '角色', 'Route type filter': '路由类型筛选',
     'RouterOS API port': 'RouterOS API 端口', 'RouterOS Update Available': 'RouterOS 有可用更新', 'RouterOS password': 'RouterOS 密码', 'RouterOS update check every': 'RouterOS 更新检查间隔', 'RouterOS username': 'RouterOS 用户名', 'Routers at this site': '此站点的路由器', 'Routers here with no location of their own are shown at this place on the map.': '此处没有自身位置的路由器会显示在地图上的这个位置。', 'Routing protocol': '路由协议',
     'Save Group': '保存组', 'Save My Channels': '保存我的频道', 'Save Role': '保存角色', 'Save Site': '保存站点', 'Search for a town or city…': '搜索城镇或城市…', 'Search routers…': '搜索路由器…', 'Send To': '发送至', 'Sent using the server\'s mail settings.': '使用服务器邮件设置发送。', 'Serial': '序列号', 'Service': '服务', 'Session timeout': '会话超时', 'Sessions are cleared on server restart. Signing in again is all that is needed.': '服务器重启时会清除会话，只需重新登录。',
-    'Show every client device. Collapsed by default — use the count chip on a device to expand just that one.': '显示所有客户端设备。默认折叠——点击设备上的数量标签可单独展开。', 'Show link capacity': '显示链路容量', 'Show only clients on a VLAN': '仅显示某 VLAN 上的客户端', 'Side': '侧边', 'Sign Out': '退出登录', 'Sign Out Everywhere Else': '退出其他所有设备', 'Sign-in': '登录', 'Signed in as': '当前登录用户', 'Site': '站点', 'Site this router belongs to': '此路由器所属站点', 'Sites': '站点', 'Stale': '已过期', 'Stations': '终端', 'Stored rows': '已存储行数', 'Switches': '交换机', 'TX / RX': '发送 / 接收',
+    'Show every client device. Collapsed by default — use the count chip on a device to expand just that one.': '显示所有客户端设备。默认折叠——点击设备上的数量标签可单独展开。', 'Show link capacity': '显示链路容量', 'Show only clients on a VLAN': '仅显示某 VLAN 上的客户端', 'Sign Out': '退出登录', 'Sign Out Everywhere Else': '退出其他所有设备', 'Sign-in': '登录', 'Signed in as': '当前登录用户', 'Site': '站点', 'Site this router belongs to': '此路由器所属站点', 'Sites': '站点', 'Stale': '已过期', 'Stations': '终端', 'Stored rows': '已存储行数', 'Switches': '交换机', 'TX / RX': '发送 / 接收',
     'Team responsible for day-to-day monitoring': '负责日常监控的团队', 'Telegram': 'Telegram', 'Text brightness': '文字亮度', 'The only check that contacts MikroTik rather than your router. Minimum 1 hour.': '唯一直接联系 MikroTik 而非路由器的检查，最短间隔为 1 小时。', 'Times the link has gone down since the counter was last reset': '自计数器上次重置以来链路中断次数', 'To': '至', 'Toggle animated traffic flow': '切换流量动画', 'Toggle link rate labels': '切换链路速率标签',
     'Top 10': '前 10', 'Top 20': '前 20', 'Top 50': '前 50', 'Top connections count': '连接排行数量', 'Top firewall rules count': '防火墙规则排行数量', 'Top talkers count': '流量设备排行数量', 'Topology': '拓扑', 'Total Devices': '设备总数', 'Total RX': '总接收', 'Total TX': '总发送', 'Total received since the counter was last reset': '自计数器上次重置以来的总接收量', 'Total sent since the counter was last reset': '自计数器上次重置以来的总发送量', 'Traffic graphs': '流量图表', 'Traffic scope filter': '流量范围筛选',
     'Turn off what a router has no data for. Bandwidth needs Connections and follows it. Turning off Interface Rates also stops interface up/down alerts; turning off Ping also stops ping-loss alerts. Saving briefly reconnects this router.': '关闭路由器没有数据的项目。带宽依赖连接并随其启停。关闭接口速率也会停止接口上下线告警；关闭 Ping 也会停止丢包告警。保存时此路由器会短暂重连。',
@@ -684,7 +687,6 @@
     'That rule is already at the end of its table.': '该规则已位于表格末尾。',
     'The API user MikroDash connects as is part of what gets replaced — if that user did not exist when this backup was taken, MikroDash will lose access to this router.': 'MikroDash 用于连接的 API 用户也会被替换——如果制作此备份时该用户尚不存在，MikroDash 将失去对此路由器的访问权限。',
     'The Audit page keeps the record.': '审计页面会保留此次操作记录。',
-    'The RouterOS user MikroDash connects with lacks the write policy.': 'MikroDash 用于连接的 RouterOS 用户缺少 write 权限。',
     'The router refused the change.': '路由器拒绝了此更改。',
     'The stored files and their history rows are removed, and cannot be recovered.': '存储的文件及其历史记录行都会被删除，且无法恢复。',
     'This REPLACES the entire configuration and reboots the router.': '这会替换整个配置并重启路由器。',
@@ -859,7 +861,7 @@
     'which is inside': '位于以下范围内：', 'will be disconnected for the duration of the': '将在以下操作期间断开：',
     '— it is read-only and adds no traffic': '——此功能为只读，不会增加流量',
     '— it is read-only and adds no traffic beyond an occasional probe.': '——此功能为只读，除偶尔探测外不会增加流量。',
-    '← Newer': '← 更新', '◎ Frequency Analyzer': '◎ 频率分析器',
+    '← Newer': '← 更新',
     ', and this queue caps traffic at': '，且此队列将流量限制为', ', or exclude the traffic from it.': '，或将该流量排除在规则之外。',
     ', so a queue here': '，因此这里的队列', ', so scanning it should': '，因此扫描它应当',
     ', so scanning it should interrupt nobody. Other radios on this router are unaffected.': '，因此扫描它不会中断任何客户端。此路由器上的其他无线电不受影响。',
@@ -1226,8 +1228,22 @@
   });
 
   global.MikroDashLocales['zh-CN'].patterns.push(
-    [/^Remove the queue "([\s\S]+)"\? Traffic it was limiting will no longer be shaped\.$/, function (_, name) { return '删除队列“' + name + '”吗？它所限制的流量将不再整形。'; }],
+    [/^Delete these (\d+) restore points\?$/, function (_, count) { return '要删除这 ' + count + ' 个还原点吗？'; }],
+    [/^Restore ([\s\S]+) from this backup\?$/, function (_, name) { return '要从此备份还原路由器“' + name + '”吗？'; }],
+    [/^WARNING: this backup was taken on RouterOS ([\s\S]+) and the router now runs ([\s\S]+)\. MikroTik recommend matching versions\.$/, function (_, was, now) { return '警告：此备份制作于 RouterOS ' + was + '，而路由器当前运行 ' + now + '。MikroTik 建议使用一致的版本。'; }],
+    [/^Remove the queue "([\s\S]+)"\?\s+Traffic it was limiting will no longer be shaped\.$/, function (_, name) { return '删除队列“' + name + '”吗？它所限制的流量将不再整形。'; }],
     [/^Remove the scheduled report "([\s\S]+)"\?$/, function (_, name) { return '删除定时报表“' + name + '”吗？'; }],
+    [/^Remove the router user "([\s\S]+)"\?\n\nThey will no longer be able to log in to this router\.$/, function (_, name) { return '删除路由器用户“' + name + '”吗？\n\n该用户将无法再登录此路由器。'; }],
+    [/^Remove the group "([\s\S]+)"\?\n\nRouterOS refuses this if any user is still in it\.$/, function (_, name) { return '删除组“' + name + '”吗？\n\n如果仍有用户属于该组，RouterOS 会拒绝此操作。'; }],
+    [/^End "([\s\S]+)"’s session\?\n\nThey will be disconnected from the router immediately\.$/, function (_, name) { return '结束“' + name + '”的会话吗？\n\n该用户会立即与路由器断开连接。'; }],
+    [/^Delete user "([\s\S]+)"\? This cannot be undone\.$/, function (_, name) { return '要删除用户“' + name + '”吗？此操作无法撤销。'; }],
+    [/^Delete group "([\s\S]+)"\?\n\nIts members keep any access granted to them directly\.$/, function (_, name) { return '要删除组“' + name + '”吗？\n\n组成员仍会保留直接授予给他们的访问权限。'; }],
+    [/^Delete the role "([\s\S]+)"\?$/, function (_, name) { return '要删除角色“' + name + '”吗？'; }],
+    [/^Delete router "([\s\S]+)"\?\n\nAll accumulated data \(traffic history, ping history, bandwidth, alerts, and connectivity events\) for this router will be permanently deleted\.\n\nThis cannot be undone\.$/, function (_, name) { return '要删除路由器“' + name + '”吗？\n\n该路由器的所有累计数据（流量历史、Ping 历史、带宽、告警和连接事件）都将被永久删除。\n\n此操作无法撤销。'; }],
+    [/^Delete site "([\s\S]+)"\?$/, function (_, name) { return '要删除站点“' + name + '”吗？'; }],
+    [/^Delete site "([\s\S]+)"\?\n\n(\d+) device\(s\) will lose this site\. They keep any other sites, and are not deleted\.$/, function (_, name, count) { return '要删除站点“' + name + '”吗？\n\n' + count + ' 台设备将失去此站点关联，但会保留其他站点且不会被删除。'; }],
+    [/^Release the DHCP lease on "([\s\S]+)"\?\n\nThe uplink goes down until the client rebinds — usually seconds, but it is a real outage\.$/, function (_, name) { return '要释放接口“' + name + '”的 DHCP 租约吗？\n\n在客户端重新绑定前，出口会中断——通常只需数秒，但这是真实的网络中断。'; }],
+    [/^Renew the DHCP lease on "([\s\S]+)"\?\n\nThe uplink blips briefly while the lease is renewed\.$/, function (_, name) { return '要续租接口“' + name + '”的 DHCP 租约吗？\n\n续租期间出口会短暂中断。'; }],
     [/^Capacity RX \(([^)]+) Mbps\)$/, function (_, rate) { return '接收容量（' + rate + ' Mbps）'; }],
     [/^Capacity TX \(([^)]+) Mbps\)$/, function (_, rate) { return '发送容量（' + rate + ' Mbps）'; }],
     [/^Page (\d+) of (\d+)$/, function (_, page, total) { return '第 ' + page + ' 页，共 ' + total + ' 页'; }]

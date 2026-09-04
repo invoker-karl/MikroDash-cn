@@ -14,14 +14,62 @@ const normalise = (value) => String(value || '').replace(/&nbsp;/g, ' ').replace
   .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&')
   .replace(/\s+/g, ' ').trim();
 
+const localePath = path.join(webRoot, 'public/locales/zh-CN.js');
+const localeSource = fs.readFileSync(localePath, 'utf8');
 const sandbox = { window: {} };
-vm.runInNewContext(fs.readFileSync(path.join(webRoot, 'public/locales/zh-CN.js'), 'utf8'), sandbox);
+vm.runInNewContext(localeSource, sandbox);
 const locale = sandbox.window.MikroDashLocales['zh-CN'];
 const policy = JSON.parse(fs.readFileSync(path.join(webRoot, 'i18n/allowlist.json'), 'utf8'));
 const allowed = new Set(Object.values(policy.exact).flat());
 const allowedPatterns = policy.patterns.map((item) => new RegExp(item.regex));
 const candidates = new Set();
 const policyErrors = [];
+
+// JavaScript silently keeps the last value of a duplicate locale key. That made
+// two different translations look valid depending only on declaration order,
+// while the runtime object and the old coverage audit had already lost the
+// overwritten source location. Reject conflicting duplicates before evaluation.
+const localeAst = ts.createSourceFile(localePath, localeSource, ts.ScriptTarget.Latest, true);
+const localeDeclarations = new Map();
+function localePropertyName(node) {
+  if (ts.isStringLiteralLike(node) || ts.isIdentifier(node)) return node.text;
+  return null;
+}
+function localeValue(node) {
+  return ts.isStringLiteralLike(node) ? node.text : null;
+}
+function recordLocaleObject(node) {
+  if (!ts.isObjectLiteralExpression(node)) return;
+  for (const prop of node.properties) {
+    if (!ts.isPropertyAssignment(prop)) continue;
+    const key = localePropertyName(prop.name);
+    const value = localeValue(prop.initializer);
+    if (key === null || value === null) continue;
+    const at = localeAst.getLineAndCharacterOfPosition(prop.getStart(localeAst)).line + 1;
+    const entries = localeDeclarations.get(key) || [];
+    entries.push({ value, line: at });
+    localeDeclarations.set(key, entries);
+  }
+}
+function collectLocaleObjects(node) {
+  if (ts.isPropertyAssignment(node) && localePropertyName(node.name) === 'messages') {
+    recordLocaleObject(node.initializer);
+  }
+  if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) && node.expression.expression.text === 'Object' &&
+      node.expression.name.text === 'assign' && node.arguments.some((arg) =>
+        ts.isPropertyAccessExpression(arg) && arg.name.text === 'messages')) {
+    for (const arg of node.arguments) recordLocaleObject(arg);
+  }
+  ts.forEachChild(node, collectLocaleObjects);
+}
+collectLocaleObjects(localeAst);
+for (const [key, entries] of localeDeclarations) {
+  const values = new Set(entries.map((entry) => entry.value));
+  if (values.size > 1) {
+    policyErrors.push(`conflicting duplicate locale key "${key}" at lines ${entries.map((entry) => entry.line).join(', ')}`);
+  }
+}
 
 // The wordmark is deliberately split into two styled text nodes. Translating
 // either half turns the product name into ordinary prose (for example,
@@ -32,6 +80,30 @@ if (!/<h1\s+id="topbarLogo"\s+data-i18n-skip>Mikro<span>Dash<\/span><\/h1>/.test
 }
 if (Object.prototype.hasOwnProperty.call(locale.messages, 'Dash') && locale.messages.Dash !== 'Dash') {
   policyErrors.push(`the protected brand fragment "Dash" must not translate to "${locale.messages.Dash}"`);
+}
+
+const settingsHTML = fs.readFileSync(path.join(srcRoot, 'ui/page-settings.html'), 'utf8');
+if (!/<div class="theme-swatch-grid" id="themeSwatches" data-i18n-skip>/.test(settingsHTML)) {
+  policyErrors.push('the theme-name grid must be marked data-i18n-skip so split product names stay intact');
+}
+if (Object.prototype.hasOwnProperty.call(locale.messages, 'Pro')) {
+  policyErrors.push('the protected theme fragment "Pro" must not have a standalone translation');
+}
+for (const state of ['OpenSent', 'OpenConfirm']) {
+  if (Object.prototype.hasOwnProperty.call(locale.messages, state)) {
+    policyErrors.push(`the BGP FSM state "${state}" must remain a protocol identifier`);
+  }
+}
+if (allowed.has('IPsec Peers') || locale.messages['IPsec Peers'] !== 'IPsec 对端') {
+  policyErrors.push('"IPsec Peers" must translate as a UI phrase, not be hidden by the protocol allowlist');
+}
+
+const vpnSource = fs.readFileSync(path.join(srcRoot, 'pages/vpn.ts'), 'utf8');
+if ((vpnSource.match(/<tr data-i18n-user-data>/g) || []).length < 2 ||
+    !/vpn-tile-name-text" data-i18n-user-data/.test(vpnSource) ||
+    !/vpn-tile-iface" data-i18n-user-data/.test(vpnSource) ||
+    !/vpn-tile-ip" data-i18n-user-data/.test(vpnSource)) {
+  policyErrors.push('VPN RouterOS/user values must be protected with data-i18n-user-data');
 }
 
 function add(value) {
@@ -86,6 +158,20 @@ function collect(node) {
   }
 }
 
+function containsNativeTranslation(node) {
+  let found = false;
+  const visit = (child) => {
+    if (found || !child) return;
+    if (ts.isCallExpression(child) && ts.isIdentifier(child.expression) && child.expression.text === 'tr') {
+      found = true;
+      return;
+    }
+    ts.forEachChild(child, visit);
+  };
+  visit(node);
+  return found;
+}
+
 walkFiles(srcRoot, '.ts', (file) => {
   const sourceText = fs.readFileSync(file, 'utf8');
   const source = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true);
@@ -97,10 +183,22 @@ walkFiles(srcRoot, '.ts', (file) => {
       if (name === 'insertAdjacentHTML') collect(node.arguments[1]);
       if (name === 'setAttribute' && ts.isStringLiteral(node.arguments[0]) &&
           ['placeholder', 'title', 'alt', 'aria-label', 'aria-description', 'aria-valuetext'].includes(node.arguments[0].text)) collect(node.arguments[1]);
-      if (['confirm', 'prompt', 'alert'].includes(name)) collect(node.arguments[0]);
+      if (['confirm', 'prompt', 'alert'].includes(name)) {
+        collect(node.arguments[0]);
+        if (!containsNativeTranslation(node.arguments[0])) {
+          const at = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+          policyErrors.push(`${path.relative(webRoot, file)}:${at} ${name}() text must pass through tr()`);
+        }
+      }
     }
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
-        ['confirm', 'prompt', 'alert'].includes(node.expression.text)) collect(node.arguments[0]);
+        ['confirm', 'prompt', 'alert'].includes(node.expression.text)) {
+      collect(node.arguments[0]);
+      if (!containsNativeTranslation(node.arguments[0])) {
+        const at = source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
+        policyErrors.push(`${path.relative(webRoot, file)}:${at} ${node.expression.text}() text must pass through tr()`);
+      }
+    }
     if (ts.isPropertyAssignment(node) && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name)) &&
         ['label', 'title', 'empty', 'description', 'placeholder'].includes(node.name.text)) collect(node.initializer);
     ts.forEachChild(node, visit);
