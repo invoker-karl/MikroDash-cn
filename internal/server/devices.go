@@ -196,6 +196,25 @@ func fillFromAlertPool(bg map[string]routers.Summary, snaps []alertpool.Snapshot
 		// zero value that rendered as a red "Offline" — the exact symptom the
 		// merge was added to remove.
 		if cur, have := bg[snap.RouterID]; have && cur.Known {
+			// ── ANSWERED IS NOT THE SAME AS COMPLETE ────────────────────────
+			//
+			// The overview pool reports `Known` the moment its dial returns, and
+			// its collectors have not necessarily ticked yet — so its summary
+			// can be an observation with a nil System. Skipping outright threw
+			// the primed reading away in exactly that window and put the blank
+			// card back, measured on a cold open: rx from the overview pool,
+			// CPU and uptime from nothing.
+			//
+			// Filling a nil field is still FILL, NOT OVERWRITE — the rule the
+			// header states. A field the overview pool has answered is never
+			// touched.
+			if cur.System == nil && snap.System != nil {
+				cur.System = snap.System
+			}
+			if cur.IfStatus == nil && snap.IfStatus != nil {
+				cur.IfStatus = snap.IfStatus
+			}
+			bg[snap.RouterID] = cur
 			continue
 		}
 		bg[snap.RouterID] = routers.Summary{
@@ -580,6 +599,18 @@ func (cn *conn) devicesFocus() {
 	}
 	cn.srv.syncPool()
 	cn.srv.syncAlertPool()
+	// ── BEFORE THE FIRST PAYLOAD, AND ONLY ON FOCUS ────────────────────────
+	//
+	// A router with alerting and reporting both off holds a bare socket and runs
+	// no collectors, so the alert pool can say it is UP and nothing more: the
+	// card drew a green badge over blank gauges until the overview pool finished
+	// dialling, about two seconds later. `PrimeStats` reads the gauges once on
+	// the socket that is already open, which is why this is here and not in the
+	// two-second tick — by the second frame the overview pool is answering, and
+	// re-reading would be a command channel spent on a question already asked.
+	if cn.srv.alertPool != nil {
+		cn.srv.alertPool.PrimeStats()
+	}
 	cn.sendRoutersStats()
 	cn.startDevicesTick()
 }

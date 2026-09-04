@@ -124,6 +124,13 @@ type poolSession struct {
 	// starts the same set the first connect did.
 	eff collection.Resolved
 
+	// primed is the one-shot system reading `PrimeStats` takes for a session
+	// that has no `system` collector, and it has its OWN lock rather than
+	// joining the collector pointers above: those are written once when the
+	// session is built and are therefore read unlocked, which this is not.
+	primedMu sync.Mutex
+	primed   *collect.SystemPayload
+
 	stop chan struct{}
 	// stopped guards `close(stop)`. See teardown: the select/default that was
 	// here could close twice under two concurrent callers.
@@ -343,6 +350,12 @@ func (p *Pool) Snapshots() []Snapshot {
 		// `Last()` does its own locking.
 		if s.system != nil {
 			snap.System = s.system.Last()
+		} else {
+			// NO COLLECTOR, BUT POSSIBLY A READING. A status-only session builds
+			// none, so without this the Devices page has nothing but a green
+			// badge to draw for it. See PrimeStats for who takes that reading
+			// and why it is taken on demand rather than polled.
+			snap.System = s.primedSystem()
 		}
 		if s.ifStatus != nil {
 			snap.IfStatus = s.ifStatus.Last()

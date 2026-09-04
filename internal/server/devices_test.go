@@ -841,6 +841,44 @@ func TestTheAlertPoolFillsOnlyWhatTheOverviewPoolLeftEmpty(t *testing.T) {
 	}
 }
 
+// ── ANSWERED IS NOT THE SAME AS COMPLETE ────────────────────────────────────
+//
+// The overview pool reports `Known` the moment its dial returns, and its
+// collectors have not necessarily produced anything yet. Skipping such a router
+// outright is how the primed system reading was thrown away on a cold open,
+// putting the blank card straight back: rx from the overview pool, and CPU,
+// memory and uptime from nothing.
+//
+// The rule stays FILL, NOT OVERWRITE — a field the overview pool has ALREADY
+// answered must survive, which is the other half asserted here.
+func TestTheAlertPoolFillsAGapInAnAnsweredSummary(t *testing.T) {
+	poolSys := &collect.SystemPayload{CPULoad: 11}
+	snapSys := &collect.SystemPayload{CPULoad: 22}
+	ifs := &collect.IfStatusPayload{}
+
+	bg := map[string]routers.Summary{
+		// ANSWERED, BUT EMPTY: dialled, nothing collected yet. This is the
+		// window a cold Devices page opens in.
+		"gap": {RouterID: "gap", Connected: true, Known: true},
+		// ANSWERED AND FULL: nothing here may move.
+		"full": {RouterID: "full", Connected: true, Known: true, System: poolSys},
+	}
+	fillFromAlertPool(bg, []alertpool.Snapshot{
+		{RouterID: "gap", Connected: true, System: snapSys, IfStatus: ifs},
+		{RouterID: "full", Connected: true, System: snapSys},
+	})
+
+	if got := bg["gap"]; got.System != snapSys || got.IfStatus != ifs {
+		t.Errorf("gap = %+v; the overview pool had dialled but collected "+
+			"nothing, so the alert pool's reading must fill the hole — "+
+			"otherwise the card shows a green badge over blank gauges", got)
+	}
+	if got := bg["full"]; got.System != poolSys {
+		t.Errorf("full.System = %+v, want the overview pool's %+v; filling a "+
+			"gap must never become overwriting an answer", got.System, poolSys)
+	}
+}
+
 // And the same thing end to end: a server whose ONLY source is the alert pool
 // still produces rows that say `known`, which is what the card reads.
 func TestAlertPoolOnlyCoverageStillMarksRowsKnown(t *testing.T) {
