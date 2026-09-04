@@ -21,6 +21,18 @@ const policy = JSON.parse(fs.readFileSync(path.join(webRoot, 'i18n/allowlist.jso
 const allowed = new Set(Object.values(policy.exact).flat());
 const allowedPatterns = policy.patterns.map((item) => new RegExp(item.regex));
 const candidates = new Set();
+const policyErrors = [];
+
+// The wordmark is deliberately split into two styled text nodes. Translating
+// either half turns the product name into ordinary prose (for example,
+// "Mikro短划线"), so protect both the markup and the locale catalogue.
+const shellHTML = fs.readFileSync(path.join(srcRoot, 'ui/shell.html'), 'utf8');
+if (!/<h1\s+id="topbarLogo"\s+data-i18n-skip>Mikro<span>Dash<\/span><\/h1>/.test(shellHTML)) {
+  policyErrors.push('the MikroDash top-bar wordmark must be marked data-i18n-skip');
+}
+if (Object.prototype.hasOwnProperty.call(locale.messages, 'Dash') && locale.messages.Dash !== 'Dash') {
+  policyErrors.push(`the protected brand fragment "Dash" must not translate to "${locale.messages.Dash}"`);
+}
 
 function add(value) {
   const text = normalise(value);
@@ -97,9 +109,10 @@ walkFiles(srcRoot, '.ts', (file) => {
 });
 
 const missing = [...candidates].filter((text) => !Object.prototype.hasOwnProperty.call(locale.messages, text)).sort();
-if (missing.length) {
-  console.error(`i18n audit: ${missing.length} English UI strings are missing from zh-CN.js:`);
+if (missing.length || policyErrors.length) {
+  if (missing.length) console.error(`i18n audit: ${missing.length} English UI strings are missing from zh-CN.js:`);
   for (const text of missing) console.error('  - ' + text);
+  for (const error of policyErrors) console.error('i18n policy: ' + error);
   process.exitCode = 1;
 } else {
   console.log(`i18n audit passed: ${candidates.size} UI strings have Chinese translations.`);

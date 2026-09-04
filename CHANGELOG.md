@@ -2,6 +2,14 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.8.16-cn.3] - 品牌名不再被翻译
+
+### Fixed
+
+- 修复顶部品牌名 `MikroDash` 被逐节点翻译成“`Mikro短划线`”的问题。
+- 品牌区域现在永久跳过运行时翻译，语言包也不再包含错误的 `Dash` 单词级映射。
+- 汉化审计新增品牌保护检查，后续升级若重新引入该问题会直接阻止合并。
+
 ## [0.8.16-cn.2] - 中文版发布与 Docker 发布目标修复
 
 ### Changed
