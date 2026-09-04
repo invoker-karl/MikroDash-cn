@@ -23,6 +23,7 @@
  */
 
 import { el } from '../dom';
+import { tr } from '../i18n';
 import { POLL_SLIDERS, POLL_PROFILES, POLL_PROFILE_KEY, type PollSlider } from '../gen/poll-tables';
 
 export type PollData = Record<string, unknown>;
@@ -329,7 +330,7 @@ export function initPollAndBanner(reloadSettings: () => void): void {
   const resetBtn = el<HTMLButtonElement>('settingsResetBtn');
   if (resetBtn) {
     resetBtn.addEventListener('click', () => {
-      if (!confirm('Reset all settings to defaults? This cannot be undone.')) return;
+      if (!confirm(tr('Reset all settings to defaults? This cannot be undone.'))) return;
       fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

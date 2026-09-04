@@ -25,6 +25,7 @@
  */
 
 import { el, esc } from '../dom';
+import { tr } from '../i18n';
 
 export interface RouterRow {
   id: string;
@@ -258,21 +259,21 @@ export function initSettingsRoutersTable(d: RouterTableDeps): void {
         body: JSON.stringify({ disabled: !rr.disabled }),
       })
         .then((res) => res.json())
-        .then((j) => { if (!j.ok) alert(j.error || 'Toggle failed'); })
-        .catch(() => alert('Network error'));
+        .then((j) => { if (!j.ok) alert(tr(j.error || 'Toggle failed')); })
+        .catch(() => alert(tr('Network error')));
       return;
     }
 
     if (action === 'delete') {
       const label = btn.dataset.rtrLabel || id;
-      if (!confirm(deleteRouterPrompt(label))) return;
+      if (!confirm(tr(deleteRouterPrompt(label)))) return;
       fetch('/api/routers/' + encodeURIComponent(id), {
         method: 'DELETE',
         credentials: 'same-origin',
       })
         .then((r) => r.json())
-        .then((r) => { if (!r.ok) alert('Delete failed: ' + (r.error || 'Unknown error')); })
-        .catch((e) => alert('Request failed: ' + e));
+        .then((r) => { if (!r.ok) alert(tr('Delete failed:') + ' ' + tr(r.error || 'Unknown error')); })
+        .catch((e) => alert(tr('Request failed:') + ' ' + e));
     }
   });
 

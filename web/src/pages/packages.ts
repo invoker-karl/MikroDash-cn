@@ -14,6 +14,7 @@
 
 import { esc, el, renderSortHeader, sortMul, debounce, fmtBytes,
          type SortCol, type SortState } from '../dom';
+import { tr } from '../i18n';
 import type { Socket } from '../socket';
 
 export interface Package {
@@ -292,8 +293,8 @@ export function initPackagesPage(socket: Socket, isVisible: (page: string) => bo
       // router, and the name is what makes "the wrong router" a hard mistake to
       // make rather than an easy one.
       const typed = window.prompt(
-        'This applies all scheduled package changes and REBOOTS the router.\n\n' +
-        'Type the router name to confirm: ' + name);
+        tr('This applies all scheduled package changes and REBOOTS the router.') + '\n\n' +
+        tr('Type the router name to confirm:') + ' ' + name);
       if (typed === null) return;
       socket.emit('packages:apply', { confirm: typed });
     });

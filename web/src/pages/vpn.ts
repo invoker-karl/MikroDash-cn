@@ -80,7 +80,8 @@ function hsBadge(uptime: string, connected: boolean): string {
   // The live code picks a dot per class and every branch is the same glyph.
   // Written as the one glyph rather than the three-way choice: the rendered
   // output is what this page is judged on, and it is identical.
-  return '<span class="vpn-hs-badge ' + cls + '">● ' + esc(uptime) + '</span>';
+  return '<span class="vpn-hs-badge ' + cls + '">● <span data-i18n-user-data>' +
+    esc(uptime) + '</span></span>';
 }
 
 export function initVpnPage(socket: Socket, isVisible: (page: string) => boolean): void {
@@ -124,7 +125,7 @@ export function initVpnPage(socket: Socket, isVisible: (page: string) => boolean
     if (pppBody && !ppp.length) pppBody.innerHTML = '';
     if (pppBody && ppp.length) {
       pppBody.innerHTML = ppp.map((s) =>
-        '<tr>' +
+        '<tr data-i18n-user-data>' +
         '<td style="font-weight:600">' + esc(s.name || '—') + '</td>' +
         '<td><span class="vpn-proto-pill">' + esc(s.service || '—') + '</span></td>' +
         '<td style="font-family:var(--font-mono);font-size:.72rem">' + esc(s.address || '—') + '</td>' +
@@ -144,7 +145,7 @@ export function initVpnPage(socket: Socket, isVisible: (page: string) => boolean
     if (ipBody && !ipsec.length) ipBody.innerHTML = '';
     if (ipBody && ipsec.length) {
       ipBody.innerHTML = ipsec.map((p) =>
-        '<tr>' +
+        '<tr data-i18n-user-data>' +
         '<td style="font-family:var(--font-mono);font-size:.74rem;font-weight:600">' + esc(p.name || '—') + '</td>' +
         '<td><span class="vpn-proto-pill">' + esc(p.state || '—') + '</span></td>' +
         '<td style="font-size:.72rem;color:var(--text-muted)">' + esc(p.side || '—') + '</td>' +
@@ -182,9 +183,9 @@ export function initVpnPage(socket: Socket, isVisible: (page: string) => boolean
       // data-id, so the two work the same. Identity is the PUBLIC KEY, which is
       // what the write round-trips to prove the row has not moved underneath.
       return '<div class="' + tileCls + '"' + resRow(t.id, t.publicKey) + '>' +
-        '<div class="vpn-tile-name"><span class="iface-dot ' + dotCls + '"></span><span class="vpn-tile-name-text">' + esc(t.name || t.interface || '—') + '</span></div>' +
-        (t.interface ? '<div class="vpn-tile-iface">' + esc(t.interface) + (t.allowedIp ? ' · ' + esc(t.allowedIp) : '') + '</div>' : '') +
-        (t.endpoint ? '<div class="vpn-tile-ip">' + esc(t.endpoint) + '</div>' : '') +
+        '<div class="vpn-tile-name"><span class="iface-dot ' + dotCls + '"></span><span class="vpn-tile-name-text" data-i18n-user-data>' + esc(t.name || t.interface || '—') + '</span></div>' +
+        (t.interface ? '<div class="vpn-tile-iface" data-i18n-user-data>' + esc(t.interface) + (t.allowedIp ? ' · ' + esc(t.allowedIp) : '') + '</div>' : '') +
+        (t.endpoint ? '<div class="vpn-tile-ip" data-i18n-user-data>' + esc(t.endpoint) + '</div>' : '') +
         '<div class="vpn-tile-hs">' + hsBadge(t.lastHandshake, isConn) + '</div>' +
         ((rxRateStr || txRateStr)
           ? '<div class="vpn-tile-traffic">' + rxRateStr + txRateStr + '</div>'

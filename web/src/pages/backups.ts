@@ -22,6 +22,7 @@
  */
 
 import { esc, el, fmtBytes } from '../dom';
+import { tr } from '../i18n';
 import type { Socket } from '../socket';
 
 interface BkSettings {
@@ -334,8 +335,9 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
       : 'Delete these ' + ids.length + ' restore points?';
     // BOTH HALVES GO — the files and the row listing them — so say so, and say
     // where the record does survive rather than implying nothing is kept.
-    if (!window.confirm(msg + '\n\nThe stored files and their history rows are removed,\n' +
-      'and cannot be recovered. The Audit page keeps the record.')) return;
+    if (!window.confirm(tr(msg) + '\n\n' +
+      tr('The stored files and their history rows are removed,') + '\n' +
+      tr('and cannot be recovered. The Audit page keeps the record.'))) return;
     socket.emit('backups:delete', { ids });
     picked.clear();
     syncBulk();
@@ -363,13 +365,11 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
       'This REPLACES the entire configuration and reboots the router.',
       'Everything configured since this backup is lost.',
       '',
-      'The API user MikroDash connects as is part of what gets replaced — if',
-      'that user did not exist when this backup was taken, MikroDash will lose',
-      'access to this router.',
+      'The API user MikroDash connects as is part of what gets replaced — if that user did not exist when this backup was taken, MikroDash will lose access to this router.',
     ];
     if (versionNote) lines.push('', versionNote);
     lines.push('', 'Type the router name to confirm:');
-    const answer = window.prompt(lines.join('\n'), '');
+    const answer = window.prompt(lines.map((line) => line ? tr(line) : line).join('\n'), '');
     if (answer === null) return;
     socket.emit('backups:restore', { id, confirm: answer, acceptVersion: !!acceptVersion });
     pendingRestore = id;

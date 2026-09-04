@@ -47,6 +47,7 @@
 // opened, which is the live app's behaviour.
 
 import { esc, el, fmtBytes } from '../dom';
+import { tr } from '../i18n';
 
 export interface ScheduleRun {
   ran_at: number;
@@ -211,7 +212,7 @@ export function wireScheduleActions(): void {
       // cannot load without a router — and pinned as a difference in
       // tools/sched-remove-check.js rather than quietly diverging.
       if (!row || !router?.value) return;
-      if (!window.confirm('Remove the scheduled report "' + row.name + '"?')) return;
+      if (!window.confirm(tr('Remove the scheduled report "' + row.name + '"?'))) return;
       void fetch(API + '/' + encodeURIComponent(id) + '?routerId=' +
         encodeURIComponent(router.value), { method: 'DELETE', credentials: 'same-origin' })
         // RELOADS ONLY ON SUCCESS, which is the live app's shape. An earlier

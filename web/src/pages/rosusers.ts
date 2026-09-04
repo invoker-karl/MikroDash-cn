@@ -31,6 +31,7 @@
 // pages, and this follows. Reproduce, report, follow — three rounds of it.
 
 import { esc, el, renderSortHeader, sortMul, type SortCol, type SortState } from '../dom';
+import { tr } from '../i18n';
 import type { Socket } from '../socket';
 
 export interface RosUser {
@@ -474,7 +475,7 @@ export function initRosUsersPage(socket: Socket, isVisible: (page: string) => bo
         '"\u2019s session?\n\nThey will be disconnected from the router immediately.',
     };
     if (!prompts[act]) return;
-    if (!window.confirm(prompts[act])) return;
+    if (!window.confirm(tr(prompts[act]))) return;
     busy = busyKey(act, id);
     render();
     const ev = act === 'user-remove' ? 'rosuser:remove'

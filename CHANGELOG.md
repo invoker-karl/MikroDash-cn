@@ -2,6 +2,15 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- 修复主题名称、BGP 状态和 VPN 动态数据可能被中文翻译器误改的问题。
+- 修正 IPsec 对端表头、区域设置、BGP 更新方向等中文文案。
+- 补全确认框、输入框和提示框的运行时翻译，同时保留路由器、用户、站点等自定义名称。
+- 汉化审计新增重复词条、原生弹窗和动态数据保护检查，防止同类问题再次进入发布版本。
+
 ## [0.8.16-cn.3] - 品牌名不再被翻译
 
 ### Fixed

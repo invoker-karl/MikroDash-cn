@@ -19,6 +19,7 @@
  */
 
 import { el } from '../dom';
+import { tr } from '../i18n';
 import { mountCityPicker, type City, type CityPickerState } from './city-picker';
 import {
   siteTableHtml, siteRouterCounts, siteMemberRowsHtml, siteSavePlan, siteDeletePrompt,
@@ -203,7 +204,7 @@ async function save(): Promise<void> {
 }
 
 async function remove(id: string, name: string, count: number): Promise<void> {
-  if (!window.confirm(siteDeletePrompt(name, count))) return;
+  if (!window.confirm(tr(siteDeletePrompt(name, count)))) return;
   try {
     await fetch('/api/sites/' + encodeURIComponent(id), {
       method: 'DELETE', credentials: 'same-origin',

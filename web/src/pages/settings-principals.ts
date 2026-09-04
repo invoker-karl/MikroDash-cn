@@ -27,6 +27,7 @@
  */
 
 import { el, esc } from '../dom';
+import { tr } from '../i18n';
 import {
   userRowHtml, groupTableHtml, roleTableHtml, sizePrincipalsCard, mountPrincipalTabs,
   applyAuthModeVisibility, rolePageRowHtml, grantEditorHtml,
@@ -492,7 +493,7 @@ function wireForms(): void {
     const user = usersCache.find((u) => u.id === id);
     if (!user) return;
     if (btn.getAttribute('data-action') === 'edit') { showUserForm(user); return; }
-    if (!confirm(userDeletePrompt(user.username))) return;
+    if (!confirm(tr(userDeletePrompt(user.username)))) return;
     void remove('/api/users/' + encodeURIComponent(id), loadUsers);
   });
 
@@ -504,7 +505,7 @@ function wireForms(): void {
     const group = groupsCache.find((g) => g.id === id);
     if (!group) return;
     if (btn.getAttribute('data-group-action') === 'edit') { showGroupForm(group); return; }
-    if (!confirm(groupDeletePrompt(group.name))) return;
+    if (!confirm(tr(groupDeletePrompt(group.name)))) return;
     void remove('/api/groups/' + encodeURIComponent(id), loadGroups);
   });
 
@@ -520,7 +521,7 @@ function wireForms(): void {
     if (!del) return;
     const id = del.getAttribute('data-role-del') || '';
     const role = roles.find((r) => r.id === id);
-    if (!confirm(roleDeletePrompt(role ? role.name : id))) return;
+    if (!confirm(tr(roleDeletePrompt(role ? role.name : id)))) return;
     void remove('/api/roles/' + encodeURIComponent(id), loadRoles);
   });
 }
@@ -541,9 +542,9 @@ async function remove(url: string, reload: () => Promise<void>): Promise<void> {
   try {
     const r = await fetch(url, { method: 'DELETE', credentials: 'same-origin' });
     const j = await r.json().catch(() => null);
-    if (!j || !j.ok) alert((j && j.error) || 'Delete failed');
+    if (!j || !j.ok) alert(tr((j && j.error) || 'Delete failed'));
   } catch {
-    alert('Request failed');
+    alert(tr('Request failed'));
   }
   await reload();
 }
