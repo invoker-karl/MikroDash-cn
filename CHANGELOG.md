@@ -2,6 +2,20 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.8.16-cn.2] - 中文版发布与 Docker 发布目标修复
+
+### Changed
+
+- 同步上游 MikroDash 0.8.16，并完成新版界面的简体中文本地化。
+- 保留首页流量最高设备的数据兼容修复：Kid Control 无数据时从活动连接聚合设备流量。
+- Docker 镜像恢复发布到 `ghcr.io/invoker-karl/mikrodash-cn`，不再误用上游镜像仓库。
+- 中文版标签仅接受 `vX.Y.Z-cn.N` 格式；`latest` 仅在正式中文版标签发布成功后更新。
+
+### Fixed
+
+- 修复升级后首页设备列表可能为空、流量图无数据以及部分中文文案不准确的问题。
+- 修复 `v0.8.16-cn.1` 因目标仓库指向上游而没有权限推送的问题。
+
 ## [0.8.16] - A new install can connect its first router
 
 ### Fixed

@@ -34,7 +34,7 @@ the web UI and stored in the Docker volume. Earlier versions of this document se
 ```yaml
 services:
   mikrodash:
-    image: ghcr.io/secops-7/mikrodash:latest
+    image: ghcr.io/invoker-karl/mikrodash-cn:latest
     restart: unless-stopped
     ports:
       - "3081:3081"
