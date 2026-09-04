@@ -1,0 +1,213 @@
+package verify
+
+import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"testing"
+
+	"mikrodash/internal/pages"
+)
+
+// pagesNotMounted: extracted page markup deliberately mounted nowhere.
+var pagesNotMounted = map[string]string{}
+
+// TestPagesAreFullyMounted: a page's markup, the build's page list and the
+// router's PORTED set must agree.
+//
+// HALF-MOUNTED IS THE INTERESTING STATE. A page composed into index.html but
+// absent from PORTED renders an empty shell; one in PORTED but not composed
+// navigates to markup that is not there. Both look like "the page is broken" at
+// runtime and neither is visible in either list on its own.
+func TestPagesAreFullyMounted(t *testing.T) {
+	root := repoRoot(t)
+
+	// ── ONE LIST NOW, SO THE QUESTION CHANGED ───────────────────────────────
+	//
+	// This used to diff `cmd/webbuild`'s PAGES literal against `main.ts`'s
+	// PORTED literal, because they were two hand-written copies that could
+	// disagree. Both now read `internal/pages`, so that comparison would be
+	// asking whether a list equals itself.
+	//
+	// What is still worth asking is whether the list matches the MARKUP: a key
+	// with no `page-<key>.html` composes an empty shell, and a file with no key
+	// is markup nothing can reach. Neither shows up as an error at runtime --
+	// the page simply renders blank.
+	keys := map[string]bool{}
+	for _, k := range pages.Keys() {
+		keys[k] = true
+	}
+	if len(keys) < 20 {
+		t.Fatalf("internal/pages lists only %d pages — the list is truncated", len(keys))
+	}
+
+	ents, err := os.ReadDir(filepath.Join(root, "web", "src", "ui"))
+	if err != nil {
+		t.Fatalf("reading web/src/ui: %v", err)
+	}
+	pageFile := regexp.MustCompile(`^page-([a-z][a-z0-9-]*)\.html$`)
+	markup := map[string]bool{}
+	for _, e := range ents {
+		if m := pageFile.FindStringSubmatch(e.Name()); m != nil {
+			markup[m[1]] = true
+		}
+	}
+
+	var missingMarkup, orphanMarkup []string
+	for k := range keys {
+		if !markup[k] {
+			missingMarkup = append(missingMarkup, k)
+		}
+	}
+	for k := range markup {
+		if !keys[k] {
+			orphanMarkup = append(orphanMarkup, k)
+		}
+	}
+	sort.Strings(missingMarkup)
+	sort.Strings(orphanMarkup)
+
+	for _, k := range missingMarkup {
+		t.Errorf("internal/pages lists %q but there is no web/src/ui/page-%s.html — the page "+
+			"composes an empty shell", k, k)
+	}
+	for _, k := range orphanMarkup {
+		t.Errorf("web/src/ui/page-%s.html exists but %q is not in internal/pages — the markup is "+
+			"unreachable: no URL, no nav entry, never composed", k, k)
+	}
+	t.Logf("%d pages, each with its markup", len(keys))
+}
+
+// TestEveryLookupHasAProducer: an id the port looks up is an id something in the
+// port creates.
+//
+// A lookup that resolves to nothing returns null and the code around it quietly
+// does less than it should. The producer may be extracted markup, a template
+// literal in TypeScript, or the login shell.
+//
+// ── IT NEEDED NO RECORDING, ONLY A PATH ─────────────────────────────────────
+//
+// The JavaScript original took its "scripts the served page loads" from the
+// deleted reference. Every one of those is committed HERE now -- `preflight.ts`
+// builds to `web/dist/preflight.js` -- so this reads the local tree and the
+// recording falls away entirely.
+func TestEveryLookupHasAProducer(t *testing.T) {
+	root := repoRoot(t)
+
+	produced := map[string]bool{}
+	for _, body := range readFiles(t, root, "web/src/ui/", func(r string) bool { return hasExt(r, ".html") }) {
+		for _, m := range regexp.MustCompile(`id="([A-Za-z0-9_-]+)"`).FindAllStringSubmatch(body, -1) {
+			produced[m[1]] = true
+		}
+	}
+	tsFiles := readFiles(t, root, "web/src/", func(r string) bool { return hasExt(r, ".ts") })
+	ts := joined(tsFiles)
+	// Ids the TypeScript itself writes into markup it builds.
+	for _, m := range regexp.MustCompile(`id=\\?["']([A-Za-z][\w-]*)\\?["']`).FindAllStringSubmatch(ts, -1) {
+		produced[m[1]] = true
+	}
+	// AND IDS ASSIGNED TO AN ELEMENT, which is markup built without markup:
+	// `st.id = 'navBoot'` in preflight, `node.id = 'sysMetaTemp'` created lazily
+	// on first use. Missing these made two real producers look absent.
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`\.id\s*=\s*["']([A-Za-z][\w-]*)["']`),
+		regexp.MustCompile(`setAttribute\(\s*['"]id['"]\s*,\s*['"]([A-Za-z][\w-]*)['"]`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(ts, -1) {
+			produced[m[1]] = true
+		}
+	}
+	if len(produced) < 100 {
+		t.Fatalf("only %d produced ids found — the scan broke", len(produced))
+	}
+
+	lookedUp := map[string]bool{}
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`\bel(?:<[^>]*>)?\('([A-Za-z][\w-]*)'\)`),
+		regexp.MustCompile(`getElementById\('([A-Za-z][\w-]*)'\)`),
+		regexp.MustCompile(`\bbyId\('([A-Za-z][\w-]*)'\)`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(ts, -1) {
+			lookedUp[m[1]] = true
+		}
+	}
+	if len(lookedUp) < 50 {
+		t.Fatalf("only %d lookups found — the scan broke", len(lookedUp))
+	}
+
+	// A CONSTRUCTED id cannot be matched literally: `el('s_' + cfg.key)` is a
+	// lookup whose name does not exist as a token anywhere.
+	constructed := regexp.MustCompile(`\bel(?:<[^>]*>)?\('[A-Za-z][\w-]*'\s*\+`).MatchString(ts)
+
+	var orphans []string
+	for id := range lookedUp {
+		if !produced[id] {
+			orphans = append(orphans, id)
+		}
+	}
+	sort.Strings(orphans)
+
+	have := map[string]bool{}
+	for _, id := range orphans {
+		have[id] = true
+		if _, ok := lookupsWithoutProducer[id]; !ok {
+			t.Errorf("the port looks up #%s and nothing in the port produces it — the lookup "+
+				"resolves to null and whatever depends on it silently does nothing", id)
+		}
+	}
+	for id := range lookupsWithoutProducer {
+		if !have[id] {
+			t.Errorf("#%s is recorded as having no producer, but something produces it now — "+
+				"delete the entry", id)
+		}
+	}
+	t.Logf("%d lookups across the port, every one produced (%d produced ids, constructed "+
+		"lookups present: %v)", len(lookedUp), len(produced), constructed)
+}
+
+// lookupsWithoutProducer: ids the port looks up that nothing here creates.
+//
+// ── THESE WERE HIDDEN BY THE RECORDING ──────────────────────────────────────
+//
+// The JavaScript original also counted ids produced by the DELETED app's own
+// loaded scripts, so both of these resolved and it reported a clean run. They do
+// not resolve here, and that is the truth: the element is simply not in this
+// port's markup.
+//
+// Both lookups are GUARDED -- `const sub = el('connMapSub'); if (sub) ...` -- so
+// nothing crashes and nothing misbehaves; the branch is dead. They are recorded
+// rather than deleted because removing the code is a behaviour decision, not a
+// verification one, and recording them is what makes that decision visible
+// instead of leaving two dead lookups nobody can see.
+var lookupsWithoutProducer = map[string]string{
+	"connMapSub": "the connections map subtitle. Guarded by `if (sub)`; the element is not in " +
+		"this port's markup, so the branch never runs.",
+	"wlBand6": "the 6 GHz band slot on the wireless page. Guarded the same way.",
+}
+
+// stringSetFrom pulls the quoted entries out of a declaration, failing when the
+// declaration's shape changes rather than returning an empty set that would make
+// every comparison below pass vacuously.
+func stringSetFrom(t *testing.T, src, pattern, what string) map[string]bool {
+	t.Helper()
+	m := regexp.MustCompile(pattern).FindStringSubmatch(src)
+	if m == nil {
+		t.Fatalf("could not read %s — the declaration shape changed", what)
+	}
+	out := map[string]bool{}
+	for _, q := range regexp.MustCompile(`['"]([a-z]+)['"]`).FindAllStringSubmatch(m[1], -1) {
+		out[q[1]] = true
+	}
+	if len(out) < 15 {
+		t.Fatalf("%s holds only %d entries; the match broke", what, len(out))
+	}
+	return out
+}
+
+func pick(b bool, yes, no string) string {
+	if b {
+		return yes
+	}
+	return no
+}

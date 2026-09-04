@@ -2,7 +2,7 @@ name: mikrodash
 
 services:
   mikrodash:
-    image: ghcr.io/invoker-karl/mikrodash-cn:latest
+    image: ghcr.io/secops-7/mikrodash:latest
     container_name: mikrodash
     restart: unless-stopped
     env_file:

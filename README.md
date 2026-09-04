@@ -1,34 +1,27 @@
-# MikroDash 中文版
-
-This fork is the reviewed Simplified Chinese edition of MikroDash. Release
-`0.7.38-cn.1` tracks upstream `v0.7.38`; English remains available from the
-language selector. Chinese images use
-`ghcr.io/invoker-karl/mikrodash-cn:<version>` on `linux/amd64` and
-`linux/arm64`. Node 24 no longer supports the former `linux/arm/v7` target.
-
-Upstream updates arrive only through a review PR. Never hard-reset this fork's
-`main` to upstream because that discards the Chinese commits. See
-[`docs/i18n.md`](docs/i18n.md) for translation, sync, and release policy.
+# MikroDash
 ### The Ultimate MikroTik RouterOS Dashboard.
 
-> Real-time MikroTik RouterOS v7 dashboard — streaming binary API, Socket.IO, Docker-ready.
+> Real-time MikroTik RouterOS v7 dashboard — streaming binary API, WebSocket, a single static binary.
 
-MikroDash connects directly to the RouterOS API over a persistent binary TCP connection, streaming live data to the browser via Socket.IO. No page refreshes. No agents. Just plug in your router credentials and go.
+MikroDash connects directly to the RouterOS API over a persistent binary TCP connection, streaming live data to the browser over a WebSocket. No page refreshes. No agents. Just plug in your router credentials and go.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
-> ### 💬 Your input wanted: should MikroDash be rewritten in Go + TypeScript?
+> ### MikroDash is now Go + TypeScript
 >
-> A Go + TypeScript implementation is being developed alongside this one. **No decision has been
-> made**, and nothing user-visible would change if it lands. The case for it is a single static
-> binary small enough to run in a container on the router itself ([#44](https://github.com/SecOps-7/MikroDash/issues/44)),
-> ARMv7 support that Node 24 took away, and type checking over a 16,000 line frontend.
+> The rewrite proposed in [#114](https://github.com/SecOps-7/MikroDash/issues/114) landed on
+> **2026-08-30**. The Node implementation it replaced is preserved in the git history.
 >
-> Objections are as welcome as support, including "fix what I already use instead".
+> **Nothing user-visible changed, by design.** The frontend reuses the original stylesheet, class
+> names, element ids and DOM shape verbatim — only the logic producing the DOM was rewritten. That
+> was the acceptance criterion throughout, checked by gates that drive both implementations from one
+> payload and compare the rendered HTML.
 >
-> **[Read the reasoning and weigh in on #114](https://github.com/SecOps-7/MikroDash/issues/114)**
+> What did change: a single static binary in a **180 MB image instead of 775 MB**, no Node runtime,
+> ARMv7 support back, and type checking over the frontend. The CHANGELOG records how it was
+> done and what it cost.
 
 ---
 
@@ -122,7 +115,7 @@ MikroDash connects directly to the RouterOS API over a persistent binary TCP con
 | Routing | Route count summary by protocol with doughnut chart (total displayed in chart centre) and a BGP session summary, both above the tabs since they describe the page rather than one protocol. Tabbed tables, opening on **Routes**: static and dynamic routes (event-driven via `/ip/route/listen`), and **BGP** — peer table with state badges, prefix trend sparklines, and session flap detection (event-driven via `/routing/bgp/session/listen`) |
 | Logs | Live router log stream with historical log import on connect, severity filter and text search |
 | Queues | Simple queues and queue trees on one tabbed card, in the router's own order — simple queues are first-match-wins, so position changes behaviour and the table never sorts that away. Limits, priority, live rates with sparklines, bytes shaped and drop counts; queues created by Kid Control or a DHCP lease are marked and left alone. With write access: create, edit, enable, disable, reorder, reset counters and remove. A queue that covers MikroDash's own address at a throttling limit prompts before it is written. A FastTrack banner appears when one is active and a queue is affected, because FastTracked connections bypass simple queues entirely — the usual reason a queue looks configured and does nothing |
-| Router Users | RouterOS's own accounts, not MikroDash's: users, groups with the full 17-permission matrix, and the sessions logged in right now. With write access, create, edit, enable, disable and remove users and groups, and end a session. The account MikroDash connects with, and its group, are structurally protected — they cannot be edited, moved, renamed or disconnected from this page, because that is the one change that could lock the dashboard out of the router with no way back |
+| Users | RouterOS's own accounts, not MikroDash's: users, groups with the full 17-permission matrix, and the sessions logged in right now. With write access, create, edit, enable, disable and remove users and groups, and end a session. The account MikroDash connects with, and its group, are structurally protected — they cannot be edited, moved, renamed or disconnected from this page, because that is the one change that could lock the dashboard out of the router with no way back |
 | Audit | Every write action, in one searchable trail: who did it, from where, what changed and whether it was allowed. Covers MikroDash's own configuration (routers, users, roles, grants, sites, settings, layouts) and every write reaching a router. Refusals are recorded as well as successes, so an attempt that was denied leaves a trace. Filterable by actor, action, router, outcome and date, with CSV export. Credential values are never stored — the field name and the fact it changed are, which is the useful part |
 | Packages | The package inventory — installed, disabled, and the extras MikroTik offers but that are not on the router — with versions, sizes and build dates, plus a firmware panel (current, upgrade, minimum) and the RouterOS update channel and status. With write access on the page it can also **schedule** changes: install, enable, disable or uninstall. RouterOS does not act on these immediately, it records them and applies them on the next reboot, so the page leads with a pending-changes banner, offers Undo on every scheduled row, and keeps "Apply changes & reboot" as a separate action that requires the router's name typed back. Account credentials and configuration are never touched |
 | Reports | Historical data viewer with configurable date range and aggregation. Six tabs: **Ping** (RTT chart + sortable table), **Traffic** (per-interface RX/TX chart + table), **Bandwidth** (usage chart + table), **Alerts** (alert event history), **Connectivity** (router up/down event history). CSV and PDF export on every tab, plus **Scheduled** — email a report daily, weekly or monthly to a list of addresses that need no MikroDash account. Periods are real calendar periods in your timezone, so a monthly report covers a month rather than a rolling thirty days; recipients go in Bcc so they cannot see each other. Reading the list needs read on Reports; creating a schedule needs **write**, because it mails router history to third parties indefinitely. Needs SMTP configured |
@@ -174,21 +167,22 @@ If you need remote access, enable `modern` auth **and** place MikroDash behind a
 Pull and run the pre-built image directly — no need to clone the repo or create a `.env` file:
 
 ```bash
-docker pull ghcr.io/invoker-karl/mikrodash-cn:latest
+docker pull ghcr.io/secops-7/mikrodash:latest
 ```
 
-Images are published by GitHub Actions on Chinese version tags only, so `latest` always tracks the most recent verified release rather than unreleased work on `main`. Promotion is serialized and rejects an older tag whenever a newer Chinese release tag exists, so overlapping builds cannot move `latest` backwards. Pull requests build and smoke-test the production image on `linux/amd64`; each tagged release builds and starts both `linux/amd64` and `linux/arm64` before promotion. Each release is a multi-arch manifest covering those two platforms. Docker will automatically pull the correct layer for your platform — this includes Raspberry Pi 4/5, MikroTik's own R5S/RB5009 companion boards, and Apple M-series machines running Linux containers.
+Images are published by GitHub Actions on version tags only, so `latest` always tracks the most
+recent release rather than unreleased work on `main`. Each release is a multi-arch manifest covering
+`linux/amd64`, `linux/arm64` and `linux/arm/v7`.
 
-> **ARMv7 (32-bit ARM) is no longer built, as of 0.6.0.** MikroDash moved to a Node 24 base image, and Node 24 dropped 32-bit ARM upstream, so `node:24-alpine` publishes no `linux/arm/v7` variant.
->
-> If you run MikroDash on ARMv7 hardware — a RouterOS container on a 32-bit device such as the hEX S (2025), or an older Raspberry Pi — pin to `ghcr.io/secops-7/mikrodash:0.5.54`, the last release built for it. **If you are already pinned to `:0.5` you are fine and need do nothing**, since 0.6.0 does not match that tag. Do not stay on `:latest`: it now resolves to a manifest with no arm/v7 entry, so your pull will fail rather than degrade gracefully.
->
-> 0.5.54 will not receive further updates, including security fixes. Whether a separate ARMv7 build is worth maintaining depends on how many people are actually on one, so please comment on [#44](https://github.com/SecOps-7/MikroDash/issues/44) if this affects you.
+> **ARMv7 is supported again.** It was dropped at 0.6.0 because Node 24 published no
+> 32-bit ARM build. Go has no such constraint — it cross-compiles to armv7 like any other target — so
+> the hEX S (2025), older Raspberry Pis and other 32-bit ARM hardware are back on `:latest`. If you
+> pinned to `0.5.54` to keep ARMv7, you can unpin.
 
 To pin to a specific release:
 
 ```bash
-docker pull ghcr.io/invoker-karl/mikrodash-cn:0.7.38-cn.1
+docker pull ghcr.io/secops-7/mikrodash:0.8.16
 ```
 
 Run with Docker Compose — create a `docker-compose.yml`:
@@ -196,7 +190,7 @@ Run with Docker Compose — create a `docker-compose.yml`:
 ```yaml
 services:
   mikrodash:
-    image: ghcr.io/invoker-karl/mikrodash-cn:latest
+    image: ghcr.io/secops-7/mikrodash:latest
     restart: unless-stopped
     ports:
       - "3081:3081"
@@ -211,28 +205,39 @@ volumes:
 docker compose up -d
 ```
 
-Open `http://localhost:3081` — the first-run setup wizard will guide you through adding your router. No `.env` file is required.
+Open `http://localhost:3081` — the first-run setup wizard will guide you through adding your router.
+No `.env` file is required.
 
 ### Option 2 — Build from source
 
 ```bash
-git clone https://github.com/invoker-karl/MikroDash-cn.git
-cd MikroDash-cn
-docker compose up -d
+git clone https://github.com/SecOps-7/MikroDash.git
+cd MikroDash
+docker build -t mikrodash:local .
+docker run -d --name mikrodash --restart unless-stopped \
+  -p 3081:3081 -v mikrodash-data:/data mikrodash:local
 ```
+
+The `Dockerfile` is a multi-stage build needing nothing on the host but Docker: it builds the
+TypeScript frontend with esbuild through its Go API (`cmd/webbuild`, so no Node is
+involved), compiles the Go binary with
+`CGO_ENABLED=0`, and copies both into an Alpine runtime. The result is ~180 MB with `/data` as its
+only mount. There is no patch step and no native module to compile — the SQLite driver is pure Go,
+which is what lets the binary be static.
 
 To build a multi-arch image locally (requires Docker Buildx):
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t mikrodash:local --load .
+docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 -t mikrodash:local --load .
 ```
 
 - Dashboard: `http://localhost:3081`
-- Health check: `http://localhost:3081/healthz` (`200` only after startup completes, RouterOS is connected, the configured `defaultIf` exists, and the critical collectors are delivering fresh data; temporarily viewing a different interface never masks an invalid default, which remains `503`)
+- Health check: `http://localhost:3081/healthz` (`200` only after startup completes, RouterOS is
+  connected, and the critical collectors are delivering fresh data; a stalled traffic stream or an
+  unreachable `defaultIf` returns `503`)
 
-Source builds require the bundled `node-routeros` compatibility patch. `patch-routeros.js` fails closed: it exits non-zero if any required marker or patched behaviour is missing, rather than warning and leaving you with a build that works until it meets an edge case. If it fails, or if startup reports a missing patch marker, reinstall dependencies and run `node patch-routeros.js` again before launching MikroDash.
-
-For a production-style deployment on an external Docker host such as an R5S that connects to a MikroTik hEX S over the RouterOS API, see `docs/deploy-r5s.md` and the ready-to-copy files in `deploy/r5s/`.
+For a production-style deployment on an external Docker host such as an R5S that connects to a
+MikroTik hEX S over the RouterOS API, see `docs/deploy-r5s.md`.
 
 ---
 
@@ -253,7 +258,7 @@ Most configuration is managed through the **Settings page** in the UI (gear icon
 | Data Retention | Traffic/ping/bandwidth sample retention (1–3650 days, default 90) and alert/connectivity event retention (1–3650 days, default 365); pruning runs automatically |
 | Data Cleanup | Delete stored history on demand rather than waiting for retention. Scope by router (one or all), data type (traffic, ping, bandwidth, alerts & connectivity) and age (1 / 7 / 30 / 90 / 365 days, or everything). Shows database size, total rows and a per-router breakdown; **Preview** reports exactly how many rows the selection would remove before you confirm. The database is compacted afterwards so the space is returned to disk. Admin only |
 | Diagnostics | Enable/disable verbose RouterOS API debug logging at runtime — no container restart required |
-| Appearance | 26 named palette swatches (dark and light variants) — applies instantly and persists via `localStorage`. Contrast, Text Brightness, and Background Brightness sliders (15 steps each) for fine-grained adjustment independent of palette. **Font Family** picker with 26 self-hosted options (Inter, IBM Plex Sans, Source Sans 3, Geist, JetBrains Mono, Oxanium, Orbitron, and 19 more — all served as local WOFF2 files, no CDN; all SIL Open Font License, see [public/fonts/OFL.txt](public/fonts/OFL.txt)). **Font Size** with six presets (Extra Small to Extra Large). Includes a **Visible Pages** subsection with three canned view presets — **Home** (Wireless, Interfaces, DHCP, Connections, Bandwidth), **Standard** (adds Topology, DNS, VLANs, VPN, Firewall, Logs) and **Advanced** (everything, and the only tier showing Devices) — plus the individual page toggles they set. Picking a preset ticks a whole tier at once; editing any toggle afterwards shows Custom. Presets narrow what an install shows and can never widen it: each user still sees only the pages their role permits. The same three tiers appear in Access Management as a bulk-editor for a role's page matrix. A **Group the sidebar into categories** toggle collapses the nav's twenty-four pages into seven expandable groups — Network, Wireless, IP Services, Tunnels, Traffic, Security and System — with Dashboard, Devices, Reports, Audit and Settings always at the top level. Which groups are open is remembered against your account rather than the browser, and the same toggle appears in the account dialog so it is reachable without Settings access. |
+| Appearance | 26 named palette swatches (dark and light variants) — applies instantly and persists via `localStorage`. Contrast, Text Brightness, and Background Brightness sliders (15 steps each) for fine-grained adjustment independent of palette. **Font Family** picker with 26 self-hosted options (Inter, IBM Plex Sans, Source Sans 3, Geist, JetBrains Mono, Oxanium, Orbitron, and 19 more — all served as local WOFF2 files, no CDN; all SIL Open Font License, see [web/public/fonts/OFL.txt](web/public/fonts/OFL.txt)). **Font Size** with six presets (Extra Small to Extra Large). Includes a **Visible Pages** subsection with three canned view presets — **Home** (Wireless, Interfaces, DHCP, Connections, Bandwidth), **Standard** (adds Topology, DNS, VLANs, VPN, Firewall, Logs) and **Advanced** (everything, and the only tier showing Devices) — plus the individual page toggles they set. Picking a preset ticks a whole tier at once; editing any toggle afterwards shows Custom. Presets narrow what an install shows and can never widen it: each user still sees only the pages their role permits. The same three tiers appear in Access Management as a bulk-editor for a role's page matrix. A **Group the sidebar into categories** toggle collapses the nav's twenty-four pages into seven expandable groups — Network, Wireless, IP Services, Tunnels, Traffic, Security and System — with Dashboard, Devices, Reports, Audit and Settings always at the top level. Which groups are open is remembered against your account rather than the browser, and the same toggle appears in the account dialog so it is reachable without Settings access. |
 
 ### Credential encryption
 
@@ -292,7 +297,7 @@ Several pages can change router configuration, and each needs more than `read`:
 | **Firewall** | `write` | Add, edit, remove, enable, disable and **reorder** rules across Filter, NAT, Mangle and Raw, with undo and redo |
 | **Packages** | `write` | Schedule a package enable/disable/uninstall, and reboot to apply |
 | **Queues** | `write` | Create, edit and remove simple queues and queue trees |
-| **Router Users** | `write` **and** `policy` | Create, edit and remove RouterOS users, groups and sessions |
+| **Users** | `write` **and** `policy` | Create, edit and remove RouterOS users, groups and sessions |
 | **Backups** | `write` **and** `ftp` | Take configuration backups, and restore one (which reboots the router) |
 
 `ftp` is the policy that governs writing and reading files on the router, which is what `/export file=`
@@ -318,7 +323,7 @@ above rather than failing silently. Each page also has an install-wide toggle un
 **Settings → Visible Pages**, and per-user access is controlled by roles.
 
 MikroDash will not let you edit the account it signs in with, or that account's group, from the
-Router Users page — that is the one change that could lock the dashboard out of the router with no
+Users page — that is the one change that could lock the dashboard out of the router with no
 way back. Use WinBox for those.
 
 ### Enabling TLS (API-SSL)
@@ -355,35 +360,131 @@ Once the certificate is applied, go to **Settings → Routers**, edit your route
 
 ---
 
-## Environment Variables
+## Configuration flags
 
-A `.env` file is **not required**. All router configuration, dashboard auth, and encryption keys are managed through the web UI and the Docker volume. The only reason to create a `.env` is to override infrastructure-level defaults:
+A `.env` file is **not required**, and there are no environment variables to set. All router
+configuration, dashboard auth and encryption keys are managed through the web UI and the Docker
+volume.
 
-```env
-# Port MikroDash listens on inside the container (default: 3081)
-# PORT=3081
+Infrastructure-level defaults are command-line flags on the binary, which the image supplies as its
+`CMD`. Override them by giving the container its own arguments:
 
-# Maximum simultaneous browser connections (default: 50)
-# MAX_SOCKETS=50
-
-# Trusted proxy IP for X-Forwarded-For (only needed behind a reverse proxy)
-# TRUSTED_PROXY=127.0.0.1
-
-# RouterOS API write timeout in milliseconds (default: 30000)
-# ROS_WRITE_TIMEOUT_MS=30000
-
-# Encryption key for credentials at rest — auto-generated if not set
-# DATA_SECRET=your-long-random-string-here
-
-# Verbose RouterOS debug logging — can also be toggled in Settings → Diagnostics
-# ROS_DEBUG=false
+```yaml
+services:
+  mikrodash:
+    image: ghcr.io/secops-7/mikrodash:latest
+    command: ["-listen", ":3081", "-data", "/data", "-history", "-backup-scheduler", "-retention"]
 ```
 
-Copy `.env.example` to `.env`, uncomment lines you need, and add `env_file: .env` to your `docker-compose.yml`.
+| Flag | Default | What it does |
+|---|---|---|
+| `-listen` | `:3081` | address to serve on |
+| `-data` | `/data` | the data directory: settings, routers, users, the history database and config backups |
+| `-history` | off | record traffic, ping and connectivity history for the Reports page |
+| `-backup-scheduler` | off | take scheduled configuration backups |
+| `-retention` | off | run the daily retention sweep that ages data out of the database |
+| `-alert-dispatch` | off | actually SEND alert notifications. The evaluator and its database rows run either way |
+| `-no-pool` | off | do not hold background connections to routers nobody is watching |
+| `-geo` | `/app/geo` | directory holding `dbip-city-lite.mmdb` and `cities.json`, both baked into the image. Point it at a volume to supply your own |
+| `-auth-ttl` | `15s` | how long a validated session may be cached |
+| `-node` | empty | proxy un-ported routes to another MikroDash. **Empty means standalone**, which is what a normal install wants; it exists for the migration and refuses a target that is its own listener |
+
+**The four feature switches default OFF** because each one is unsafe to run twice against the same
+routers. Two schedulers mean two restore points; two history recorders write every minute twice; and
+two alert engines both send, with in-memory cooldowns neither can see — a duplicated Telegram message
+cannot be un-received. The image's `CMD` turns them on, because a normal install is the only
+MikroDash watching its fleet. If you run a second instance against the same routers, do not.
+
+Credentials at rest are encrypted with a key derived from `/data/.secret`, generated on first run.
+
+### Installing from the RouterOS App section
+
+The **App** section of RouterOS installs MikroDash from MikroTik's own catalogue
+copy, not from this repository, and MikroTik decide when that copy is refreshed.
+If the version shown on the Settings page is behind the latest release, that is
+why, and `Update` will only fetch whatever they have published.
+
+To run the current release before their copy catches up, add it as an ordinary
+**Container** instead and pull `ghcr.io/secops-7/mikrodash:latest` directly, with
+a `/data` mount and a veth as usual.
+
+You do **not** need to set `ROUTER_USER` or `ROUTER_PASS`, whatever the App
+section's parameter list offers. Start the container, open it, create your admin
+account in the first-run wizard, then add the router from inside the app.
+
+### Environment variables
+
+**A new install needs none of these.** MikroDash is configured through its
+first-run wizard and its Settings page; every variable below is optional.
+
+Three are read directly by the server:
+
+| Variable | What it does |
+|---|---|
+| `DATA_SECRET` | the encryption key for credentials at rest. Takes priority over the auto-generated `/data/.secret` |
+| `FORCE_HTTPS` | `true` marks session cookies Secure, for running behind a TLS-terminating proxy |
+| `LOG_HISTORY_SIZE` | how many router log lines to retain in memory for the Logs page |
+
+A further set is still read into **settings** as startup defaults, carried over
+from the single-router era: `ROUTER_HOST`, `ROUTER_PORT`, `ROUTER_USER`,
+`ROUTER_PASS`, `ROUTER_TLS`, `ROUTER_TLS_INSECURE`, `DEFAULT_IF`, `PING_TARGET`
+and the `*_POLL_MS` intervals. They no longer create a router: on a new install
+the fleet is empty until you add one, so the `ROUTER_*` variables have no effect
+there and can be left unset.
+
+**Five that the Node version read are gone**, and they fail silently rather than
+loudly, so check your `.env` when upgrading:
+
+| Removed | Replacement |
+|---|---|
+| `PORT` | `-listen :3081` |
+| `ROS_DEBUG` | Settings → Diagnostics → RouterOS debug (it was already settable there) |
+| `MAX_SOCKETS` | none. The Go server does not cap browser connections; the limit existed to protect a single-threaded event loop |
+| `TRUSTED_PROXY` | none currently |
+| `ROS_WRITE_TIMEOUT_MS` | none currently; the write timeout is not configurable |
+
 
 ---
 
 ## Architecture
+
+### Implementation
+
+```
+RouterOS binary API (TCP/TLS)
+        |
+  internal/routeros/     an adapter over github.com/go-routeros/routeros/v3.
+                         Async mode is mandatory: it is what gives the client a
+                         tag map, and therefore somewhere to discard a sentence
+                         addressed to a cancelled tag.
+        |
+  internal/collect/      the collectors, one per RouterOS subsystem
+  internal/session/      one Session per watched router, owning the connection
+                         every collector shares
+  internal/alert/        the alert rules, pure: rows in, verdict out
+  internal/guard/        the write guards, also pure. A refusal is one function,
+                         testable without a router
+  internal/store/        /data as the app writes it: AES-256-GCM settings,
+                         scrypt users, routers.json
+  internal/db/           the SQLite history and audit database (modernc.org/sqlite,
+                         pure Go — which is what makes the binary static)
+  internal/server/       HTTP routes and the WebSocket protocol
+        |
+  web/src/               the TypeScript frontend
+```
+
+**IP geolocation** comes from [DB-IP City Lite](https://db-ip.com), fetched fresh at
+image build and read with `maxminddb-golang`. It is CC BY 4.0 — see
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md). Organisation attribution for
+connection destinations is a small curated range table (`internal/asn`), not a
+lookup service: no telemetry leaves the machine for either.
+
+Five dependencies, each with a reason beyond convenience: `golang.org/x/crypto`
+(scrypt, because the user store's key derivation demands it), `modernc.org/sqlite`
+(pure Go, no cgo, so the binary stays static), `github.com/coder/websocket`,
+`github.com/go-routeros/routeros/v3`, and `github.com/go-pdf/fpdf` for the PDF
+reports.
+
 
 ### Streamed (router pushes continuously — no poll overhead)
 | Data | RouterOS endpoint |
@@ -408,7 +509,7 @@ Copy `.env.example` to `.env`, uncomment lines you need, and add `env_file: .env
 Bridges, VLANs, CAPsMAN, PPP, WAN and Queues additionally hold a `/listen` channel each in Stream
 mode, so a change appears the moment the router makes it; the interval below governs how often the
 volatile tables are re-read. Setting a router to Poll closes those channels. DNS, Packages and Router
-Users are poll-only by design — see `src/collection.js` for why.
+Users are poll-only by design — see `internal/collection/` for why.
 | Collector | Default interval | Data |
 |---|---|---|
 | Bandwidth | 3 s | Per-connection live RX/TX/Total Mbps (reads from the shared connection-table cache populated by the Connections stream) |
@@ -423,7 +524,7 @@ Users are poll-only by design — see `src/collection.js` for why.
 | Packages | 60 s | Package inventory, firmware versions and update status. Slow by design — an inventory changes on a reboot, not on a tick |
 | WAN | 10 s | Internet-connected uplinks, their addresses, default routes and DHCP leases; rates reused from the interface stream |
 | Queues | 5 s | Simple queues and queue trees with limits and counters; rates derived from the byte counters over the poll window |
-| Router Users | 60 s | RouterOS users, groups and active sessions. Slow by design — a user list changes when somebody edits it, not on a tick |
+| Users | 60 s | RouterOS users, groups and active sessions. Slow by design — a user list changes when somebody edits it, not on a tick |
 | DHCP Networks | ~10 min | LAN subnets, pool sizes, WAN IP, internet-facing interfaces |
 
 All collectors run **concurrently** on a single TCP connection — no serial queuing. All intervals are adjustable in the Settings page and apply immediately without restart.
@@ -456,7 +557,7 @@ All collectors that support RouterOS `/listen` streams use event-driven delivery
 
 MIT — see [LICENSE](LICENSE)
 
-Third-party attributions — see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)
+Third-party attributions — see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)
 
 ---
 
@@ -469,3 +570,11 @@ MikroDash is an independent, community-built project and is **not affiliated wit
 ## Built With AI
 
 The code for MikroDash was written with the assistance of [Claude](https://claude.ai) by [Anthropic](https://anthropic.com).
+
+The Go + TypeScript rewrite was carried out the same way, largely by an autonomous
+loop working against generated corpora: every gate compared this implementation
+against the Node one by RUNNING or LIFTING the original rather than by
+transcribing it, because a retyped table is a fork with no update path. Those
+That harness was retired on 2026-09-01, once the app was free to evolve: the
+checks worth keeping became Go tests in `internal/verify/` and TypeScript tests in
+`web/test/`, and 25 MB of recordings left with the rest.

@@ -1,147 +1,122 @@
-name: Publish Chinese Docker release
+name: Build & Publish Docker Image
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - 'v[0-9]*.[0-9]*.[0-9]*-cn.[0-9]*'
+      - 'v*.*.*'
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: invoker-karl/mikrodash-cn
+  # Must be lowercase — Docker registry names are case-sensitive
+  IMAGE_NAME: secops-7/mikrodash
 
 jobs:
-  publish-version:
+  build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    outputs:
-      version: ${{ steps.version.outputs.value }}
-      digest: ${{ steps.build.outputs.digest }}
+
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # QEMU lets the runner execute non-amd64 instructions via emulation.
+      #
+      # linux/arm/v7 IS BACK as of v0.8.0. It was dropped at the Node 24 move
+      # because node:24-alpine published no 32-bit ARM variant (amd64, arm64/v8
+      # and s390x only), which stranded ARMv7 users on 0.5.54 — and restoring it
+      # was one of the stated motives for the Go rewrite. The runtime is now
+      # alpine with a CGO_ENABLED=0 static binary, and Go cross-compiles, so the
+      # constraint that removed it no longer exists.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
         with:
-          fetch-depth: 0
-      - name: Reject anything except an exact Chinese release tag
-        id: version
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$GITHUB_REF_TYPE" == tag ]]
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-cn\.[0-9]+$ ]]
-          version="${GITHUB_REF_NAME#v}"
-          [[ "$(node -p "require('./package.json').version")" == "$version" ]]
-          git fetch origin main --no-tags
-          tag_commit="$(git rev-list -n1 "$GITHUB_REF_NAME")"
-          [[ -n "$tag_commit" ]]
-          git merge-base --is-ancestor "$tag_commit" origin/main
-          echo "value=$version" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: linux/amd64,linux/arm64
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+
+      # Buildx is the Docker CLI plugin that drives multi-platform builds.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish immutable version image
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+
+      # Only version tags produce published images: v0.5.21 pushes :0.5.21,
+      # :0.5 and :latest. A push to main builds but publishes nothing, so
+      # :latest always points at the newest release rather than at whatever was
+      # merged most recently.
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      # Main pushes still build every architecture, they just do not publish.
+      # The old reason was that better-sqlite3 compiled natively per arch, so an
+      # arm64 break was a real possibility; modernc.org/sqlite is pure Go and
+      # there is no native compilation left. What can still break per-arch is the
+      # geodata stage's download and the QEMU emulation itself, so building all
+      # three on main remains worth the minutes.
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache stored in the registry so repeat builds are fast.
+          # Reading is always safe; writing is restricted to tag builds so a
+          # validation run never writes to the registry. Two concurrent writers
+          # of the same layers is what tripped GHCR's secondary rate limit and
+          # blocked the v0.5.54 publish.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: ${{ startsWith(github.ref, 'refs/tags/v') && format('type=registry,ref={0}/{1}:buildcache,mode=max', env.REGISTRY, env.IMAGE_NAME) || '' }}
 
-  verify-and-promote:
-    needs: publish-version
-    runs-on: ubuntu-latest
-    concurrency:
-      group: mikrodash-cn-latest-promotion
-      cancel-in-progress: false
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
-        with:
-          platforms: linux/amd64,linux/arm64
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify both release platforms
-        env:
-          VERSION: ${{ needs.publish-version.outputs.version }}
-          DIGEST: ${{ needs.publish-version.outputs.digest }}
-        run: |
-          set -euo pipefail
-          image="${REGISTRY}/${IMAGE_NAME}"
-          docker buildx imagetools inspect "$image@$DIGEST" --raw > manifest.json
-          jq -e '[.manifests[].platform | select(.os == "linux" and .architecture == "amd64")] | length == 1' manifest.json
-          jq -e '[.manifests[].platform | select(.os == "linux" and .architecture == "arm64")] | length == 1' manifest.json
-          for arch in amd64 arm64; do
-            name="verify-$arch"
-            platform_digest="$(jq -r --arg arch "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' manifest.json)"
-            [[ "$platform_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-            # Run the selected child manifest directly. Reusing the parent
-            # multi-platform digest for both runs makes Docker cache the first
-            # resolved platform locally, then reject the second as an attempt
-            # to overwrite that digest with different platform content.
-            docker run --platform "linux/$arch" --detach --name "$name" \
-              -e DATA_SECRET=release-verification -p 127.0.0.1::3081 \
-              "$image@$platform_digest"
-            port="$(docker port "$name" 3081/tcp | sed 's/.*://')"
-            ok=false
-            for attempt in $(seq 1 30); do
-              body="$(mktemp)"
-              code="$(curl -sS -o "$body" -w '%{http_code}' "http://127.0.0.1:$port/healthz" || true)"
-              if [[ "$code" == 200 ]] && jq -e '.ok == true' "$body" >/dev/null; then ok=true; rm -f "$body"; break; fi
-              if [[ "$code" == 503 ]] && jq -e '.ok == false and .starting == true' "$body" >/dev/null; then ok=true; rm -f "$body"; break; fi
-              rm -f "$body"
-              sleep 2
-            done
-            if [[ "$ok" != true ]]; then docker logs "$name"; docker rm -f "$name"; exit 1; fi
-            docker rm -f "$name"
-          done
-          # Tags can build concurrently. Promotion is serialized and monotonic:
-          # a slower older run must never overwrite a newer release's latest.
-          git fetch --tags --force origin
-          node scripts/release-guard.js "$GITHUB_REF_NAME" $(git tag --list 'v*-cn.*')
-          docker buildx imagetools create --tag "$image:latest" "$image@$DIGEST"
-          # GHCR can accept the tag update before its read path exposes it.
-          # Retry only this read-after-write check; image verification above is
-          # never retried or weakened.
-          latest_digest=''
-          for attempt in $(seq 1 15); do
-            candidate="$(docker buildx imagetools inspect "$image:latest" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)"
-            latest_digest="$candidate"
-            if [[ "$latest_digest" == "$DIGEST" ]]; then break; fi
-            sleep 2
-          done
-          [[ "$latest_digest" == "$DIGEST" ]]
-
+  # Create a GitHub Release on version tags, using the matching CHANGELOG section
+  # as the release body. Only runs after the Docker image is successfully published.
   create-release:
-    needs: [publish-version, verify-and-promote]
     runs-on: ubuntu-latest
+    needs: build-and-push
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Create release after image verification and promotion
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Extract changelog for this version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Extract description from the CHANGELOG header line, e.g. "CAPsMAN support, ..."
+          # Separator-tolerant on purpose: entries up to 0.7.33 use an em dash, 0.7.34 onward use a
+          # plain hyphen because em dashes are not wanted in anything user-facing. A hard-coded " — "
+          # here would silently yield an empty description for every future release, and the release
+          # would publish with no title rather than fail.
+          DESCRIPTION=$(grep "^## \[${VERSION}\]" CHANGELOG.md | head -1 \
+            | sed -E "s/^## \[${VERSION}\][[:space:]]*[—–:-][[:space:]]*//")
+          # Build release notes: description as a heading, then the section body
+          {
+            [ -n "$DESCRIPTION" ] && printf '## %s\n\n' "$DESCRIPTION"
+            awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md
+          } > release_notes.md
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.publish-version.outputs.version }}
         run: |
-          set -euo pipefail
-          awk "/^## \[$VERSION\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md > release_notes.md
-          test -s release_notes.md
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file release_notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release_notes.md

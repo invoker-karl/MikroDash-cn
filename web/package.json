@@ -1,0 +1,15 @@
+{
+  "name": "mikrodash-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "i18n:audit": "node tools/i18n-audit.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node tools/i18n-audit.mjs && node test/run.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
+}

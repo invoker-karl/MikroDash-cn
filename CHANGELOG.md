@@ -2,198 +2,363 @@
 
 All notable changes to MikroDash will be documented in this file.
 
-## [0.7.38-cn.1] — Simplified Chinese edition on upstream v0.7.38
+## [0.8.16] - A new install can connect its first router
 
-- Upgraded the Chinese edition from upstream v0.7.32 to v0.7.38, including the
-  Devices multi-site model, RouterOS release notes, Traffic interface-cycle
-  fixes, alert scaling fixes, report corrections, DHCP utilisation fixes, and
-  the interface-name injection security fix.
-- Preserved the fork's connection-derived Top Talkers, authoritative RouterOS
-  snapshot reconciliation, live interface metadata recovery, multi-router
-  isolation, and fail-closed dependency patch verification.
-- Kept router-provided names, site names, report details, and other live values
-  outside automatic translation while extending Simplified Chinese coverage to
-  the new Devices, site membership, update-notes, and empty-state interface.
-- Retained the reviewed two-platform release gate: amd64 and arm64 images must
-  start successfully before the immutable version is promoted to `latest`.
+### Fixed
 
-## [0.7.32-cn.2] — Hardened live-data localization boundaries
+- **A clean install could not connect its first router.** The setup wizard saved the device and
+  then reported "could not read the settings". The router really was saved, which made it look
+  like it had half worked — the failure was the step immediately after, which could not cope with
+  a settings file that does not exist yet on a brand new install. Issue #127.
+- **The Connections map drew no arcs for a router behind another router.** The arcs start from
+  your own location, which was only ever worked out from the WAN address — and a router behind
+  another router has a private address that cannot be placed. The map coloured countries and
+  counted them and drew nothing between them, with no setting that helped. It now falls back to
+  the location set on the device, so picking a town gives you your arcs. Issue #120.
 
-- Protected router, interface, wireless, notification, report, router-map, PPP,
-  and alert-history values from accidental dictionary translation while keeping
-  adjacent fixed interface copy translatable.
-- Added bounded Simplified Chinese forms for short relative times and dynamic
-  network, router, and offline counts without reintroducing arbitrary captures.
-- Extended the translation audit to reject unresolved explicit translation
-  calls and untranslated native dialogs with source locations.
-- Added production-renderer regressions for collision-prone live values and
-  retained the fork-specific Top Talkers and RouterOS collection behavior.
-- Passed GPT-5.6 Sol Pro release review, the full development-dependency quality
-  suite, and the production-image test suite before publishing both amd64 and
-  arm64 images and promoting `latest`.
+### Internal
 
-## [0.7.32-cn.1] — Simplified Chinese edition on upstream v0.7.32
+- The rule that a missing configuration file means "not set up yet" rather than "broken" now lives
+  in one place, with a check covering every reader at once. This was the third release in a week
+  to fix one instance of it.
 
-- Upgraded the Chinese edition from upstream v0.7.25 to the complete v0.7.32
-  feature set: configuration backups and restore, scheduled email reports,
-  editable WiFi networks, CAPsMAN configuration, and the expanded router-write
-  resource engine.
-- Preserved the fork's connection-derived Top Talkers, authoritative RouterOS
-  snapshot reconciliation, interface recovery, multi-router isolation, and
-  fail-closed dependency patch verification while adopting upstream collector
-  dormancy and heartbeat behavior.
-- Fixed Dashboard Top Talkers after the upgrade so ordinary LAN clients remain
-  visible without Kid Control, stale rows clear only after an authoritative
-  result, and an unavailable source is not mislabeled as an empty device list.
-- Added complete Simplified Chinese coverage for the v0.7.30-v0.7.32 pages,
-  forms, warnings, accessibility labels, document titles, dynamic CAPsMAN/WiFi
-  guard messages, and the standalone topology and dashboard-grid scripts.
-- The translation audit now inspects every first-party browser script, includes
-  explicit translation calls joined with runtime values, and reports unmatched
-  locale entries as cleanup leads. The document-wide mutation observer now runs
-  only while a translated language is active.
-- Updated the v0.7.8 database-upgrade regression through schema v14 and retained
-  the local status-handler fixes for successful WAN, Queues, and Router Users
-  actions that still fail in the current upstream client.
+## [0.8.15] - Settings can be saved again
 
-## [0.7.25-cn.1] — Simplified Chinese edition on upstream v0.7.25
+### Fixed
 
-- Upgraded the Chinese edition from upstream v0.7.8 to the complete v0.7.25
-  feature set, including nine new pages, the grouped sidebar, Audit trail,
-  presets, and WiFi frequency analysis.
-- Preserved the Chinese edition's RouterOS snapshot reconciliation, interface
-  recovery, Top Talkers compatibility, multi-router isolation, translation
-  boundaries, and monotonic two-platform release gates.
-- Added complete Chinese coverage for the new navigation, pages, dynamic action
-  results, destructive-operation confirmations, permission refusals, and page
-  titles while keeping router, queue, and account names as user data.
-- Fixed missing per-page status handlers in the upstream WAN, Queues, and Router
-  Users UI, which otherwise raised a browser error after successful actions.
-- Required and behavior-verified the new stream-safe `!empty` patch during a
-  clean dependency install; Docker now fails closed if that patch is absent.
-- Added an in-place v0.7.8 database migration regression proving dashboard and
-  topology layouts survive while v0.7.25 navigation preferences and Audit are
-  created successfully.
+- **The Save button on the Settings page did nothing.** It was drawn, it was enabled, and nothing
+  at all was listening for a click on it, so no setting could be saved from any tab — poll
+  intervals, notification channels, alert thresholds, which pages are shown, session timeout.
+  Reset beside it worked, which is what made the page look normal. Reported as "Appearance Save
+  not working", which was simply where it was noticed. Issue #126.
+- **The "Require sign-in" toggle always showed as off**, whatever the install was actually set to,
+  because nothing ever read the real value into it. It now shows the truth.
 
-## [0.7.8-cn.7] — Connection-derived Top Talkers
+### Internal
 
-- Dashboard Top Talkers now uses the per-LAN-device byte-delta rates already
-  computed from the Connections snapshot. Ordinary wired and wireless clients
-  therefore appear without requiring a Kid Control device configuration.
-- The connection-derived source is authoritative even when its successful
-  snapshot is empty. Kid Control remains a compatibility fallback only when the
-  preferred source stops or becomes stale, and it can no longer race a fresh
-  connection result or replay stale rows.
-- The shared rate engine remains available to Top Talkers when the optional
-  Bandwidth page is disabled, opens no additional RouterOS command, and never
-  publishes that disabled page's event. Disabling Connections still leaves the
-  explicit Kid Control fallback without secretly reopening the connection table.
-- Device rates are grouped by normalized MAC where possible, deterministically
-  sorted and capped to the configured top five. RouterOS item IDs, source and
-  destination addresses, internal keys, and router IDs are excluded from the
-  Dashboard payload; device labels are also protected from runtime translation.
-- Rejected partial connection bursts no longer advance the rate snapshot, and a
-  monotonic per-session sequence distinguishes two accepted snapshots in the
-  same millisecond. Invalidated or not-yet-ready caches are not treated as a
-  successful empty table after reconnect.
+- A new check refuses any button that only the permissions layer touches. That is the exact shape
+  of the last three broken controls: enabled and disabled correctly, wired to nothing, and each
+  one found by somebody clicking it rather than by a test.
+- Saving a form no longer sends blank password fields, which the server reads as "clear this".
 
-## [0.7.8-cn.6] — RouterOS Kid Control statistics compatibility
+## [0.8.14] - A new install is shown how to add its router
 
-- Top Talkers now requests the Kid Control `stats` view for streaming,
-  authoritative confirmation, and polling. This matches RouterOS releases where
-  rates and byte counters are absent from an ordinary device print and prevents
-  an ordinary-print false empty result from clearing valid traffic rows.
-- Kid Control rows now accept numeric or unit-formatted rate values and can
-  derive rates from byte-counter deltas. Row reconciliation uses only a MAC
-  address or RouterOS item ID as stable identity; internal keys are not exposed
-  to browsers.
-- A successful authoritative empty `stats` snapshot still clears stale rows,
-  while transient snapshot failures retain the last known good result.
-- The top-bar MikroDash product name is explicitly excluded from translation,
-  so switching languages no longer changes it to “Mikro短划线”.
+### Fixed
 
-## [0.7.8-cn.5] — Authoritative RouterOS snapshot reconciliation
+- **A new install landed on an empty dashboard with no way to know what to do.** MikroDash has a
+  first-run wizard that asks for a router's address and credentials, and it could only ever be
+  triggered by deleting your last router — so it never appeared on a genuinely new install, which
+  is the one situation it exists for. New installs now open it straight away. Issue #124.
+- **A missing `routers.json` was treated as a fault rather than as an empty fleet**, which logged
+  an error on every start of a new install and was what kept the wizard hidden.
 
-- Corrected the shared RouterOS streaming contract: an array emitted by
-  `node-routeros` is a synthetic idle notification, not proof that a table is
-  empty. Streamed objects remain incremental data; only a successful ordinary
-  `/print` result is an authoritative snapshot.
-- Top Talkers now coalesces idle notifications into generation-guarded one-shot
-  confirmation. A successful empty result clears the card, a successful
-  non-empty result replaces it atomically, transient failures retain the last
-  good rows, and unsupported or permission-denied Kid Control states remain
-  distinct. Stop, reconnect, and delivery-mode changes invalidate late probes.
-- Applied the same last-good/authoritative-empty discipline to DHCP networks and
-  Detect Internet, wireless and CAPsMAN clients/SSIDs, topology neighbours and
-  WiFi attribution, connections, firewall rules, routing and BGP, WireGuard and
-  other VPN sessions, DHCP leases, ARP, and interface metadata. Successful
-  structural snapshots can now remove the final row without idle events
-  creating ghost peers, false freshness, or destructive empty states.
-- Added a shared snapshot adapter with coalescing, cooldown, real-row version,
-  and generation guards, plus tests using the installed RStream and fake timers
-  to lock down its actual idle behaviour and collector lifecycle races.
-- Dependency patch verification now fails the build unless every required
-  `node-routeros` marker and the expected empty-reply and multi-block behaviours
-  are present.
+## [0.8.13] - A new install can add its first router
 
-API-handler starvation remains unconfirmed and is not claimed as a cause or fix
-in this release.
+### Fixed
 
-## [0.7.8-cn.4] — Authoritative interface recovery and release hardening
+- **The Add Device button did nothing.** On the Settings page it rendered, it was enabled, and
+  nothing at all was listening for a click on it, so the dialog never opened and no error appeared
+  anywhere. On an install that already has routers this was an annoyance; on a new one it was a
+  dead end, because the first-run overlay was the only other way into that dialog. Anyone who
+  dismissed it, or who reached Settings before it appeared, had no way to add their first router.
+  Issue #124.
+- **Page navigation did not work at all until a router existed.** On an install with no routers
+  the page router was never started, so a link straight to `/settings` quietly landed on the
+  dashboard and the browser's back and forward buttons did nothing. The sidebar still worked,
+  which is what made it look like a settings problem rather than a navigation one. Same new
+  install blind spot as the button above.
 
-- RouterOS reconnects now invalidate the session-scoped interface whitelist and
-  retry its authoritative refresh before traffic streams reopen. Live interface
-  name, running, or disabled changes also reconcile the same router's cache,
-  stream set, and browser list without requiring a reconnect.
-- The interface selector retains non-disabled link-down interfaces, shows their
-  state immediately, and keeps the selected-interface badge in sync independently
-  of the configured WAN. Router switches clear old health and interface state and
-  ignore queued interface-name updates until the new router's list is ready.
-- `/healthz` now keeps an absent configured default interface degraded even when
-  a browser temporarily selects a valid fallback. Initial traffic and connection
-  health is replayed explicitly as healthy or degraded.
-- Top Talkers now clears a previously populated table when RouterOS returns a
-  legitimate empty result, while reporting Kid Control unavailable as a distinct
-  state. Errored Kid Control streams are stopped before their reference is cleared.
-- Detect Internet now distinguishes a successful empty result from an unavailable
-  or stale query, with a safe reason and update timestamp, without discarding the
-  rest of the DHCP network data.
-- Release promotion is serialized and monotonic: a reviewed version image must be
-  verified before `latest` can advance, an older version cannot replace it, and the
-  release tag commit must belong to reviewed `main`. Workflow actions are pinned,
-  container smoke checks validate the expected starting response, and production
-  dependencies are installed from the lock file.
-- The Chinese completeness audit now classifies dynamic `app.js` UI text and more
-  accessibility attributes in addition to the 816 static HTML candidates.
+## [0.8.12] - Fresh installs, the Devices page, and two long-standing map bugs
 
-API-handler starvation was considered during review but was not established as a
-confirmed root cause; this release does not claim to have fixed it.
+### Fixed
 
-## [0.7.8-cn.3] — Traffic recovery for renamed interfaces
+- **A brand new install still could not create its first account.** The setup wizard never
+  appeared: the login page offered a Sign In form while the Create Admin Account form stayed
+  hidden, so there was no account to sign in with and no way to make one. A missing user file was
+  being reported as a read error instead of as "no users yet". 0.8.11 created the files a new
+  install needs; this is the same issue one layer up, and it is now tested end to end on an empty
+  volume with no environment variables set. Issue #124.
+- **No site location could be saved, on any install.** Picking a town answered "Pick a town from
+  the list, or clear the location", which is what the user had just done. The town search returned
+  full region names ("North Rhine-Westphalia") while the validator still expected the three letter
+  codes the old geo database used, so the app was refusing places its own search had offered.
+  99.6% of towns were affected. Issue #120.
+- **The Connections map, Top Countries, Connection Flow, Top Ports and Top Destinations were all
+  empty** for anyone whose router has a catch all `0.0.0.0/0` DHCP network. Every destination was
+  being treated as local and dropped. The connection count, the client picker and Top Sources kept
+  working, which is why it looked like a display problem rather than a filter. Issue #120.
+- **Devices showed every device as offline for the first few seconds.** The page now reports what
+  it actually knows: a device nothing has reached yet reads "Checking" rather than a red Offline,
+  and rows are filled from the always-on pool so real state is there on the first paint. Returning
+  to the page is instant instead of re-dialling the fleet.
+- **The Devices map stopped plotting devices**, because their location was not being sent to the
+  page.
+- **The notification bell would not close when you clicked away.** The only way to dismiss it was
+  to find the bell and click it again.
+- **The Devices page sat in a narrow column on wide screens**, and its cards stopped getting wider
+  past 1200px. Issue #122.
 
-- Fixed an invalid or renamed default RouterOS interface blocking traffic for
-  every otherwise valid interface in the combined monitor stream.
-- Traffic now falls back to the first active interface and exposes persistent
-  stream/configuration failures in the dashboard, health state, and logs.
+### Internal
 
-## [0.7.8-cn.2] — Verified multi-platform release
+- The town search and the place validator are now checked against each other, so the app cannot
+  offer a location it will refuse to store.
+- A pool session that has not finished its first dial is no longer reported as offline anywhere.
+- Handing a router between the two connection pools no longer leaves a gap where neither is
+  watching it.
 
-- Fixed release verification to start the amd64 and arm64 child manifests by
-  their platform-specific digests. This avoids Docker's local manifest-cache
-  conflict while preserving promotion of the original multi-platform digest.
-- `v0.7.8-cn.1` built both images but was deliberately not promoted and did not
-  receive a GitHub Release after this verification gate caught the issue.
+## [0.8.11] - A new install can be set up again
 
-## [0.7.8-cn.1] — Simplified Chinese edition on upstream v0.7.8
+### Fixed
 
-- Rebased the Chinese edition on the complete MikroDash v0.7.8 feature set.
-- Added Chinese coverage for routing tabs, router maps, SSID cards, alert
-  history, accounts, roles, groups, sites, and the current settings pages.
-- Hardened live DOM translation, locale selection, user-data boundaries, and
-  auditable untranslated-string detection.
-- Restricted signed-out translation assets to three exact paths.
-- Added reviewed upstream-sync and two-platform GHCR release workflows. The
-  immutable version image is verified before the same digest becomes `latest`.
+- **A fresh install could not be set up at all, and this release is the fix.** On a new `/data`
+  MikroDash exited before serving a page, because it expected an encryption key file that only the
+  old Node version ever created. Even past that, it had no database, so the first administrator
+  account was created holding no permissions and could not add a router. Anyone upgrading was
+  unaffected, which is why it went unnoticed: the missing files were already in their `/data`.
+  Reported as issue #124 by users installing from the RouterOS container catalogue, where the
+  volume is empty by definition.
+- **Backup notifications work again.** Drift ("Configuration changed") and failure ("Backup
+  failed") were sent by the Node version and were lost in the rewrite, so scheduled backups have
+  been silent, including when they failed. An unchanged backup still says nothing, deliberately:
+  a daily message that reports nothing is a channel people mute.
+- **The DHCP page showed 0% for every subnet.** Lease counts and the IP Utilisation gauge read
+  zero while the subnet rows and the lease table were populated, because the two collectors
+  started in the wrong order and the result was then held for a ten minute poll interval.
+- **The DHCP page on a device with no DHCP server** kept showing the previously selected router's
+  subnets instead of saying it has none.
+- **Network Topology re-read the router every 3 seconds** regardless of its configured interval.
+  The map still updates at the same rate; it just stops asking the router for the parts that have
+  not changed.
+- **Stale API sessions on the router.** A reconnect abandoned its connection without closing it, a
+  router that was open in the Devices page kept a second connection for as long as the app ran,
+  and disabling or deleting a router left it polled for two more minutes.
+- **Alert checks and history stopped for every router after opening the Devices page**, until
+  something else happened to restart them.
+- **"End Session" on the Users page** now shows "Closing..." while it works, and says so plainly
+  when RouterOS refuses. RouterOS will not end API or REST API sessions; that refusal was
+  previously invisible.
+
+### Internal
+
+- Router CPU measured across four states before changing anything. The spikes reported were
+  present with MikroDash stopped, so no collector was altered.
+- The database schema is now created by MikroDash rather than inherited from the Node version.
+- One goroutine per router connection was being leaked for the lifetime of the process.
+- New checks for first run, page keys, collector ordering and backup notification rules.
+
+## [0.8.10] - Every page has its own URL
+
+### New
+
+- **Every page now has a real URL.** `/logs`, `/firewall`, `/wifi-clients`, `/settings` and the
+  rest. Pages can be bookmarked and linked, the back and forward buttons move between them, and a
+  refresh keeps you where you were instead of returning to the dashboard. The dashboard is served
+  at `/home`.
+- **Open a link while signed out and you land on it after signing in**, rather than on the
+  dashboard.
+- **The "Device Users" page is now "Users"**, at `/users`. It was called three different things
+  depending on where you looked.
+
+### Fixed
+
+- **The Traffic graph no longer restarts from nothing.** Any brief router reconnect, which happens
+  routinely on an upgrade or a short drop, threw away the accumulated history and the chart began
+  again from an empty axis.
+- **The Traffic and Ping cards survive a page refresh.** Closing the last browser tab used to tear
+  the router session down immediately, taking both charts' history with it, so a refresh started
+  both from scratch. A session now stays warm for two minutes after the last viewer leaves. Walk
+  away for longer and it still closes, so an unwatched router still costs nothing.
+- **The Backups page shows one "No change" row instead of one per run.** On a stable router with a
+  daily schedule these accumulated one a day and buried the entries that are real restore points.
+  The runs are still recorded; only the table is filtered.
+- **Routes, BGP Peers and Connection Flow now fill on the dashboard.** All three showed dashes
+  unless you had opened the page that owns them.
+
+### Internal
+
+- Concurrent commands to a single router are capped at eight, across the viewing session, the
+  background pool and the alert pool together. Nothing bounded them before, and the documented
+  bottleneck on a MikroTik is concurrent API channels.
+- The port-parity harness is retired. It compared this app against a recording of the Node
+  implementation it replaced, which is a question that ended with the port. The checks that asked
+  something else became 26 Go tests and 25 frontend tests.
+- Page keys now come from one list in `internal/pages` instead of five hand-maintained copies, and
+  each key matches the page's name.
+- The TypeScript payload types are generated from the Go structs.
+- Both open code scanning alerts resolved as false positives, one of them pinned by a new test that
+  runs on 32-bit as well as 64-bit.
+
+## [0.8.2] - The Connections card fills straight away again
+
+### Fixed
+
+- **The Connections card was empty after a restart until you visited the Connections page.** The
+  dashboard asks for its cards as the grid lays out, which is before the router connection has
+  finished opening, and that request was being dropped silently with nothing to ask again. Every
+  card fed by the connection table was affected: Connection Flow, Top Countries, Top Ports and the
+  Connections Map. It now fills within a few seconds of the dashboard loading.
+
+  Anything that dropped and restored the connection used to fix it, which is why it looked like the
+  card "eventually recovered".
+
+### Internal
+
+- `docs/architecture-next.md` re-measured against the Go tree: of the three changes
+  proposed before the port, one shipped with it, one is half done, and one is still open. The
+  numbers behind each are now the current ones rather than the JavaScript app's.
+
+## [0.8.1] - MikroDash is now Go and TypeScript
+
+The rewrite proposed in [#114](https://github.com/SecOps-7/MikroDash/issues/114) replaces the
+Node.js implementation. It has been serving in production since 2026-08-30, and this is the first
+published image of it.
+
+**Nothing about the dashboard changed, and that was the point.** Every page, colour, keyboard
+shortcut and setting is where you left it. The frontend reuses the original stylesheet, class names,
+element ids and DOM shape verbatim; only the logic producing them was rewritten. That was the
+acceptance criterion throughout, enforced by 136 checks that drive both implementations from one
+payload and compare the rendered HTML character for character.
+
+### What you get
+
+- **ARMv7 support is back.** It was dropped at 0.5.54 because the Node base image published no
+  32-bit ARM build, which stranded anyone on older hardware two years behind. `linux/arm/v7` is
+  published again alongside amd64 and arm64, so a Raspberry Pi 2/3, an older NanoPi or a 32-bit
+  router-adjacent box can run current MikroDash.
+- **The image is 180 MB instead of 775 MB.** A single static binary on Alpine: no Node runtime, no
+  `node_modules`, no native compilation at install time. Faster to pull, faster to start, and far
+  less surface to patch.
+- **Nothing to migrate.** Point the new image at your existing volume and it picks up every history
+  sample, alert, audit row, saved layout, user and encrypted setting exactly as they are.
+- **Geolocation needs no account.** The city database is DB-IP City Lite, fetched fresh when the
+  image is built: no sign-up, no licence key, no token that expires and quietly breaks the map
+  months later. Point `-geo` at a volume if you would rather supply your own.
+- **A type-checked frontend.** A whole class of bug that used to surface as a button that silently
+  did nothing is now caught before the code ships.
+- **Rollback is one command.** The Node release is still there: `docker run` the `0.7.40` image
+  against the same volume. Anything the Go release wrote, the Node release can still read.
+
+### Upgrading
+
+Pull and restart. Your `docker-compose.yml` needs no change, and the volume is used as-is.
+
+One thing worth knowing: **`docker restart` is not a redeploy.** It keeps the image the container
+was created from, so a newly pulled image is ignored while the app comes back looking perfectly
+healthy. Use `docker compose up -d`, or `docker rm -f` then `docker run`.
+
+### Fixed
+
+- Everything in 0.7.40 is included, including the certificate-check and router-enable fixes and the
+  read-only account that could read a device's public IP address.
+- **0.8.0 was tagged but never published.** Its image build failed on the 32-bit ARM target it had
+  just restored: an AS number is 32-bit unsigned, and on a 32-bit build a large private ASN could
+  not be parsed at all, so a private BGP peer would have been labelled upstream. Two related
+  constants would not compile there either. Fixed and verified on all three architectures.
+- Two defects the cutover itself surfaced: a migration flag that made the app proxy some routes to
+  itself and silently disable background polling and history retention, and twelve verification
+  checks that would have become a permanent silent skip.
+
+### Internal
+
+- The Node implementation is removed from the tree. It remains in this repository's history and at
+  the `v0.7.40` tag.
+- The verification travels with the repo: every check compares against a committed recording of the
+  old implementation, so a fresh clone can run `sh tools/verify.sh` and get a meaningful answer. The
+  final comparison against the real Node source ran immediately before deletion and was green.
+
+## [0.8.0] - MikroDash is now Go and TypeScript (tagged, never published)
+
+> **No image was published for this version.** The build failed on 32-bit ARM; 0.8.1 is the
+> same cutover with that fix and is the release to use. This entry is kept as the record.
+
+The rewrite proposed in [#114](https://github.com/SecOps-7/MikroDash/issues/114) replaces the
+Node.js implementation. It has been serving in production since 2026-08-30.
+
+**Nothing user-visible changed, by design.** The frontend reuses the original stylesheet, class
+names, element ids and DOM shape verbatim — only the logic producing them was rewritten. That was
+the acceptance criterion throughout, checked by gates that drive both implementations from one
+payload and compare the rendered HTML.
+
+### New
+
+- **ARMv7 is back.** It was dropped at 0.5.54 because `node:24-alpine` published no 32-bit ARM
+  variant, which stranded users on older hardware. The image is now a static Go binary on Alpine,
+  so `linux/arm/v7` is published again alongside amd64 and arm64.
+- **A much smaller image**: 180 MB against 775 MB, with no Node runtime, no `node_modules` and no
+  native compilation step. `/data` is still the only mount.
+- **Type checking over the whole frontend.** A class of bug that used to fail at click time now
+  fails at build time.
+- **Geolocation no longer depends on an npm package.** The city database is DB-IP City Lite,
+  fetched fresh at image build — no account, no licence key, no expiring token. Point `-geo` at a
+  volume to supply your own.
+
+### Changed
+
+- The container is `mikrodash-go` and the image is built from the same `docker-compose.yml` as
+  before. **Your existing `mikrodash_data` volume is used unchanged** — history, alerts, audit
+  rows, settings and users all carry over, and the Node release can still read anything the Go
+  release writes.
+- **`docker restart` is not a redeploy.** It keeps the image the container was created from, so a
+  rebuilt image is silently ignored while the app comes back looking healthy. Use `docker compose
+  up -d` after a build, or `docker rm -f` then `docker run`.
+
+### Fixed
+
+Everything in 0.7.40 is included. Two defects the cutover itself found were fixed before release: a
+migration flag that made the app proxy un-ported routes to itself and silently disabled the
+background pool and the retention sweep, and twelve verification checks that would have become a
+permanent silent skip.
+
+### Internal
+
+- The Node implementation is removed from the tree. It remains in this repository's history and at
+  the `v0.7.40` tag.
+- Verification travels with the repo: every gate compares against a committed recording of the old
+  implementation, so a fresh clone can run `sh tools/verify.sh` meaningfully. The final comparison
+  against the real Node source ran immediately before deletion and was green.
+
+## [0.7.40] - The last Node release, and the fixes the Go port found
+
+The final release of MikroDash on Node.js. Everything below was found by comparing this app against
+the Go and TypeScript port endpoint by endpoint, which is a check no test on either side could
+perform: a round trip through one implementation agrees with itself whatever it does.
+
+### Fixed
+
+- **Turning off "accept self-signed certificate" could turn it on.** A client that sends the value as
+  text rather than as a boolean had it read backwards, so a router saved with certificate checking
+  ON accepted a forged certificate on every later connection. Four places did this; one was fixed in
+  0.7.37 and the other three, including the Test Connection button, were not.
+- **Enabling a disabled router could disable it.** The same reading applied to the enabled/disabled
+  switch, and to the per-router alert toggle. Values stored by an earlier version are now corrected
+  when they are read, so a router already saved the wrong way rights itself.
+- **The router list gave away each device's public IP address.** `/api/routers` returned the WAN
+  address that three other paths deliberately withhold, so anyone who could see a router at all
+  could read it, including read-only accounts.
+- **A user could be renamed to "null".** Sending an empty username as JSON null renamed the account
+  to those four characters instead of being refused, and later alert acknowledgements were recorded
+  against it.
+- **Error messages could reveal internal hostnames.** The "Test" button on personal notification
+  channels is available to every account, and a failure named the host it had tried to reach, so an
+  ordinary user could learn which internal names resolve. Addresses were already hidden; names now
+  are too.
+- **A disabled router's status badge said "Offline", or briefly "Online".** The row stayed dimmed
+  with an Enable button beside it, which read as a contradiction until the page was refreshed.
+- **The Traffic dropdown lost the selected interface after a reconnect.** The list stopped emptying
+  in 0.7.38, but the chosen interface still reverted to the default. Choosing an interface now
+  survives a dropped connection, and still resets when a different router is selected.
+  ([#119](https://github.com/SecOps-7/MikroDash/issues/119))
+- **The connection test named the wrong service.** A failure over api-ssl could be reported as a
+  plain `api` problem and the other way round, and the commonest failure of all, a wrong username or
+  password, was reported as a raw driver message.
+
+### Internal
+
+- 1,670 tests, up from 1,628. Every fix above was proved by reintroducing the defect and watching a
+  named test fail, rather than by reading the code.
+- Checks that scan the source now cover the whole file or the whole tree instead of a window near
+  the code they describe. Two of them had been passing without reaching the line they were written
+  for.
 
 ## [0.7.38] - Release notes in the Update dialog, and the Traffic dropdown fix that actually works
 
@@ -1295,10 +1460,7 @@ Full-codebase review remediation: 17 P1 bugs fixed across security and stability
 - **Listener/memory leak per router hot-swap** — collector handlers registered on the global Socket.IO server are now tracked and removed in `teardownSession`; each leaked handler retained the entire dead session
 - **Hot-swap orphaned all modern-auth sockets** — switching or deleting the active router now relocates every socket watching it (previously only legacy no-auth sockets moved, leaving everyone else in a dead room)
 - **VPN disconnect alerts never fired** — the alerter hook only covered `routerIo.emit()`, but `vpn:update` goes through `.to()`; room-scoped emits now feed the alerter, and the alert-session stub gained the `.to()` method whose absence made its VPN collector throw
-- **Phantom wireless clients / stale tables** — superseded by the cn.5 contract:
-  RStream arrays are synthetic idle notifications and trigger an ordinary
-  `/print` confirmation; only explicit unsupported errors select the legacy
-  wireless fallback.
+- **Phantom wireless clients / stale tables** — RStream's empty-array packets (table emptied) are now handled by wireless, talkers, firewall and dhcpNetworks; departed clients age out and cleared tables actually clear; an empty wifi table now latches the legacy-wireless fallback
 - **Restart-timer leaks defeating idle gating** — bare `setTimeout` restarts in system/connections/ping (and an uncleared overwrite in traffic) are stored and cancelled on stop/suspend; connections gained a `_suspended` flag, its watchdog now recovers a dead stream (previously bailed on exactly that state), and `resume()` no longer reopens the connection-table stream with zero viewers
 - **12 unhandled promise rejections on stream teardown** — `try/catch` around `stream.stop()` cannot catch its promise rejection; all sites use a promise-safe teardown now
 - **PDF/report exports crashed on large ranges** — `Math.max(...rows)` overflowed the call stack above ~65k rows; replaced with a reduce (ping/traffic/bandwidth/connectivity exports)
@@ -1316,7 +1478,7 @@ Full-codebase review remediation: 17 P1 bugs fixed across security and stability
 
 ### Tests
 
-- New `test/code-review-remediation.test.js` (13 regression tests: connectLoop listener containment, connections suspend/watchdog, traffic bind idempotency, stream-idle handling, restart-timer cleanup, router validation, ciphertext preservation) — suite now 247 tests, all passing
+- New `test/code-review-remediation.test.js` (13 regression tests: connectLoop listener containment, connections suspend/watchdog, traffic bind idempotency, empty-table packets, restart-timer cleanup, router validation, ciphertext preservation) — suite now 247 tests, all passing
 
 ---
 
