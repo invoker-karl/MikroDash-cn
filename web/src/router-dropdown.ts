@@ -84,7 +84,7 @@ export function dropdownHtml(
     html += '<div class="rtr-dd-item' + (act ? ' active' : '') + (i === hl ? ' hl' : '') + '"'
       + ' role="option" aria-selected="' + (act ? 'true' : 'false') + '" data-rtr="' + esc(r.id) + '">'
       + '<span class="rtr-dd-dot ' + dot + '"></span>'
-      + '<span class="rtr-dd-meta"><span class="rtr-dd-name">' + esc(rtrLabel(r)) + '</span>'
+      + '<span class="rtr-dd-meta"><span class="rtr-dd-name" data-i18n-user-data>' + esc(rtrLabel(r)) + '</span>'
       + (r.host ? '<span class="rtr-dd-host">' + esc(r.host) + '</span>' : '') + '</span>'
       + (act ? '<span class="rtr-dd-check">&#10003;</span>' : '')
       + '</div>';

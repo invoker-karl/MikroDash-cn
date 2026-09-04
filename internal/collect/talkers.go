@@ -34,6 +34,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mikrodash/internal/routeros"
@@ -62,6 +63,9 @@ type TalkersPayload struct {
 	// Available is false only for a router with no kid-control menu. An empty
 	// list with `available: true` is a router where nobody is using bandwidth.
 	Available bool `json:"available"`
+	Source    string `json:"source,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	EmptyText string `json:"emptyText,omitempty"`
 }
 
 var talkersCmd = routeros.Cmd{
@@ -85,6 +89,8 @@ type Talkers struct {
 	last        *TalkersPayload
 	loop        *pollLoop
 	now         func() time.Time
+	mu              sync.Mutex
+	connectionUntil time.Time
 }
 
 // NewTalkers builds the collector. `topN` of 0 takes the original's default of
@@ -140,13 +146,20 @@ func (t *Talkers) Stop() { t.loop.stop() }
 // against.
 func (t *Talkers) Reconnected() {
 	t.loop.stop()
+	t.mu.Lock()
 	t.unavailable = false
 	t.lastFp = ""
+	t.connectionUntil = time.Time{}
+	t.mu.Unlock()
 	t.Tick()
 	t.loop.start()
 }
 
-func (t *Talkers) Last() *TalkersPayload { return t.last }
+func (t *Talkers) Last() *TalkersPayload {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.last
+}
 
 func (t *Talkers) reportedPollMs() int {
 	if t.streamMode {
@@ -192,7 +205,11 @@ func intOf(v string) int {
 
 // Tick reads the menu once and emits if the reading changed.
 func (t *Talkers) Tick() {
-	if !t.ros.Connected() || t.unavailable {
+	t.mu.Lock()
+	connectionFresh := t.now().Before(t.connectionUntil)
+	unavailable := t.unavailable
+	t.mu.Unlock()
+	if !t.ros.Connected() || unavailable || connectionFresh {
 		return
 	}
 	rows, err := t.ros.Do(talkersCmd)
@@ -210,16 +227,25 @@ func (t *Talkers) Tick() {
 }
 
 func (t *Talkers) markUnavailable() {
+	t.mu.Lock()
+	if t.now().Before(t.connectionUntil) {
+		t.mu.Unlock()
+		return
+	}
 	if t.unavailable {
+		t.mu.Unlock()
 		return
 	}
 	t.unavailable = true
 	t.loop.stop()
 	p := &TalkersPayload{
 		TS: t.now().UnixMilli(), Devices: []TalkerDevice{},
-		PollMs: t.reportedPollMs(), Available: false,
+		PollMs: t.reportedPollMs(), Available: false, Source: "kid-control",
+		Reason: "Device traffic is unavailable",
 	}
 	t.last = p
+	t.lastFp = "kid-control:unavailable"
+	t.mu.Unlock()
 	t.emit(talkersRoom, "talkers:update", p)
 }
 
@@ -267,19 +293,97 @@ func (t *Talkers) commit(rows []routeros.Reply) {
 
 	p := &TalkersPayload{
 		TS: t.now().UnixMilli(), Devices: devices,
-		PollMs: t.reportedPollMs(), Available: true,
+		PollMs: t.reportedPollMs(), Available: true, Source: "kid-control",
 	}
-	t.last = p
 
 	// The fingerprint covers MAC and both rates but NOT the name, exactly as the
 	// original's does — a device renamed in Kid Control does not by itself
 	// justify a repaint, and the next real change carries the new name with it.
 	fp := talkersFingerprint(devices)
+	t.mu.Lock()
+	if t.now().Before(t.connectionUntil) {
+		t.mu.Unlock()
+		return
+	}
+	t.last = p
 	if fp == t.lastFp {
+		t.mu.Unlock()
 		return
 	}
 	t.lastFp = fp
+	t.mu.Unlock()
 	t.emit(talkersRoom, "talkers:update", p)
+}
+
+// AcceptBandwidth receives the already-computed per-LAN-device rates from the
+// shared Connections/Bandwidth engine. It is authoritative while fresh; Kid
+// Control remains a compatibility fallback when connection counters are off.
+func (t *Talkers) AcceptBandwidth(p *BandwidthPayload) {
+	if p == nil {
+		t.mu.Lock()
+		t.connectionUntil = time.Time{}
+		t.mu.Unlock()
+		return
+	}
+
+	type aggregate struct{ device TalkerDevice }
+	byKey := make(map[string]*aggregate, len(p.Devices))
+	order := make([]string, 0, len(p.Devices))
+	for _, d := range p.Devices {
+		if !d.IsLan || d.SrcIP == "" {
+			continue
+		}
+		mac := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(d.MAC), "-", ":"))
+		key := "ip:" + d.SrcIP
+		if mac != "" {
+			key = "mac:" + mac
+		}
+		a := byKey[key]
+		if a == nil {
+			a = &aggregate{device: TalkerDevice{
+				Name: firstNonEmptyStr(d.Name, mac, d.SrcIP), MAC: mac,
+			}}
+			byKey[key] = a
+			order = append(order, key)
+		}
+		a.device.RxMbps = round4(a.device.RxMbps + d.RxMbps)
+		a.device.TxMbps = round4(a.device.TxMbps + d.TxMbps)
+	}
+	devices := make([]TalkerDevice, 0, len(order))
+	for _, key := range order {
+		devices = append(devices, byKey[key].device)
+	}
+	sort.SliceStable(devices, func(i, j int) bool {
+		return devices[i].RxMbps+devices[i].TxMbps > devices[j].RxMbps+devices[j].TxMbps
+	})
+	if len(devices) > t.topN {
+		devices = devices[:t.topN]
+	}
+	pollMs := p.PollMs
+	if pollMs <= 0 {
+		pollMs = 5000
+	}
+	payload := &TalkersPayload{
+		TS: p.TS, Devices: devices, PollMs: pollMs, Available: true,
+		Source: "connections", EmptyText: "No active LAN devices",
+	}
+	fp := "connections:" + talkersFingerprint(devices)
+
+	t.mu.Lock()
+	staleFor := time.Duration(pollMs*4+5000) * time.Millisecond
+	if staleFor < 20*time.Second {
+		staleFor = 20 * time.Second
+	}
+	t.connectionUntil = t.now().Add(staleFor)
+	t.last = payload
+	changed := fp != t.lastFp
+	if changed {
+		t.lastFp = fp
+	}
+	t.mu.Unlock()
+	if changed {
+		t.emit(talkersRoom, "talkers:update", payload)
+	}
 }
 
 func talkersFingerprint(devices []TalkerDevice) string {

@@ -118,8 +118,8 @@ export function flushConnUpdate(): void {
       if (data.topSources && data.topSources.length) {
         topSources.innerHTML = data.topSources.map((s) =>
           '<div class="top-row"><div style="display:flex;align-items:center;gap:.4rem;min-width:0;overflow:hidden">' +
-          '<span class="card-badge" style="flex-shrink:0">' + esc(s.ip) + '</span>' +
-          '<div class="top-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+          '<span class="card-badge" data-i18n-user-data style="flex-shrink:0">' + esc(s.ip) + '</span>' +
+          '<div class="top-name" data-i18n-user-data style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
           esc(s.name) + '</div></div><div class="top-count">' + s.count + '</div></div>').join('');
       } else {
         topSources.innerHTML = '<div class="empty-state">—</div>';
@@ -145,13 +145,13 @@ export function flushConnUpdate(): void {
           return '<div class="top-row">' +
             '<div style="flex:1;min-width:0;overflow:hidden">' +
               '<div style="display:flex;align-items:center;gap:0;overflow:hidden">' +
-                '<span class="top-name text-truncate has-ip-tip" data-ip="' + esc(d.key) +
+                '<span class="top-name text-truncate has-ip-tip" data-i18n-user-data data-ip="' + esc(d.key) +
                   '" data-org="' + (d.org ? esc(d.org) : '') +
                   '" data-cat="' + esc(d.cat || '') + '">' + esc(d.key) + '</span>' +
                 (d.org ? svcBadge(d.org, d.cat || null) : '') +
               '</div>' +
             '</div>' +
-            (geoLabel ? '<div class="top-geo">' + geoLabel + '</div>' : '') +
+            (geoLabel ? '<div class="top-geo" data-i18n-user-data>' + geoLabel + '</div>' : '') +
             '<div class="top-count">' + d.count + '</div>' +
           '</div>';
         }).join('');

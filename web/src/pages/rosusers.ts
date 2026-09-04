@@ -210,7 +210,7 @@ export function initRosUsersPage(socket: Socket, isVisible: (page: string) => bo
         : u.expired ? '<span style="color:var(--text-muted)">expired</span>'
         : '<span class="wl-band wl-band-6">enabled</span>';
       return '<tr>' +
-        '<td>' + esc(u.name) + (u.comment ? '<div class="muted-note">' + esc(u.comment) + '</div>' : '') + '</td>' +
+        '<td data-i18n-user-data>' + esc(u.name) + (u.comment ? '<div class="muted-note">' + esc(u.comment) + '</div>' : '') + '</td>' +
         '<td>' + esc(u.group) + '</td>' +
         '<td>' + (u.address ? esc(u.address) : dash()) + '</td>' +
         '<td style="color:var(--text-muted)">' + (u.lastLogin ? esc(u.lastLogin) : dash()) + '</td>' +

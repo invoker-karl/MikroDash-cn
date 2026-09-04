@@ -16,9 +16,53 @@ package collect
 
 import (
 	"testing"
+	"time"
 
 	"mikrodash/internal/routeros"
 )
+
+func TestConnectionRatesArePreferredOverKidControl(t *testing.T) {
+	var got []*TalkersPayload
+	c := NewTalkers(nil, func(room, event string, payload any) {
+		if p, ok := payload.(*TalkersPayload); ok {
+			got = append(got, p)
+		}
+	}, 30000, 2)
+	now := time.Unix(100, 0)
+	c.now = func() time.Time { return now }
+	c.AcceptBandwidth(&BandwidthPayload{TS: now.UnixMilli(), PollMs: 5000, Devices: []BandwidthDevice{
+		{SrcIP: "10.0.0.2", Name: "laptop", MAC: "aa-bb", RxMbps: 3, TxMbps: 4, IsLan: true},
+		{SrcIP: "2001:db8::2", Name: "laptop-v6", MAC: "AA:BB", RxMbps: 5, TxMbps: 6, IsLan: true},
+		{SrcIP: "10.0.0.3", Name: "phone", RxMbps: 2, TxMbps: 1, IsLan: true},
+		{SrcIP: "198.51.100.1", Name: "remote", RxMbps: 99, TxMbps: 99, IsLan: false},
+	}})
+	if len(got) != 1 || got[0].Source != "connections" {
+		t.Fatalf("connection projection was not emitted: %+v", got)
+	}
+	if len(got[0].Devices) != 2 || got[0].Devices[0].MAC != "AA:BB" {
+		t.Fatalf("MAC rows were not merged and ranked: %+v", got[0].Devices)
+	}
+	if got[0].Devices[0].RxMbps != 8 || got[0].Devices[0].TxMbps != 10 {
+		t.Fatalf("merged rates are wrong: %+v", got[0].Devices[0])
+	}
+
+	// A late Kid Control reading cannot overwrite a fresh connection projection.
+	c.commit([]routeros.Reply{row("kid", "00:11:22:33:44:55", "99000000", "99000000")})
+	if len(got) != 1 || c.Last().Source != "connections" {
+		t.Fatalf("Kid Control replaced the preferred source: %+v", got)
+	}
+}
+
+func TestConnectionRatesPublishAnAuthoritativeEmptyList(t *testing.T) {
+	var got *TalkersPayload
+	c := NewTalkers(nil, func(room, event string, payload any) {
+		got, _ = payload.(*TalkersPayload)
+	}, 30000, 5)
+	c.AcceptBandwidth(&BandwidthPayload{TS: 1, PollMs: 5000, Devices: []BandwidthDevice{}})
+	if got == nil || got.Source != "connections" || got.EmptyText != "No active LAN devices" || !got.Available {
+		t.Fatalf("empty connection snapshot was not authoritative: %+v", got)
+	}
+}
 
 func talkersFor(t *testing.T, rows []routeros.Reply, topN int) *TalkersPayload {
 	t.Helper()

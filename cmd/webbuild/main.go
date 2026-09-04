@@ -60,6 +60,8 @@ const head = `<!doctype html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <script src="/locales/zh-CN.js"></script>
+  <script src="/i18n.js"></script>
   <script src="/preflight.js"></script>
   <title>MikroDash</title>
   <link rel="stylesheet" href="/vendor/tabler.min.css"/>

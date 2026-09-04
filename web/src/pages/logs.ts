@@ -50,7 +50,7 @@ function sevClass(s: string): string {
 }
 
 function buildLogHtml(l: LogEntry): string {
-  return '<div class="log-line"><span class="log-time">' + esc(l.time) + '</span> ' +
+  return '<div class="log-line" data-i18n-user-data><span class="log-time">' + esc(l.time) + '</span> ' +
     '<span class="' + topicClass(l.topics) + '">[' + esc(l.topics) + ']</span> ' +
     '<span class="' + sevClass(l.severity) + '">' + esc(l.message) + '</span></div>';
 }

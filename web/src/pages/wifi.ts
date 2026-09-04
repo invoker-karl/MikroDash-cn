@@ -117,7 +117,7 @@ export function initWifiPage(socket: Socket, isVisible: (page: string) => boolea
   function ssidPill(n: WifiNetwork): string {
     const name = n.ssid || '(no SSID)';
     const col = colours[n.ssid] || 'var(--text-main)';
-    return '<span class="wn-ssid-pill" style="color:' + col + ';border-color:' + col + '">' +
+    return '<span class="wn-ssid-pill" data-i18n-user-data style="color:' + col + ';border-color:' + col + '">' +
            esc(name) + '</span>';
   }
 
@@ -142,8 +142,8 @@ export function initWifiPage(socket: Socket, isVisible: (page: string) => boolea
         // prompt make sense when it appears.
         (n.inherits && n.inherits.ssid
           ? '<div class="muted-note" style="font-size:.7rem;margin-top:.2rem">inherits from ' +
-            esc(n.inherits.ssid) + '</div>' : '') + '</td>' +
-      '<td>' + esc(n.name) + '</td>' +
+            '<span data-i18n-user-data>' + esc(n.inherits.ssid) + '</span></div>' : '') + '</td>' +
+      '<td data-i18n-user-data>' + esc(n.name) + '</td>' +
       '<td>' + bandCell(n) + '</td>' +
       '<td>' + securityCell(n) + '</td>' +
       '<td>' + esc(n.vlanId || '—') + '</td>' +

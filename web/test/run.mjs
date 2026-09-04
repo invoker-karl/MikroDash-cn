@@ -28,7 +28,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const web = join(here, '..');
 const root = join(web, '..');
 const out = join(web, 'test-out');
-const esbuild = join(web, 'node_modules', '.bin', 'esbuild');
+// Windows cannot execute npm's extensionless POSIX shim through execFileSync.
+// Run esbuild's JavaScript CLI with the current Node process there; retain the
+// direct shim on Unix so the upstream test path stays unchanged.
+const esbuild = process.platform === 'win32' ? process.execPath : join(web, 'node_modules', '.bin', 'esbuild');
+const esbuildPrefix = process.platform === 'win32'
+  ? [join(web, 'node_modules', 'esbuild', 'bin', 'esbuild')]
+  : [];
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
@@ -40,7 +46,7 @@ if (tests.length === 0) {
 }
 
 for (const t of tests) {
-  execFileSync(esbuild, [
+  execFileSync(esbuild, [...esbuildPrefix,
     join(here, t),
     '--bundle',
     '--format=cjs',

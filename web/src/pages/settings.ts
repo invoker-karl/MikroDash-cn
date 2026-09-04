@@ -482,7 +482,7 @@ export interface UserView {
  * is rebuilt on every refresh and the listeners are attached by the caller.
  */
 export function userRowHtml(u: UserView, look: PrincipalLookups): string {
-  return '<td style="padding:.45rem .5rem;font-size:.82rem">' + esc(u.username) + '</td>'
+  return '<td data-i18n-user-data style="padding:.45rem .5rem;font-size:.82rem">' + esc(u.username) + '</td>'
     + '<td style="padding:.45rem .5rem" colspan="2">' + accessSummary(u.grants, look) + '</td>'
     + '<td style="padding:.45rem .5rem;text-align:right;white-space:nowrap">'
     + '<button class="sbtn sbtn-ghost" style="font-size:.72rem;padding:.2rem .55rem;margin-right:.3rem" data-action="edit">Edit</button>'

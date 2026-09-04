@@ -193,7 +193,7 @@ export function groupMembersHtml(
     '<label style="display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem">'
     + '<input type="checkbox" data-member="' + esc(u.id) + '"'
     + (memberIds.indexOf(u.id) !== -1 ? ' checked' : '') + '>'
-    + '<span>' + esc(u.username) + '</span></label>').join('');
+    + '<span data-i18n-user-data>' + esc(u.username) + '</span></label>').join('');
 }
 
 // ── Reading the role matrix back ───────────────────────────────────────────

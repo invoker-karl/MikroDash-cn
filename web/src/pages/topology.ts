@@ -785,7 +785,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
 
   function row(k: string, v: unknown): string {
     if (v === undefined || v === null || v === '') return '';
-    return '<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>';
+    return '<dt>' + esc(k) + '</dt><dd data-i18n-user-data>' + esc(v) + '</dd>';
   }
 
   /** The name of the device this one sits behind. */

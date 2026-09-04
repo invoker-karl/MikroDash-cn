@@ -377,6 +377,11 @@ type Bandwidth struct {
 	// lastEmit is when a payload last went out. The fingerprint suppresses an
 	// unchanged one, and this is what stops that suppression being permanent.
 	lastEmit time.Time
+	// onDevices feeds the dashboard Top Talkers projection without exposing the
+	// full Bandwidth payload through another room. emitEnabled is false when the
+	// rate engine exists only for that dashboard card.
+	onDevices  func(*BandwidthPayload)
+	emitEnabled bool
 
 	loop *pollLoop
 }
@@ -391,11 +396,24 @@ func NewBandwidth(ros Reader, emit Emit, rates RateSource, leases *DHCPLeases,
 	b := &Bandwidth{
 		ros: ros, emit: emit, rates: rates, leases: leases, nets: nets,
 		pollMs: newPollInterval(clampPoll(pollMs, 5000, 3000, 60000)),
-		prev:   map[string]bwPrev{},
+		prev:   map[string]bwPrev{}, emitEnabled: true,
 	}
 	b.loop = newPollLoop(func() { b.Tick() }, func() time.Duration {
 		return b.pollMs.duration()
 	})
+	return b
+}
+
+// WithDevices attaches the session-local consumer used by Top Talkers.
+func (b *Bandwidth) WithDevices(fn func(*BandwidthPayload)) *Bandwidth {
+	b.onDevices = fn
+	return b
+}
+
+// WithEmitEnabled keeps the shared rate engine running without publishing the
+// optional Bandwidth page when that collector is disabled in Settings.
+func (b *Bandwidth) WithEmitEnabled(enabled bool) *Bandwidth {
+	b.emitEnabled = enabled
 	return b
 }
 
@@ -430,7 +448,12 @@ func (b *Bandwidth) Resume() {
 
 func (b *Bandwidth) Start() { b.loop.start() }
 
-func (b *Bandwidth) Stop() { b.loop.stop() }
+func (b *Bandwidth) Stop() {
+	b.loop.stop()
+	if b.onDevices != nil {
+		b.onDevices(nil)
+	}
+}
 
 // Reconnected clears the counters. A reconnect usually means the router
 // rebooted, in which case every connection id is new and every counter starts
@@ -565,7 +588,10 @@ func (b *Bandwidth) Tick() {
 	}
 	b.mu.Unlock()
 
-	if changed {
+	if b.onDevices != nil {
+		b.onDevices(payload)
+	}
+	if changed && b.emitEnabled {
 		b.emit("page-bandwidth,dash-card-bandwidth", "bandwidth:update", payload)
 	}
 }

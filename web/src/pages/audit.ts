@@ -211,7 +211,7 @@ export function initAuditPage(): void {
         ? '<span style="color:var(--text-muted)">system</span>' : esc(r.actor)) + '</td>' +
       '<td class="mono" style="color:var(--text-muted)">' + esc(r.ip || '—') + '</td>' +
       '<td>' + esc(r.action) + '</td>' +
-      '<td>' + (r.target ? esc(r.target) : MUTED) +
+      '<td data-i18n-user-data>' + (r.target ? esc(r.target) : MUTED) +
         // The pill names the DEVICE. It used to read the literal word "router" —
         // a scope marker telling the reader nothing the Action column did not.
         // A router deleted since the event was recorded has no name left, so it

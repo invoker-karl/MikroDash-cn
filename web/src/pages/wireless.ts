@@ -180,9 +180,9 @@ export function initWirelessPage(socket: Socket, isVisible: (page: string) => bo
       if (order.length > 1) {
         const isCapsman = g.clients.some((c) => c.source === 'capsman');
         html += '<tr class="wl-group-row"><td colspan="6">' +
-          '<span class="wl-group-label">' + esc(g.iface) + '</span>' +
+          '<span class="wl-group-label" data-i18n-user-data>' + esc(g.iface) + '</span>' +
           (isCapsman ? '<span class="badge badge-outline-azure ms-1" style="font-size:.6rem">CAP</span>' : '') +
-          (g.ssid ? '<span class="wl-group-sub">' + esc(g.ssid) + '</span>' : '') +
+          (g.ssid ? '<span class="wl-group-sub" data-i18n-user-data>' + esc(g.ssid) + '</span>' : '') +
           '<span class="wl-group-sub">' + g.clients.length + ' client' +
             (g.clients.length !== 1 ? 's' : '') + '</span>' +
         '</td></tr>';
@@ -193,11 +193,11 @@ export function initWirelessPage(socket: Socket, isVisible: (page: string) => bo
           ? '<div style="font-size:.62rem;color:var(--accent-rx)">' + esc(c.ip) + '</div>' : '';
         const macStr = '<div style="font-size:.6rem;color:var(--text-muted)">' + esc(c.mac) + '</div>';
         html += '<tr>' +
-          '<td>' +
+          '<td data-i18n-user-data>' +
             '<div style="font-weight:600;font-size:.78rem">' + esc(c.name || c.mac) + '</div>' +
             ipStr + macStr +
           '</td>' +
-          '<td class="wl-col-iface" style="color:var(--text-muted);font-size:.73rem">' +
+          '<td class="wl-col-iface" data-i18n-user-data style="color:var(--text-muted);font-size:.73rem">' +
             esc(c.iface || '—') + '</td>' +
           '<td>' + bandBadge(c.band) + '</td>' +
           '<td class="text-end">' +
@@ -247,7 +247,7 @@ export function initWirelessPage(socket: Socket, isVisible: (page: string) => bo
       // colouring it would say "this one is special" when it means "this one is
       // off".
       const style = off ? '' : ' style="color:' + colours[sd.ssid] + '"';
-      return '<div class="wl-ssid-row' + (off ? ' wl-ssid-off' : '') + '" title="' +
+      return '<div class="wl-ssid-row' + (off ? ' wl-ssid-off' : '') + '" data-i18n-user-data title="' +
           esc(sd.ifaces.join(', ')) + '">' +
         '<span class="wl-ssid-name"' + style + '>' + esc(sd.ssid) + '</span>' +
         // The same badge the clients table uses, so a band means the same colour

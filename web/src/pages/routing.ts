@@ -380,7 +380,7 @@ export function initRoutingPage(socket: Socket, isVisible: (page: string) => boo
         '<td style="font-family:var(--font-mono);text-align:right">' + r.distance + '</td>' +
         '<td>' + activeCell + '</td>' +
         '<td>' + typeCell + '</td>' +
-        '<td style="font-size:.7rem;color:var(--text-muted)">' + esc(r.comment || '—') + '</td>' +
+        '<td data-i18n-user-data style="font-size:.7rem;color:var(--text-muted)">' + esc(r.comment || '—') + '</td>' +
         '</tr>';
     }).join('');
   }

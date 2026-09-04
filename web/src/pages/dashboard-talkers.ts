@@ -28,6 +28,8 @@ export interface TalkerDevice {
 export interface TalkersPayload {
   devices?: TalkerDevice[];
   available?: boolean;
+  reason?: string;
+  emptyText?: string;
 }
 
 export function renderTalkers(data: TalkersPayload): void {
@@ -36,12 +38,14 @@ export function renderTalkers(data: TalkersPayload): void {
   const devices = data.devices || [];
   if (!devices.length) {
     table.innerHTML = '<tr><td colspan="4" class="empty-state">' +
-      (data.available === false ? 'Kid Control is not available on this router' : 'No devices') +
+      (data.available === false
+        ? (data.reason || 'Device traffic is unavailable')
+        : (data.emptyText || 'No devices')) +
       '</td></tr>';
     return;
   }
   table.innerHTML = devices.map((d) =>
-    '<tr><td>' + esc(d.name || '—') + '</td><td style="color:var(--text-muted)">' +
+    '<tr data-i18n-user-data><td>' + esc(d.name || '—') + '</td><td style="color:var(--text-muted)">' +
     esc(d.mac || '—') + '</td>' +
     '<td class="text-end" style="color:var(--accent-rx)">' + fmtMbps(d.rx_mbps) + '</td>' +
     '<td class="text-end" style="color:var(--accent-tx)">' + fmtMbps(d.tx_mbps) + '</td></tr>').join('');

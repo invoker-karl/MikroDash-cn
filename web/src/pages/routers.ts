@@ -662,7 +662,7 @@ export function renderTray(unlocated: RouterStatsRow[]): void {
   tray.hidden = false;
   tray.innerHTML = '<span class="rmt-label">No location ('
     + unlocated.length + '):</span>'
-    + unlocated.map((r) => '<span class="rmt-pill" data-open-router="' + esc(r.id) + '" title="'
+    + unlocated.map((r) => '<span class="rmt-pill" data-i18n-user-data data-open-router="' + esc(r.id) + '" title="'
         + esc(r.host) + '"><span class="rtl-dot" style="background:'
         + (r.connected ? 'var(--accent-green,#2fb344)' : 'var(--accent-red,#f87171)')
         + '"></span>' + esc(r.label) + '</span>').join('')

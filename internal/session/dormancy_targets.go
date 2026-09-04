@@ -62,6 +62,16 @@ func (s *Session) targets() map[string]collectorTarget {
 	add := func(key string, last func() any, suspend, resume func()) {
 		t[key] = collectorTarget{last: last, suspend: suspend, resume: resume}
 	}
+	bandwidthSuspend := s.bandwidth.Suspend
+	connsSuspend := s.conns.Suspend
+	if s.eff.Enabled["talkers"] && s.eff.Enabled["conns"] {
+		// Top Talkers consumes both stages as a shared rate engine. Card/page
+		// dormancy must not stop either stage while the dashboard collector is
+		// enabled; the disconnect and session-idle paths still suspend them
+		// directly in session.go.
+		bandwidthSuspend = func() {}
+		connsSuspend = func() {}
+	}
 
 	add("dns", func() any {
 		if p := s.dns.Last(); p != nil {
@@ -170,7 +180,7 @@ func (s *Session) targets() map[string]collectorTarget {
 			return p
 		}
 		return nil
-	}, s.bandwidth.Suspend, s.bandwidth.Resume)
+	}, bandwidthSuspend, s.bandwidth.Resume)
 	add("talkers", func() any {
 		if p := s.talkers.Last(); p != nil {
 			return p
@@ -182,7 +192,7 @@ func (s *Session) targets() map[string]collectorTarget {
 			return p
 		}
 		return nil
-	}, s.conns.Suspend, s.conns.Resume)
+	}, connsSuspend, s.conns.Resume)
 	add("dhcpLeases", func() any {
 		if p := s.dhcpLeases.Last(); p != nil {
 			return p

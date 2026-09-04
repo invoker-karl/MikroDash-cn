@@ -325,10 +325,10 @@ export function initInterfacesPage(socket: Socket, isVisible: (page: string) => 
       tr.dataset.fp = fp;
       const dotCls = i.disabled ? 'dis' : i.running ? 'up' : 'down';
       tr.innerHTML =
-        '<td class="ifl-name" title="' + esc(i.name + (i.comment ? ' · ' + i.comment : '')) + '">' +
+        '<td class="ifl-name" data-i18n-user-data title="' + esc(i.name + (i.comment ? ' · ' + i.comment : '')) + '">' +
           '<span class="iface-dot ' + dotCls + '"></span>' + esc(i.name) + '</td>' +
         '<td class="ifl-type">' + ifTypePill(i.type) + '</td>' +
-        '<td class="ifl-ip" title="' + esc(ipStr) + '">' +
+        '<td class="ifl-ip" data-i18n-user-data title="' + esc(ipStr) + '">' +
           (ipStr ? esc(ipStr) : '<span class="ifl-na">&mdash;</span>') + '</td>' +
         '<td class="ifl-num ' + (i.rxMbps ? 'ifl-rx' : 'ifl-zero') + '">' + fmtMbps(i.rxMbps || 0) + '</td>' +
         '<td class="ifl-num ' + (i.txMbps ? 'ifl-tx' : 'ifl-zero') + '">' + fmtMbps(i.txMbps || 0) + '</td>' +

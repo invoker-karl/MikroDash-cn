@@ -281,10 +281,10 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
         '<td class="fw-dragcell">' + dragCell + '</td>' +
         '<td class="fw-movecell">' + moveCell + '</td>' +
         '<td class="fw-pos">' + at + '</td>' +
-        '<td style="font-size:.7rem;color:var(--text-muted)">' + esc(r.chain) + '</td>' +
+        '<td data-i18n-user-data style="font-size:.7rem;color:var(--text-muted)">' + esc(r.chain) + '</td>' +
         '<td>' + actionBadge(r.action) + '</td>' +
         '<td style="font-size:.7rem;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(sd || '—') + '</td>' +
-        '<td style="font-size:.7rem;color:var(--text-muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(r.comment || '—') + '</td>' +
+        '<td data-i18n-user-data style="font-size:.7rem;color:var(--text-muted);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(r.comment || '—') + '</td>' +
         '<td class="fw-pkt text-end" style="font-family:var(--font-mono);white-space:nowrap">' + deltaIndicator + r.packets.toLocaleString() + '</td>' +
         '<td class="fw-byte text-end" style="font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);white-space:nowrap">' + (r.bytes > 0 ? fmtBytes(r.bytes) : '—') + '</td>' +
       '</tr>';

@@ -53,7 +53,7 @@ export function renderLogsCard(): void {
       else if (t.indexOf('firewall') >= 0) cls += ' log-firewall';
       else if (t.indexOf('system') >= 0) cls += ' log-system';
     }
-    return '<span class="' + cls + '">' +
+    return '<span class="' + cls + '" data-i18n-user-data>' +
       '<span class="log-time">' + dcEsc(e.time || '') + '</span> ' +
       (e.topics ? '<span class="log-topic">[' + dcEsc(e.topics) + ']</span> ' : '') +
       dcEsc(e.message) +

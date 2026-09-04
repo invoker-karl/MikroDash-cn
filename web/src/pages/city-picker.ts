@@ -68,7 +68,7 @@ export function cityListHtml(
       + '</div>';
   }
   return results.map((p, i) =>
-    '<div class="cpick-opt' + (i === active ? ' is-active' : '') + '" role="option"'
+    '<div class="cpick-opt' + (i === active ? ' is-active' : '') + '" role="option" data-i18n-user-data'
     + ' data-i="' + i + '">' + esc(p.name)
     // Region and country are joined with a space and EMPTIES ARE DROPPED, so a
     // town with no region does not render a leading gap before its country.
