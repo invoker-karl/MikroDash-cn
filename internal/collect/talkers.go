@@ -62,7 +62,7 @@ type TalkersPayload struct {
 	PollMs int `json:"pollMs"`
 	// Available is false only for a router with no kid-control menu. An empty
 	// list with `available: true` is a router where nobody is using bandwidth.
-	Available bool `json:"available"`
+	Available bool   `json:"available"`
 	Source    string `json:"source,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 	EmptyText string `json:"emptyText,omitempty"`
@@ -84,13 +84,15 @@ type Talkers struct {
 	streamMode bool
 
 	// unavailable latches. See the header.
-	unavailable bool
-	lastFp      string
-	last        *TalkersPayload
-	loop        *pollLoop
-	now         func() time.Time
+	unavailable     bool
+	lastFp          string
+	last            *TalkersPayload
+	loop            *pollLoop
+	now             func() time.Time
 	mu              sync.Mutex
 	connectionUntil time.Time
+	startPreferred  func()
+	stopPreferred   func()
 }
 
 // NewTalkers builds the collector. `topN` of 0 takes the original's default of
@@ -112,9 +114,23 @@ func NewTalkers(ros Reader, emit Emit, pollMs, topN int) *Talkers {
 	return t
 }
 
+// WithPreferred wires the shared Connections/Bandwidth rate engine to this
+// dashboard collector without making either package depend on session state.
+func (t *Talkers) WithPreferred(start, stop func()) *Talkers {
+	t.startPreferred = start
+	t.stopPreferred = stop
+	return t
+}
+
 // Start reads once and then polls, matching Netwatch.Start. The immediate tick
 // is what stops the card sitting empty for a whole interval after a connect.
-func (t *Talkers) Start() { t.Tick(); t.loop.start() }
+func (t *Talkers) Start() {
+	if t.startPreferred != nil {
+		t.startPreferred()
+	}
+	t.Tick()
+	t.loop.start()
+}
 
 func (t *Talkers) Suspend() { t.loop.stop() }
 
@@ -124,7 +140,12 @@ func (t *Talkers) Resume() {
 	}
 }
 
-func (t *Talkers) Stop() { t.loop.stop() }
+func (t *Talkers) Stop() {
+	t.loop.stop()
+	if t.stopPreferred != nil {
+		t.stopPreferred()
+	}
+}
 
 // Reconnected CLEARS the latch, and that is the opposite of what an earlier
 // version of this comment claimed.
@@ -240,7 +261,7 @@ func (t *Talkers) markUnavailable() {
 	t.loop.stop()
 	p := &TalkersPayload{
 		TS: t.now().UnixMilli(), Devices: []TalkerDevice{},
-		PollMs: t.reportedPollMs(), Available: false, Source: "kid-control",
+		PollMs: t.reportedPollMs(), Available: false,
 		Reason: "Device traffic is unavailable",
 	}
 	t.last = p
@@ -293,7 +314,7 @@ func (t *Talkers) commit(rows []routeros.Reply) {
 
 	p := &TalkersPayload{
 		TS: t.now().UnixMilli(), Devices: devices,
-		PollMs: t.reportedPollMs(), Available: true, Source: "kid-control",
+		PollMs: t.reportedPollMs(), Available: true,
 	}
 
 	// The fingerprint covers MAC and both rates but NOT the name, exactly as the

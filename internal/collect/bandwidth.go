@@ -380,7 +380,7 @@ type Bandwidth struct {
 	// onDevices feeds the dashboard Top Talkers projection without exposing the
 	// full Bandwidth payload through another room. emitEnabled is false when the
 	// rate engine exists only for that dashboard card.
-	onDevices  func(*BandwidthPayload)
+	onDevices   func(*BandwidthPayload)
 	emitEnabled bool
 
 	loop *pollLoop

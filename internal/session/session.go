@@ -693,6 +693,15 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		WithOrg(asn.Lookup).
 		WithDevices(s.talkers.AcceptBandwidth).
 		WithEmitEnabled(s.eff.Enabled["bandwidth"])
+	s.talkers.WithPreferred(func() {
+		if s.eff.Enabled["conns"] {
+			s.conns.Resume()
+			s.bandwidth.Resume()
+		}
+	}, func() {
+		s.bandwidth.Stop()
+		s.conns.Stop()
+	})
 	// The default interface is what the WAN badge watches, so it is always in
 	// the stream even when nobody has selected it. Five minutes of history, as
 	// the live app keeps.
@@ -1122,14 +1131,6 @@ func (s *Session) connectLoop() {
 			}
 			if s.eff.Enabled["talkers"] {
 				s.talkers.Start()
-				// The Chinese fork's dashboard talkers use ordinary connection
-				// byte deltas first, with Kid Control only as a fallback. Keep the
-				// two shared rate-engine stages alive even when the optional
-				// Bandwidth page/card itself is disabled.
-				if s.eff.Enabled["conns"] {
-					s.conns.Start()
-					s.bandwidth.Start()
-				}
 			}
 			if s.eff.Enabled["ping"] {
 				s.ping.Start()

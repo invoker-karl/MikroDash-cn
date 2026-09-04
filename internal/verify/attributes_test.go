@@ -28,6 +28,8 @@ var attrsExpectedUnread = map[string]string{
 	"res-add-dynamic": attrMarkup,
 	"sev":             attrMarkup,
 	"unit-for":        attrMarkup,
+	"i18n-user-data": "read by web/public/i18n.js, the classic-script localisation runtime; " +
+		"this verifier intentionally scans only TypeScript and CSS readers",
 }
 
 // TestRenderedAttributesAreRead: a `data-` attribute the port writes into the DOM
