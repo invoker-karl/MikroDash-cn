@@ -5,13 +5,13 @@ on:
     branches:
       - main
     tags:
-      - 'v*.*.*'
+      - 'v[0-9]*.[0-9]*.[0-9]*-cn.[0-9]*'
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   # Must be lowercase — Docker registry names are case-sensitive
-  IMAGE_NAME: secops-7/mikrodash
+  IMAGE_NAME: invoker-karl/mikrodash-cn
 
 jobs:
   build-and-push:
@@ -48,8 +48,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Only version tags produce published images: v0.5.21 pushes :0.5.21,
-      # :0.5 and :latest. A push to main builds but publishes nothing, so
+      # Only Chinese version tags produce published images: v0.8.16-cn.2
+      # pushes :0.8.16-cn.2 and :latest. A push to main builds but publishes nothing, so
       # :latest always points at the newest release rather than at whatever was
       # merged most recently.
       - name: Extract metadata

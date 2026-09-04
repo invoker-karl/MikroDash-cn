@@ -167,7 +167,7 @@ If you need remote access, enable `modern` auth **and** place MikroDash behind a
 Pull and run the pre-built image directly — no need to clone the repo or create a `.env` file:
 
 ```bash
-docker pull ghcr.io/secops-7/mikrodash:latest
+docker pull ghcr.io/invoker-karl/mikrodash-cn:latest
 ```
 
 Images are published by GitHub Actions on version tags only, so `latest` always tracks the most
@@ -182,7 +182,7 @@ recent release rather than unreleased work on `main`. Each release is a multi-ar
 To pin to a specific release:
 
 ```bash
-docker pull ghcr.io/secops-7/mikrodash:0.8.16
+docker pull ghcr.io/invoker-karl/mikrodash-cn:0.8.16-cn.2
 ```
 
 Run with Docker Compose — create a `docker-compose.yml`:
@@ -190,7 +190,7 @@ Run with Docker Compose — create a `docker-compose.yml`:
 ```yaml
 services:
   mikrodash:
-    image: ghcr.io/secops-7/mikrodash:latest
+    image: ghcr.io/invoker-karl/mikrodash-cn:latest
     restart: unless-stopped
     ports:
       - "3081:3081"
@@ -372,7 +372,7 @@ Infrastructure-level defaults are command-line flags on the binary, which the im
 ```yaml
 services:
   mikrodash:
-    image: ghcr.io/secops-7/mikrodash:latest
+    image: ghcr.io/invoker-karl/mikrodash-cn:latest
     command: ["-listen", ":3081", "-data", "/data", "-history", "-backup-scheduler", "-retention"]
 ```
 
@@ -405,7 +405,7 @@ If the version shown on the Settings page is behind the latest release, that is
 why, and `Update` will only fetch whatever they have published.
 
 To run the current release before their copy catches up, add it as an ordinary
-**Container** instead and pull `ghcr.io/secops-7/mikrodash:latest` directly, with
+**Container** instead and pull `ghcr.io/invoker-karl/mikrodash-cn:latest` directly, with
 a `/data` mount and a veth as usual.
 
 You do **not** need to set `ROUTER_USER` or `ROUTER_PASS`, whatever the App
