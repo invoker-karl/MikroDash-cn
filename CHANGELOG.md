@@ -2,6 +2,41 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.8.20] - A card can no longer say a device is offline and busy at the same time
+
+A review of everything 0.8.19 changed on the Devices page. No new features; four fixes an
+operator can see, and the checks that would have caught each of them.
+
+### Fixed
+
+- **A device card could show "Offline", with a login failure, beside a live CPU reading.** If a
+  device's password had been changed or a connection timed out at the wrong moment, the card took
+  its status from one connection and its gauges from another. It now waits until both agree, so a
+  device that is down shows empty gauges — which is what "not read yet" is supposed to look like.
+- **A device could stop recording silently after its Reporting switch was toggled.** Depending on
+  timing, the history collectors could fail to start and stay stopped until the switch was toggled
+  again. Nothing reported it; the device simply stopped appearing in new Reports data. Introduced
+  in 0.8.19.
+- **A device kept a blank card after its live connection timed out.** With the Devices page open,
+  a device you had stopped looking at showed a green "online" badge over empty CPU, memory and
+  uptime for a few seconds. The gauges are now filled the same way they are when the page opens.
+- **An unresponsive device tied up its own connection budget.** A device that was connected but had
+  stopped answering left reads outstanding with no time limit, and opening or switching devices
+  started more of them. Reads now give up on time, and only one is in flight per device.
+
+### Internal
+
+- The gauge read taken for a device with no collectors is one command, not two. It was also asking
+  for the health menu, which supplies a temperature no card displays.
+- A data race on the reporting flag, reported by `go test -race` and the cause of the silent-stop
+  above.
+- The diagnostic line that reports how many devices were read on page open no longer counts
+  readings from a previous visit, so a device that has stopped answering can be seen in the log
+  rather than hidden by its own last success.
+- Tests for each fix, every one of them failing on the unfixed code first. The documentation audit
+  now re-measures `CONTRIBUTING.md` as well as `CLAUDE.md`, and both places each number is written
+  — it had been checking one of two and the unchecked copy had drifted.
+
 ## [0.8.19] - Choose which devices are reported on, and a crash on the Devices page
 
 ### Added
