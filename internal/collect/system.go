@@ -261,6 +261,27 @@ func NewSystem(ros Reader, emit Emit, pollMs int) *System {
 	return s
 }
 
+// DeferHealth pushes the health menu's next read a full interval out, so the
+// NEXT Tick asks only for the gauges.
+//
+// ── WHY A ONE-SHOT READER NEEDS THIS ───────────────────────────────────────
+//
+// `healthAt` is the zero time on a fresh collector, so `time.Since` of it clears
+// `systemHealthEvery` by a wide margin and the very FIRST Tick issues
+// `/system/health/print` before `/system/resource/print`. For the polling
+// collector that is right — health is due, and it is one read in thirty
+// seconds. For a collector built to tick exactly once it doubles the cost, and
+// the health row's only consumer is `TempC`, which no card on the Devices page
+// renders.
+//
+// A caller that ticks repeatedly must not use this: it does not disable the
+// health read, it postpones it, and the interval resumes from here.
+func (s *System) DeferHealth() {
+	s.mu.Lock()
+	s.healthAt = time.Now()
+	s.mu.Unlock()
+}
+
 // Identity is what a router reports about ITSELF, as opposed to how it is
 // currently doing. The live shape, field for field:
 //

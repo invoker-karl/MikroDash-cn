@@ -34,12 +34,19 @@ const primeDeadline = 1500 * time.Millisecond
 // nothing at all while nobody is looking, which is the property the toggle
 // exists to protect.
 //
+// ONE READ IS LITERAL, and `primeSystem` has to work at it: a fresh
+// `collect.System` would issue `/system/health/print` before the gauges, so the
+// throwaway collector is told to defer that menu. See the note there.
+//
 // ── ONE TICK, NOT TWO ──────────────────────────────────────────────────────
 //
-// `System.Tick` does its static read from the SECOND tick on, so arch, serial
-// and licence level stay nil here. Fetching them would cost two more command
-// channels per router for three pills the overview pool fills in a couple of
-// seconds anyway; the gauges are what the card looks empty without.
+// `System.Tick` does its static read from the SECOND tick on, so SERIAL and
+// LICENCE LEVEL stay nil here. Fetching them would cost another command channel
+// per router for two pills the overview pool fills in a couple of seconds
+// anyway; the gauges are what the card looks empty without.
+//
+// ARCH IS NOT ONE OF THEM, though it reads like one: `architecture-name` comes
+// back on the resource row itself, so the prime already has it.
 func (p *Pool) PrimeStats() { p.primeStats(primeDeadline) }
 
 // primeStats is PrimeStats with the deadline injected, so a test need not wait
@@ -111,6 +118,11 @@ func (s *poolSession) primeSystem() {
 		return
 	}
 	c := collect.NewSystem(reader{s}, func(string, string, any) {}, s.eff.Poll["system"])
+	// ONE COMMAND, which is the whole claim this makes. A fresh collector has a
+	// zero `healthAt`, so its first Tick would ask `/system/health/print` before
+	// the gauges — a second roslimit-gated command per router for `TempC`, which
+	// nothing outside `internal/collect` reads.
+	c.DeferHealth()
 	c.Tick()
 	if p := c.Last(); p != nil {
 		s.primedMu.Lock()

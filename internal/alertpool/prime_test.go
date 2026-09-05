@@ -109,6 +109,27 @@ func TestPrimeStatsFillsAStatusOnlySessionsSnapshot(t *testing.T) {
 	if got.System.UptimeRaw != "1d2h3m" {
 		t.Errorf("System.UptimeRaw = %q, want the primed reading", got.System.UptimeRaw)
 	}
+
+	// ── AND IT COST EXACTLY ONE COMMAND ────────────────────────────────────
+	//
+	// The whole argument for priming on focus is that it is ONE read on a socket
+	// that is already open; CLAUDE.md's measure of efficiency is router channels,
+	// not CPU, so "one" is the claim that has to be pinned rather than assumed.
+	// It was two: `collect.NewSystem` starts with a zero `healthAt`, so the very
+	// first Tick asks `/system/health/print` before it asks for the gauges, and
+	// the health row feeds one field — `TempC` — that nothing outside
+	// `internal/collect` reads.
+	d.mu.Lock()
+	conns := append([]*primeConn{}, d.conns...)
+	d.mu.Unlock()
+	if len(conns) != 1 {
+		t.Fatalf("%d connection(s) dialled, want 1", len(conns))
+	}
+	if saw := conns[0].saw(); saw != "/system/resource/print" {
+		t.Errorf("the prime issued %q; it must be exactly one "+
+			"/system/resource/print — every other menu here is a command "+
+			"channel spent on a field no card renders", saw)
+	}
 }
 
 // A session that HAS a system collector is already answering, and priming it
