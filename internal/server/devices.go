@@ -619,7 +619,7 @@ func (cn *conn) devicesFocus() {
 	if first && cn.srv.pool != nil {
 		cn.srv.pool.Resume()
 	}
-	// ── BEFORE THE FIRST PAYLOAD, AND BEFORE THE SYNCS ─────────────────────
+	// ── BEFORE THE FIRST PAYLOAD, AFTER THE SYNCS ──────────────────────────
 	//
 	// A router with alerting and reporting both off holds a bare socket and runs
 	// no collectors, so the alert pool can say it is UP and nothing more: the
@@ -629,22 +629,26 @@ func (cn *conn) devicesFocus() {
 	// two-second tick — by the second frame the overview pool is answering, and
 	// re-reading would be a command channel spent on a question already asked.
 	//
-	// BEFORE `syncPool`, because syncPool is what starts the overview dials and
-	// those return in 130 ms to 2 s — inside the prime's own deadline. Priming
-	// after them meant the summary was routinely `Known` with a nil `System` by
-	// the time the frame was built, which is the one case where `fillFromAlert
-	// Pool` has to merge two connections' readings onto one row. Priming first
-	// leaves those routers not-Known, so the fill takes its else-branch and the
-	// whole row comes from a single source, which is the rule
-	// `internal/routers/assemble.go` states.
+	// AFTER THE SYNCS, and the order is load-bearing rather than incidental —
+	// it was questioned in review precisely because nothing here said why.
 	//
-	// Nothing is lost by being ahead of `syncAlertPool` either: a session it
-	// would build here has not dialled yet, so priming it would read nothing.
+	// `syncAlertPool` is what DECIDES THE SESSION SET: `PlanSync` rebuilds a
+	// session whose flags changed and drops one the overview pool has taken
+	// over, and a rebuilt session is a new socket with no reading on it. Priming
+	// ahead of that spends a command on sessions that are then discarded, and
+	// the frame goes out with the gap still in it. Priming after means every
+	// reading taken belongs to a session that is still there when
+	// `Snapshots()` is read a few lines below.
+	//
+	// The cost of this order is the one `fillFromAlertPool` handles: `syncPool`
+	// has started the overview dials by now and they return in 130 ms to 2 s, so
+	// a summary can be `Known` with a nil `System` when the frame is built. That
+	// is a gap to fill, not two sources to mix — see the guard there.
+	cn.srv.syncPool()
+	cn.srv.syncAlertPool()
 	if cn.srv.alertPool != nil {
 		cn.srv.alertPool.PrimeStats()
 	}
-	cn.srv.syncPool()
-	cn.srv.syncAlertPool()
 	cn.sendRoutersStats()
 	cn.startDevicesTick()
 }

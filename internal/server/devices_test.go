@@ -176,6 +176,22 @@ type connectedStub struct{ stubConn }
 
 func (connectedStub) Connected() bool { return true }
 
+// gaugeStub is a connected stub that ANSWERS the gauge read, so a prime taken
+// over it produces a real payload. Everything else answers emptily, which a
+// collector reads as "nothing to report".
+type gaugeStub struct{ connectedStub }
+
+func (gaugeStub) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
+	if cmd.Path != "/system/resource/print" {
+		return nil, nil
+	}
+	return []routeros.Reply{{
+		"cpu-load": "42", "total-memory": "100", "free-memory": "40",
+		"total-hdd-space": "100", "free-hdd-space": "90",
+		"version": "7.24 (stable)", "board-name": "hAP ax^3", "uptime": "9d9h9m",
+	}}, nil
+}
+
 // devicesServerWithPool gives the server a real pool and a store holding three
 // routers: one ordinary, one DISABLED, and one that an interactive session is
 // about to claim.
@@ -928,6 +944,95 @@ func TestTheFillStopsAtADisagreementAboutTheConnection(t *testing.T) {
 		t.Errorf("dropped = %+v; the alert pool's own snapshot says its socket "+
 			"is down, so its last reading is stale by its own account and has "+
 			"no business on a row the overview pool is answering for", got)
+	}
+}
+
+// ── THE FRAME THE FIX EXISTS FOR CARRIES THE GAUGES ────────────────────────
+//
+// The whole feature is one call in one handler, and the alert pool's own unit
+// tests pass with that call deleted — they drive `PrimeStats` directly. What
+// comes back when it goes is the symptom it was added for: a card with a green
+// badge over an empty CPU, memory and uptime for the two seconds the overview
+// pool takes to dial. Nothing errors and nothing logs.
+//
+// `internal/verify` pins the call and its ORDER by reading the source, which is
+// cheap and catches a deletion. This asserts the property that actually matters
+// and cannot be satisfied by a comment: the FIRST `routers:stats` frame a
+// browser receives already has the numbers in it. Driving `devicesFocus` needs
+// two lines, so the reason the source check gave for not doing it was wrong.
+//
+// The overview pool is deliberately absent, which is the state a cold Devices
+// page opens in: with `s.pool` nil the ONLY thing that could have read a gauge
+// is the prime.
+func TestTheFirstFrameAfterAFocusCarriesThePrimedGauges(t *testing.T) {
+	s := devicesServerWithPool(t)
+	s.pool = nil // the overview pool has not reached these routers yet
+
+	s.alertPool = alertpool.New(
+		func(routeros.Config) (alertpool.Conn, error) { return gaugeStub{}, nil },
+		time.Hour, nil, nil, nil,
+	)
+	t.Cleanup(s.alertPool.Close)
+
+	// THROUGH THE SERVER'S OWN SYNC, exactly as `server.go` does at startup, so
+	// the projection the focus builds a moment later is identical and
+	// `PlanSync` has no reason to rebuild. A hand-rolled fleet here omits
+	// `ReportingEnabled` and every session is rebuilt on the focus — which
+	// discards the sessions the prime just read, and is precisely how this test
+	// caught an attempt to move `PrimeStats` ahead of the syncs.
+	s.syncAlertPool()
+
+	// The sessions dial on their own goroutines. Waiting for the first
+	// OBSERVATION is what makes this deterministic: before it, there is nothing
+	// to prime and the test would be asserting against a race.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(s.alertPool.Snapshots()) < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := len(s.alertPool.Snapshots()); n < 2 {
+		t.Fatalf("%d session(s) observed, want the two enabled routers", n)
+	}
+
+	cn := devicesConn(s, "a")
+	cn.devicesFocus()
+	t.Cleanup(cn.stopDevicesTick)
+
+	// THE FIRST FRAME, not a later one. A tick two seconds on would carry the
+	// gauges whether or not the prime ran, which is exactly the difference this
+	// is here to catch.
+	var frame []byte
+	select {
+	case frame = <-cn.c.Send:
+	default:
+		t.Fatal("the focus sent no routers:stats frame at all")
+	}
+
+	var got struct {
+		Event string `json:"event"`
+		Data  []struct {
+			ID  string  `json:"id"`
+			CPU *int    `json:"cpu"`
+			Up  *string `json:"uptime"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(frame, &got); err != nil {
+		t.Fatalf("frame is not JSON: %v", err)
+	}
+	if got.Event != "routers:stats" {
+		t.Fatalf("first frame was %q, want routers:stats", got.Event)
+	}
+
+	primed := 0
+	for _, r := range got.Data {
+		if r.CPU != nil && *r.CPU == 42 && r.Up != nil && *r.Up == "9d9h9m" {
+			primed++
+		}
+	}
+	if primed != 2 {
+		t.Errorf("%d of %d rows in the FIRST frame carried the primed gauges, "+
+			"want 2 — a card with a green badge over a blank CPU is the whole "+
+			"defect the prime exists to remove.\nframe: %s", primed,
+			len(got.Data), frame)
 	}
 }
 

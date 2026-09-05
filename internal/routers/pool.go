@@ -714,7 +714,17 @@ func (s *poolSession) startCollectors() {
 	// AND THE HISTORY PAIR, on reconnect as well as on first connect. A router
 	// that dropped and came back would otherwise stop recording silently for as
 	// long as it stayed up.
-	s.setHistoryCollectors(s.historyOn)
+	//
+	// UNDER THE LOCK, because `applyReporting` writes this field from whichever
+	// goroutine handled the operator's toggle while the connect loop is running
+	// here. Reading it unlocked was a genuine data race — `go test -race`
+	// reports it against `pool.go:375` — and it decides whether the history pair
+	// starts at all, so losing the write means a router silently stops
+	// recording until the next toggle.
+	s.mu.Lock()
+	on := s.historyOn
+	s.mu.Unlock()
+	s.setHistoryCollectors(on)
 }
 
 // stopCollectors stops all three UNCONDITIONALLY, like the original, which calls
