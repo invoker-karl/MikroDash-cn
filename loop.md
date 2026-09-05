@@ -17,23 +17,23 @@ silently dropped.
 
 ## Status
 
-| # | Item | File | Verdict | State |
+| # | Item | File | Verdict | Outcome |
 |---|---|---|---|---|
-| 1 | Mixed-connection row: merge ignores `Connected` | `internal/server/devices.go:212` | bug | todo |
-| 2 | Prime placement creates the window item 1 patches | `internal/server/devices.go:612` | design | todo |
-| 3 | Prime costs TWO commands, not one | `internal/alertpool/prime.go:113` | efficiency | todo |
-| 4 | Prime goroutine unbounded: no timeout, no in-flight guard | `internal/alertpool/prime.go:68` | leak | todo |
-| 5 | "the next snapshot two seconds later carries it" is false | `internal/alertpool/prime.go:16` | comment | todo |
-| 6 | `PrimeStats` blocks the WebSocket reader | `internal/server/devices.go:612` | latency | todo |
-| 7 | `-race` fails on `historyOn` (pre-existing, `d8fe2f8`) | `internal/routers/pool.go:717` | bug | todo |
-| 8 | "primed N/M" tally counts stale values | `internal/alertpool/prime.go:94` | diagnostic | todo |
-| 9 | Ordering pin is text-scanning and passes vacuously | `internal/verify/prime_test.go:52` | test | todo |
-| 10 | No test can fail on item 1 or item 3 | `internal/server/devices_test.go:862` | test | todo |
-| 11 | Session that goes collector-less after focus is never primed | `internal/server/server.go:427` | gap | todo |
-| 12 | Comments the diff left contradicted | `internal/alertpool/pool.go:299` | comment | todo |
-| 13 | Test fake panics if anyone adds `t.Cleanup(p.Close)` | `internal/alertpool/prime_test.go:132` | test | todo |
-| 14 | `primedMu` redundant; two-pass count | `internal/alertpool/pool.go:131` | simplify | todo |
-| 15 | Doc drift: unpinned prose, stale CONTRIBUTING | `CLAUDE.md:451` | docs | todo |
+| 1 | Mixed-connection row: merge ignores `Connected` | `internal/server/devices.go:212` | bug | done — `090ea26` |
+| 2 | Prime placement creates the window item 1 patches | `internal/server/devices.go:612` | design | **REFUTED** — `bbf6b93` |
+| 3 | Prime costs TWO commands, not one | `internal/alertpool/prime.go:113` | efficiency | done — `8f89109` |
+| 4 | Prime goroutine unbounded: no timeout, no in-flight guard | `internal/alertpool/prime.go:68` | leak | done — `8a3372f` |
+| 5 | "the next snapshot two seconds later carries it" is false | `internal/alertpool/prime.go:16` | comment | done — `8a3372f` |
+| 6 | `PrimeStats` blocks the WebSocket reader | `internal/server/devices.go:612` | latency | closed by 4 — `340a1f9` |
+| 7 | `-race` fails on `historyOn` (pre-existing, `d8fe2f8`) | `internal/routers/pool.go:717` | bug | done — `bbf6b93` |
+| 8 | "primed N/M" tally counts stale values | `internal/alertpool/prime.go:94` | diagnostic | done — `8a3372f` |
+| 9 | Ordering pin is text-scanning and passes vacuously | `internal/verify/prime_test.go:52` | test | done — `bbf6b93` |
+| 10 | No test can fail on item 1 or item 3 | `internal/server/devices_test.go:862` | test | done — `4cd281c`, `9274d67` |
+| 11 | Session that goes collector-less after focus is never primed | `internal/server/server.go:427` | gap | done — `340a1f9` |
+| 12 | Comments the diff left contradicted | `internal/alertpool/pool.go:299` | comment | done — `4cd281c` |
+| 13 | Test fake panics if anyone adds `t.Cleanup(p.Close)` | `internal/alertpool/prime_test.go:132` | test | done — `4cd281c` |
+| 14 | `primedMu` redundant; two-pass count | `internal/alertpool/pool.go:131` | simplify | done — `8a3372f` |
+| 15 | Doc drift: unpinned prose, stale CONTRIBUTING | `CLAUDE.md:451` | docs | done — `9274d67` |
 
 ---
 
@@ -74,6 +74,26 @@ Check before moving: whether the overview pool drops or keeps sessions across
 suspend/resume, since a kept-and-Known session would reach the merge branch anyway.
 
 **Verify:** the cold-open ordering test, plus item 10's new tests still passing.
+
+### OUTCOME — REFUTED. The prime stays where it was, and now says why.
+
+The move was made, tested, and reverted. `syncAlertPool` DECIDES THE SESSION SET:
+`PlanSync` rebuilds a session whose flags changed and drops one the overview pool has taken
+over, and a rebuilt session is a fresh socket with no reading on it. Priming ahead of that
+spends a command on sessions that are then discarded, and the frame still goes out with the
+gap in it. Priming after means every reading taken belongs to a session still present when
+`Snapshots()` is read.
+
+The review's second half was right and is fixed: nothing said why. `devicesFocus` now
+states it and `internal/verify/prime_test.go` pins it, so it cannot be re-litigated from
+first principles again.
+
+**Honest note on the evidence.** The first thing that failed on the move was a test of
+mine — but it failed because it hand-rolled its fleet without `ReportingEnabled` and so
+provoked a rebuild production would not. With the setup corrected to go through
+`s.syncAlertPool()`, the move PASSES. It is not a regression; it is simply worse on the
+argument above. Recorded because "my test caught a regression" would have been the more
+flattering and less true story.
 
 ## 3. The prime is TWO commands, not one — `internal/alertpool/prime.go:113`
 
@@ -129,6 +149,17 @@ after the wait, pushing the second frame out.
 
 Bounded by items 2 and 4; decide whether that is enough or whether the prime should hand
 back a second frame instead of holding the first.
+
+### OUTCOME — closed by item 4, not separately.
+
+The exposure was one deadline per focus times three focus calls per router switch. The
+in-flight claim means the second and third find the session already priming and return at
+once, and the deadline now bounds the READ as well as the wait. Worst case is one deadline,
+once, in the cold window.
+
+What remains is deliberate and is not a defect: the first frame is worth waiting for, which
+is the entire premise of priming before the send. The two-second tick that follows runs on
+its own goroutine, and `PrimeUnread` (item 11) finds nothing to do on a warm page.
 
 ## 7. `-race` failure on `historyOn` — `internal/routers/pool.go:717`
 
@@ -204,3 +235,34 @@ nil collectors.
 The diff bumped the verify-test count by hand in two places, but
 `TestDocumentedClaimsAreTrue` matches only the table row — the prose copy is unpinned.
 `CONTRIBUTING.md` still says 23 Go tests and 15 test files against a current 34 and 22.
+
+---
+
+## Closing summary
+
+All 15 worked. 14 changed the code or its documentation; 1 was refuted by trying it.
+
+**What was actually wrong, in order of what it would have cost an operator:**
+
+1. A row could show an Offline badge and a login-failure message beside a live CPU gauge
+   (item 1). Reachable in both directions, and the rule it broke was already written down.
+2. Every Devices focus on a connected-but-silent router leaked a goroutine holding a
+   `roslimit` slot, three at a time on a router switch (item 4).
+3. The prime cost two router channels while claiming one, and the second bought a field no
+   card renders (item 3).
+4. `startCollectors` raced `applyReporting` on the reporting flag, so a toggled router
+   could silently stop recording until the next toggle (item 7) — pre-existing, from
+   `d8fe2f8`.
+5. A router whose interactive session idled out kept the blank card the whole feature
+   exists to remove, because the prime only ever ran on focus (item 11).
+
+**What the tests could not previously catch, and now can:** the mixed-connection row, the
+second command, the unbounded read, the stacked reads, the history-only session, the
+IfStatus-only gap, the prime's own ordering, and two documents' worth of drifting numbers.
+Every fix landed with a mutation that kills it.
+
+**Verification.** `go vet ./...` clean; `go test ./...` 40 packages ok; `go test -race`
+clean on `internal/routers`, `internal/alertpool` and `internal/server` (Debian image, cgo);
+`npm test` 0 failures. No live-hardware run — CLAUDE.md is explicit that a green suite is
+not a substitute for one, and the prime's behaviour against a router that stops answering
+mid-read is exactly the class of thing it says only hardware settles.
