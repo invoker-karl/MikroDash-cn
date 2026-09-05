@@ -30,46 +30,96 @@ import (
 // settled would have pinned the numbers that were about to change.
 type docClaim struct {
 	label string
+	// doc is the file the claim lives in, relative to the repository root.
+	// Empty means CLAUDE.md, which is where most of them are.
+	//
+	// A CLAIM IS NOT ONE PER NUMBER, IT IS ONE PER SENTENCE THAT STATES IT. The
+	// same count is written in more than one place, and only the places listed
+	// here are measured: CLAUDE.md's table row was pinned while the prose
+	// twenty lines below it was not, so the prose could keep a number the audit
+	// had already corrected in the table — with the audit green. CONTRIBUTING.md
+	// was never read at all and had drifted by eleven and seven.
+	doc string
 	// find must capture exactly one number from the document.
 	find    *regexp.Regexp
 	measure func(t *testing.T, root string) int
 }
 
+// verifyGoTests counts the Go tests in internal/verify.
+func verifyGoTests(t *testing.T, root string) int {
+	return countMatches(t, filepath.Join(root, "internal", "verify"), ".go",
+		regexp.MustCompile(`(?m)^func Test\w+\(t \*testing\.T\)`))
+}
+
+// webTestFiles counts the frontend test FILES.
+//
+// FILES, NOT CASES, and both documents say "test files" to match. `node --test`
+// reports more cases than files, but no static count reproduces that number
+// reliably — `test(` appears in strings and helpers too — and a claim that
+// cannot be measured exactly is a claim that drifts silently.
+func webTestFiles(t *testing.T, root string) int {
+	dir := filepath.Join(root, "web", "test")
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	n := 0
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".test.ts") {
+			n++
+		}
+	}
+	return n
+}
+
 func TestDocumentedClaimsAreTrue(t *testing.T) {
 	root := repoRoot(t)
-	claude := mustRead(t, filepath.Join(root, "CLAUDE.md"))
+	docs := map[string]string{}
+	readDoc := func(name string) string {
+		if name == "" {
+			name = "CLAUDE.md"
+		}
+		if _, ok := docs[name]; !ok {
+			docs[name] = mustRead(t, filepath.Join(root, name))
+		}
+		return docs[name]
+	}
 
 	claims := []docClaim{
 		{
-			label: "internal/verify: Go tests",
-			find:  regexp.MustCompile(`\|\s*` + "`internal/verify/`" + `\s*\|\s*(\d+) Go tests`),
-			measure: func(t *testing.T, root string) int {
-				return countMatches(t, filepath.Join(root, "internal", "verify"), ".go",
-					regexp.MustCompile(`(?m)^func Test\w+\(t \*testing\.T\)`))
-			},
+			label:   "CLAUDE.md table, internal/verify: Go tests",
+			find:    regexp.MustCompile(`\|\s*` + "`internal/verify/`" + `\s*\|\s*(\d+) Go tests`),
+			measure: verifyGoTests,
 		},
 		{
-			label: "web/test: frontend tests",
-			find:  regexp.MustCompile(`\|\s*` + "`web/test/`" + `\s*\|\s*(\d+) test files`),
-			measure: func(t *testing.T, root string) int {
-				// FILES, NOT CASES, and the document says "test files" to
-				// match. `node --test` reports 18 cases across them, but no
-				// static count reproduces that number reliably -- `test(` appears
-				// in strings and helpers too -- and a claim that cannot be
-				// measured exactly is a claim that drifts silently.
-				dir := filepath.Join(root, "web", "test")
-				ents, err := os.ReadDir(dir)
-				if err != nil {
-					t.Fatalf("reading %s: %v", dir, err)
-				}
-				n := 0
-				for _, e := range ents {
-					if strings.HasSuffix(e.Name(), ".test.ts") {
-						n++
-					}
-				}
-				return n
-			},
+			// THE SAME NUMBER, TWENTY LINES DOWN, AND IT WAS NOT PINNED. The
+			// table row above was corrected by this audit while this sentence
+			// kept the old count and nothing failed. That is the expired premise
+			// this whole file exists to catch, reproduced inside the document it
+			// audits.
+			label:   "CLAUDE.md prose, internal/verify: Go tests",
+			find:    regexp.MustCompile(`static self-checks as Go tests\s*—\s*(\d+) of them`),
+			measure: verifyGoTests,
+		},
+		{
+			label:   "CLAUDE.md table, web/test: frontend tests",
+			find:    regexp.MustCompile(`\|\s*` + "`web/test/`" + `\s*\|\s*(\d+) test files`),
+			measure: webTestFiles,
+		},
+		{
+			// CONTRIBUTING.md CARRIES THE SAME TABLE and was never read by this
+			// audit, so it drifted freely: 23 and 15 against a measured 34 and
+			// 22. A contributor reads that file first.
+			label:   "CONTRIBUTING.md, internal/verify: Go tests",
+			doc:     "CONTRIBUTING.md",
+			find:    regexp.MustCompile(`\|\s*` + "`internal/verify/`" + `\s*\|\s*(\d+) Go tests`),
+			measure: verifyGoTests,
+		},
+		{
+			label:   "CONTRIBUTING.md, web/test: frontend tests",
+			doc:     "CONTRIBUTING.md",
+			find:    regexp.MustCompile(`\|\s*` + "`web/test/`" + `\s*\|\s*(\d+) test files`),
+			measure: webTestFiles,
 		},
 		{
 			label: "go.mod: direct dependencies",
@@ -96,10 +146,14 @@ func TestDocumentedClaimsAreTrue(t *testing.T) {
 
 	words := map[string]int{"six": 6, "seven": 7, "eight": 8, "nine": 9}
 	for _, c := range claims {
-		m := c.find.FindStringSubmatch(claude)
+		m := c.find.FindStringSubmatch(readDoc(c.doc))
 		if m == nil {
-			t.Errorf("%s: the claim is no longer in CLAUDE.md in a shape this can read — either "+
-				"restate it or drop the claim, do not leave it unmeasured", c.label)
+			where := c.doc
+			if where == "" {
+				where = "CLAUDE.md"
+			}
+			t.Errorf("%s: the claim is no longer in %s in a shape this can read — either "+
+				"restate it or drop the claim, do not leave it unmeasured", c.label, where)
 			continue
 		}
 		want, err := strconv.Atoi(m[1])
@@ -113,12 +167,15 @@ func TestDocumentedClaimsAreTrue(t *testing.T) {
 		}
 		got := c.measure(t, root)
 		if got != want {
-			t.Errorf("%s: CLAUDE.md says %d, measured %d. Fix the document — a number that has "+
+			t.Errorf("%s: the document says %d, measured %d. Fix the document — a number that has "+
 				"drifted is how every expired premise in this repository started.",
 				c.label, want, got)
 		}
 	}
-	t.Logf("%d documented claims re-measured and true", len(claims))
+	// "RE-MEASURED", not "true": this line prints on a failing run too, and the
+	// failures above are the verdict. Saying "and true" beside a reported
+	// mismatch is the same species of claim this file exists to catch.
+	t.Logf("%d documented claims re-measured", len(claims))
 }
 
 // countMatches counts regex hits across a directory's files of one extension.

@@ -878,11 +878,26 @@ func TestTheAlertPoolFillsAGapInAnAnsweredSummary(t *testing.T) {
 		"gap": {RouterID: "gap", Connected: true, Known: true},
 		// ANSWERED AND FULL: nothing here may move.
 		"full": {RouterID: "full", Connected: true, Known: true, System: poolSys},
+		// HALF ANSWERED, which is its own branch and had no test: the overview
+		// pool's System collector has ticked and its IfStatus one has not. The
+		// two fields are filled independently, so a fill keyed on System alone
+		// would leave this row's rx and tx blank for no reason.
+		"half": {RouterID: "half", Connected: true, Known: true, System: poolSys},
 	}
 	fillFromAlertPool(bg, []alertpool.Snapshot{
 		{RouterID: "gap", Connected: true, System: snapSys, IfStatus: ifs},
 		{RouterID: "full", Connected: true, System: snapSys},
+		{RouterID: "half", Connected: true, System: snapSys, IfStatus: ifs},
 	})
+
+	if got := bg["half"]; got.IfStatus != ifs {
+		t.Errorf("half.IfStatus = %+v, want the alert pool's; System being "+
+			"answered must not stop IfStatus being filled", got.IfStatus)
+	}
+	if got := bg["half"]; got.System != poolSys {
+		t.Errorf("half.System = %+v, want the overview pool's — filling the "+
+			"other field must not disturb this one", got.System)
+	}
 
 	if got := bg["gap"]; got.System != snapSys || got.IfStatus != ifs {
 		t.Errorf("gap = %+v; the overview pool had dialled but collected "+
