@@ -14,17 +14,26 @@ import (
 // asked. The COUNT is the point: "did not prime this session" is otherwise
 // indistinguishable from "primed it and the result went nowhere".
 type primeConn struct {
-	mu   sync.Mutex
-	up   bool
-	cmds []string
+	mu       sync.Mutex
+	up       bool
+	cmds     []string
+	timeouts []time.Duration
+	// block, when non-nil, holds every Do until it is closed. It is how a
+	// router that is up but has stopped answering is played.
+	block chan struct{}
 }
 
 func (c *primeConn) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
 	c.mu.Lock()
 	c.cmds = append(c.cmds, cmd.Path)
+	c.timeouts = append(c.timeouts, cmd.Timeout)
+	block := c.block
 	c.mu.Unlock()
+	if block != nil {
+		<-block
+	}
 	if cmd.Path != "/system/resource/print" {
-		// Health, routerboard and licence all answer emptily. A collector treats
+		// A menu the prime does not ask for answers emptily. A collector treats
 		// that as "nothing to report", which is what a board without the menu
 		// does on a real router.
 		return nil, nil
@@ -58,6 +67,13 @@ func (c *primeConn) saw() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return strings.Join(c.cmds, ",")
+}
+
+// boundedBy reports whether every command carried a deadline, and which one.
+func (c *primeConn) bounds() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration{}, c.timeouts...)
 }
 
 type primeDial struct {
@@ -160,6 +176,75 @@ func TestPrimeStatsLeavesASessionWithACollectorAlone(t *testing.T) {
 		t.Errorf("PrimeStats read the gauges %d time(s) on a session that already "+
 			"collects them (saw %s); the guard on a nil collector is gone", n, c.saw())
 	}
+}
+
+// ── THE READ ENDS WHEN THE WAIT DOES ───────────────────────────────────────
+//
+// The deadline used to bound only how long `primeStats` waited. The read itself
+// carried no timeout, so `routeros.Client.Do` ran on `context.Background` and
+// `reader.Do` held the router's `roslimit` slot until the router answered —
+// which, for the router this whole path is about, is "possibly never". Stamping
+// the command is what makes "not cancelled" stop meaning "outstanding for ever".
+func TestThePrimeBoundsTheReadItStarts(t *testing.T) {
+	d := &primeDial{}
+	p := New(d.dial, 10*time.Millisecond, nil, nil, nil)
+	defer p.Close()
+
+	p.Sync([]Router{{ID: "a", Label: "Alpha", Host: "198.51.100.1"}}, "", nil)
+	waitFor(t, "the first observation", func() bool { return len(p.Snapshots()) == 1 })
+
+	p.primeStats(700 * time.Millisecond)
+
+	d.mu.Lock()
+	conns := append([]*primeConn{}, d.conns...)
+	d.mu.Unlock()
+	if len(conns) != 1 {
+		t.Fatalf("%d connection(s) dialled, want 1", len(conns))
+	}
+	for i, got := range conns[0].bounds() {
+		if got != 700*time.Millisecond {
+			t.Errorf("command %d carried Timeout %v, want the prime's own "+
+				"deadline of 700ms; an unbounded read holds a roslimit slot "+
+				"on the one router least able to spare it", i, got)
+		}
+	}
+}
+
+// ── ONE READ PER SESSION, NOT ONE PER FOCUS ────────────────────────────────
+//
+// `devicesFocus` is reached from `pageFocus` AND from `selectRouter` via
+// `rejoinPage`, so switching router is three calls in quick succession. Against
+// a router whose socket is up but which has stopped answering, each one used to
+// start its own goroutine and take its own `roslimit` slot, on exactly the
+// router that could least afford it.
+func TestASecondPrimeDoesNotStackAReadOnTheSameSession(t *testing.T) {
+	p := New((&primeDial{}).dial, time.Minute, nil, nil, nil)
+
+	hold := make(chan struct{})
+	c := &primeConn{up: true, block: hold}
+	s := &poolSession{r: Router{ID: "x"}, stop: make(chan struct{}), conn: c}
+	p.mu.Lock()
+	p.sessions["x"] = s
+	p.mu.Unlock()
+
+	// The first focus: its read blocks, so it is still outstanding when the
+	// second and third arrive. A short deadline so the call itself returns.
+	first := make(chan struct{})
+	go func() { defer close(first); p.primeStats(50 * time.Millisecond) }()
+	waitFor(t, "the first read to reach the router", func() bool {
+		return len(c.bounds()) == 1
+	})
+
+	p.primeStats(50 * time.Millisecond)
+	p.primeStats(50 * time.Millisecond)
+
+	if n := len(c.bounds()); n != 1 {
+		t.Errorf("%d reads outstanding (saw %s), want 1: a focus must not stack "+
+			"a second read on a session that is already priming", n, c.saw())
+	}
+
+	close(hold)
+	<-first
 }
 
 // A prime on a session whose connection has gone must not panic and must not

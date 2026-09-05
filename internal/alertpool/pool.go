@@ -125,11 +125,16 @@ type poolSession struct {
 	eff collection.Resolved
 
 	// primed is the one-shot system reading `PrimeStats` takes for a session
-	// that has no `system` collector, and it has its OWN lock rather than
-	// joining the collector pointers above: those are written once when the
-	// session is built and are therefore read unlocked, which this is not.
-	primedMu sync.Mutex
-	primed   *collect.SystemPayload
+	// that has no `system` collector, and `priming` is the claim that stops a
+	// second focus starting a second read while the first is still outstanding.
+	//
+	// UNDER `s.mu`, with `conn`, rather than a lock of their own. They cannot
+	// join the collector pointers above, which are written once when the session
+	// is built and are therefore read unlocked — but a second mutex bought
+	// nothing: nothing writes these while `s.mu` is held, and the prime path
+	// takes `s.mu` for `conn` anyway.
+	primed  *collect.SystemPayload
+	priming bool
 
 	stop chan struct{}
 	// stopped guards `close(stop)`. See teardown: the select/default that was
