@@ -879,6 +879,58 @@ func TestTheAlertPoolFillsAGapInAnAnsweredSummary(t *testing.T) {
 	}
 }
 
+// ── A GAP IS ONLY A GAP WHILE BOTH SIDES AGREE THE ROUTER IS UP ─────────────
+//
+// The fill copies gauges from the ALERT POOL's socket onto a summary whose
+// `Connected` and `LastError` came from the OVERVIEW pool's — two different
+// connections to the same router. While both say "up" that is a gap being
+// filled. The moment they disagree it is the mixing `routers.assemble` forbids,
+// and it renders as a row that is self-contradictory rather than merely
+// incomplete: `BuildRow` draws the login-failure box from `!Connected &&
+// LastError` and the gauges from `System != nil`, independently, so the card
+// shows an Offline badge over a live CPU reading.
+//
+// Both directions are reachable and both are asserted:
+//
+//   - the overview dial FAILED (rotated password, refused connection) inside
+//     the window where the alert pool's earlier socket is still up and primed;
+//   - the alert pool's socket DROPPED while the overview pool's is fine, which
+//     leaves `Snapshots` reporting `Connected: false` beside a `System` its
+//     collector read before the drop.
+func TestTheFillStopsAtADisagreementAboutTheConnection(t *testing.T) {
+	snapSys := &collect.SystemPayload{CPULoad: 22}
+	snapIfs := &collect.IfStatusPayload{}
+
+	bg := map[string]routers.Summary{
+		// The overview pool has an ANSWER, and the answer is "it is down".
+		"refused": {RouterID: "refused", Known: true, Connected: false,
+			LastError: "cannot log in"},
+		// The overview pool is fine; the alert pool's own socket is the one
+		// that went.
+		"dropped": {RouterID: "dropped", Known: true, Connected: true},
+	}
+	fillFromAlertPool(bg, []alertpool.Snapshot{
+		{RouterID: "refused", Connected: true, System: snapSys, IfStatus: snapIfs},
+		{RouterID: "dropped", Connected: false, System: snapSys, IfStatus: snapIfs},
+	})
+
+	if got := bg["refused"]; got.System != nil || got.IfStatus != nil {
+		t.Errorf("refused = %+v; the overview pool said this router is DOWN "+
+			"and gave a reason, so filling its gauges from the alert pool's "+
+			"socket draws an Offline badge and a login failure beside a live "+
+			"CPU gauge", got)
+	}
+	if got := bg["refused"]; got.Connected || got.LastError != "cannot log in" {
+		t.Errorf("refused = %+v; the fill must not disturb the answer the "+
+			"overview pool gave either", got)
+	}
+	if got := bg["dropped"]; got.System != nil || got.IfStatus != nil {
+		t.Errorf("dropped = %+v; the alert pool's own snapshot says its socket "+
+			"is down, so its last reading is stale by its own account and has "+
+			"no business on a row the overview pool is answering for", got)
+	}
+}
+
 // And the same thing end to end: a server whose ONLY source is the alert pool
 // still produces rows that say `known`, which is what the card reads.
 func TestAlertPoolOnlyCoverageStillMarksRowsKnown(t *testing.T) {

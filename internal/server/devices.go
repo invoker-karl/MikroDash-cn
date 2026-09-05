@@ -208,13 +208,35 @@ func fillFromAlertPool(bg map[string]routers.Summary, snaps []alertpool.Snapshot
 			// Filling a nil field is still FILL, NOT OVERWRITE — the rule the
 			// header states. A field the overview pool has answered is never
 			// touched.
-			if cur.System == nil && snap.System != nil {
-				cur.System = snap.System
+			//
+			// ── AND ONLY WHILE BOTH SOCKETS AGREE THE ROUTER IS UP ──────────
+			//
+			// This is the one place a row can end up holding two connections'
+			// readings, so it is the one place that has to check they are
+			// talking about the same router in the same state. `Connected` here
+			// is the OVERVIEW pool's, `snap.Connected` the ALERT pool's, and
+			// they can disagree in both directions:
+			//
+			//   - the overview dial failed on a rotated password while the
+			//     alert pool's older socket is still up and primed. `BuildRow`
+			//     draws the login-failure box from `!Connected && LastError`
+			//     and the gauges from `System != nil` INDEPENDENTLY, so filling
+			//     here puts a live CPU reading beside an Offline badge;
+			//   - the alert pool's own socket dropped, which leaves its last
+			//     reading in `Snapshots` beside `Connected: false` — stale by
+			//     its own account, and no better than the nil it would replace.
+			//
+			// A router that is genuinely down therefore keeps its empty gauges,
+			// which is what "not read" is supposed to look like.
+			if cur.Connected && snap.Connected {
+				if cur.System == nil && snap.System != nil {
+					cur.System = snap.System
+				}
+				if cur.IfStatus == nil && snap.IfStatus != nil {
+					cur.IfStatus = snap.IfStatus
+				}
+				bg[snap.RouterID] = cur
 			}
-			if cur.IfStatus == nil && snap.IfStatus != nil {
-				cur.IfStatus = snap.IfStatus
-			}
-			bg[snap.RouterID] = cur
 			continue
 		}
 		bg[snap.RouterID] = routers.Summary{
