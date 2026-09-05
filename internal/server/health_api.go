@@ -36,11 +36,41 @@ func (s *Server) registerHealth(mux *http.ServeMux) {
 
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	connected, activeID := s.activeRouterHealth()
+	// ── NOTHING TO CONNECT TO IS NOT THE SAME AS FAILING TO CONNECT ───────
+	//
+	// `ok` was simply `connected`, and `activeRouterHealth` reports false when
+	// no device is configured — so an install nobody had set up yet answered 503
+	// for ever. Not even `starting`: past the grace window it was flatly
+	// unhealthy, which is the state a fresh container is SUPPOSED to be in.
+	//
+	// THAT DEADLOCKED THE ROUTEROS APP INSTALL (issue #120,
+	// `docs/routeros-container-install.md`): the App withholds its UI-URL until
+	// the container reports healthy, the container was unhealthy until a device
+	// existed, and a device can only be added through that UI. The reporter got
+	// in by typing the address by hand, which is not something a first-time user
+	// knows to do.
+	//
+	// So there are THREE states here, not two:
+	//
+	//	no device configured    healthy — there is nothing to be disconnected from
+	//	device, not answered    starting, inside the grace window
+	//	device, still silent    unhealthy, and an orchestrator should act
+	//
+	// Only the first is new. `deviceExpected` is what separates it from the
+	// other two, and it is deliberately strict about not knowing: a fleet file
+	// it cannot read counts as "a device is expected", so a corrupt
+	// `routers.json` still reports unhealthy rather than being mistaken for a
+	// fresh install.
+	expected := s.deviceExpected()
+	ok := connected || !expected
+
 	// STARTING is not FAILING. The live route distinguishes them so an
 	// orchestrator does not kill a container that is still dialling: a 503
 	// during the grace window is expected, and the body says which it is.
-	starting := time.Since(s.startedAt) < healthStartupGrace && !connected
-	ok := connected
+	//
+	// Keyed off `ok` rather than `connected`, so an install with no device is
+	// READY rather than perpetually on its way to something.
+	starting := !ok && time.Since(s.startedAt) < healthStartupGrace
 
 	code := http.StatusOK
 	if !ok {
@@ -63,10 +93,15 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		"ok": ok, "starting": starting,
 		"routerConnected": connected,
 		"activeRouterId":  activeID,
-		"startupReady":    !starting,
-		"uptime":          time.Since(s.startedAt).Seconds(),
-		"now":             time.Now().UnixMilli(),
-		"version":         AppVersion,
+		// WHY it is ok, for a signed-in caller. `ok:true` with
+		// `routerConnected:false` is otherwise indistinguishable from a bug, and
+		// this is the field that says "because there is no device to connect
+		// to". Authenticated only, like everything below it.
+		"deviceConfigured": expected,
+		"startupReady":     !starting,
+		"uptime":           time.Since(s.startedAt).Seconds(),
+		"now":              time.Now().UnixMilli(),
+		"version":          AppVersion,
 		// NO `checks` MAP, and that omission IS deliberate: `computeHealthStatus`
 		// builds it from a per-collector freshness ledger this port does not
 		// have. Reporting healthy on two of three checks is honest; an always-
@@ -136,6 +171,39 @@ const AppVersion = "0.8.20"
 // healthStartupGrace matches the live `STARTUP_GRACE_MS`: a container that has
 // not finished its first dial is starting, not broken.
 const healthStartupGrace = 90 * time.Second
+
+// deviceExpected reports whether this install has been given a device to
+// connect to yet — and therefore whether "not connected" is a fault or just an
+// install nobody has set up.
+//
+// ── NOT KNOWING COUNTS AS EXPECTING ONE ────────────────────────────────────
+//
+// Three answers, and the middle one is why this is not a length check inline at
+// the call site:
+//
+//	routers on file     a device is expected; silence is a fault
+//	none, read cleanly  no device is expected; silence is the correct state
+//	cannot be read      a device is EXPECTED, because a fleet file that will not
+//	                    parse is a real problem and must not be mistaken for a
+//	                    fresh install
+//
+// The third is the one that keeps this honest. `store.Routers` returns no
+// routers both when there are none and when the file failed to decode — one
+// stray `"disabled": "false"` is enough, as its own comment records — so reading
+// the count alone would report a broken install as a brand new one, which is
+// exactly the confusion this whole change is about.
+func (s *Server) deviceExpected() bool {
+	if s.store == nil {
+		// No store wired at all. Not a state a built server reaches, and "cannot
+		// tell" takes the strict branch for the reason above.
+		return true
+	}
+	all, errs := s.store.Routers()
+	if len(all) > 0 {
+		return true
+	}
+	return len(errs) > 0
+}
 
 // activeRouterHealth reports whether the router this install is pointed at is
 // reachable, and which one that is.
