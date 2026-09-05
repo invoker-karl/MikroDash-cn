@@ -619,9 +619,7 @@ func (cn *conn) devicesFocus() {
 	if first && cn.srv.pool != nil {
 		cn.srv.pool.Resume()
 	}
-	cn.srv.syncPool()
-	cn.srv.syncAlertPool()
-	// ── BEFORE THE FIRST PAYLOAD, AND ONLY ON FOCUS ────────────────────────
+	// ── BEFORE THE FIRST PAYLOAD, AND BEFORE THE SYNCS ─────────────────────
 	//
 	// A router with alerting and reporting both off holds a bare socket and runs
 	// no collectors, so the alert pool can say it is UP and nothing more: the
@@ -630,9 +628,23 @@ func (cn *conn) devicesFocus() {
 	// the socket that is already open, which is why this is here and not in the
 	// two-second tick — by the second frame the overview pool is answering, and
 	// re-reading would be a command channel spent on a question already asked.
+	//
+	// BEFORE `syncPool`, because syncPool is what starts the overview dials and
+	// those return in 130 ms to 2 s — inside the prime's own deadline. Priming
+	// after them meant the summary was routinely `Known` with a nil `System` by
+	// the time the frame was built, which is the one case where `fillFromAlert
+	// Pool` has to merge two connections' readings onto one row. Priming first
+	// leaves those routers not-Known, so the fill takes its else-branch and the
+	// whole row comes from a single source, which is the rule
+	// `internal/routers/assemble.go` states.
+	//
+	// Nothing is lost by being ahead of `syncAlertPool` either: a session it
+	// would build here has not dialled yet, so priming it would read nothing.
 	if cn.srv.alertPool != nil {
 		cn.srv.alertPool.PrimeStats()
 	}
+	cn.srv.syncPool()
+	cn.srv.syncAlertPool()
 	cn.sendRoutersStats()
 	cn.startDevicesTick()
 }
