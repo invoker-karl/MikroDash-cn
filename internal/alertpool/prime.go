@@ -60,6 +60,15 @@ func (r primeReader) Do(c routeros.Cmd) ([]routeros.Reply, error) {
 // no CPU, no memory, no uptime, no model, for the two seconds the overview pool
 // takes to dial its own connection.
 //
+// ── THE FILTER IS `system == nil`, WHICH IS WIDER THAN "STATUS-ONLY" ────────
+//
+// A HISTORY-ONLY session — reporting on, alerting off — builds `ping` and
+// `traffic` and no `system` (`buildCollectors` returns before the alert six), so
+// its card is just as blank and it is primed too. That is deliberate and it is
+// written down here because it is invisible from the flags: a later tightening
+// of this filter to "alerting off AND reporting off" would silently un-fix it,
+// and nothing would fail.
+//
 // This closes that gap the cheapest way there is: ONE read, on a socket that is
 // already open, at the moment somebody actually looks at the page. It costs
 // nothing at all while nobody is looking, which is the property the toggle

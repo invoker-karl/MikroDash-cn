@@ -10,9 +10,12 @@ import (
 	"mikrodash/internal/routeros"
 )
 
-// primeConn answers the one menu the prime read asks for, and counts what it was
-// asked. The COUNT is the point: "did not prime this session" is otherwise
-// indistinguishable from "primed it and the result went nowhere".
+// primeConn answers the one menu the prime read asks for, and RECORDS EVERY
+// COMMAND it was asked for. The record is the point, twice over: "did not prime
+// this session" is otherwise indistinguishable from "primed it and the result
+// went nowhere", and a prime that quietly grew a second command would otherwise
+// be invisible — which it was, until the list was asserted whole rather than
+// filtered down to the read anyone expected.
 type primeConn struct {
 	mu       sync.Mutex
 	up       bool
@@ -155,18 +158,27 @@ func TestPrimeStatsFillsAStatusOnlySessionsSnapshot(t *testing.T) {
 // background, so counting its reads across a window would race its own timer.
 // Here nothing is running, so a read can only have come from PrimeStats.
 func TestPrimeStatsLeavesASessionWithACollectorAlone(t *testing.T) {
-	// NO `defer p.Close()`. Nothing was dialled, so there is no goroutine to
-	// stop — and teardown reads `system != nil` as "this session has all six
-	// alert collectors", which is true of every session the pool builds and not
-	// of the one below.
 	p := New((&primeDial{}).dial, time.Minute, nil, nil, nil)
+	// TEARDOWN IS SAFE HERE, and it has to be built that way rather than
+	// avoided. `stopCollectors` reads `system != nil` as "this session has all
+	// six alert collectors" — true of every session the pool builds, and true of
+	// this one only because all six are set below. The earlier version set
+	// `system` alone and was defused solely by never calling `Close`, so adding
+	// a cleanup, or a case that let `Sync` drop the session, would have panicked
+	// on a nil `Stop` instead of failing on the property under test.
+	t.Cleanup(p.Close)
 
 	c := &primeConn{up: true}
 	p.mu.Lock()
 	p.sessions["x"] = &poolSession{
 		r: Router{ID: "x"}, stop: make(chan struct{}), conn: c,
-		// Never started, so it issues nothing of its own.
-		system: collect.NewSystem(nil, nil, 0),
+		// Never started, so they issue nothing of their own.
+		system:   collect.NewSystem(nil, nil, 0),
+		ping:     collect.NewPing(nil, nil, 0, ""),
+		ifStatus: collect.NewIfStatus(nil, nil, "x", 0),
+		vpn:      collect.NewVPN(nil, nil, 0),
+		netwatch: collect.NewNetwatch(nil, nil, 0),
+		routing:  collect.NewRouting(nil, nil, 0).BGPOnly(),
 	}
 	p.mu.Unlock()
 
@@ -175,6 +187,42 @@ func TestPrimeStatsLeavesASessionWithACollectorAlone(t *testing.T) {
 	if n := c.reads(); n != 0 {
 		t.Errorf("PrimeStats read the gauges %d time(s) on a session that already "+
 			"collects them (saw %s); the guard on a nil collector is gone", n, c.saw())
+	}
+}
+
+// ── A HISTORY-ONLY SESSION IS JUST AS BLANK, AND IS PRIMED TOO ─────────────
+//
+// Reporting ON, alerting OFF builds `ping` and `traffic` and no `system`, so its
+// card has the same green badge over the same empty gauges. The filter is
+// `system == nil`, which covers it — but that is invisible from the flags, and a
+// later tightening to "alerting off AND reporting off" would silently un-fix it.
+// This is the test that would fail if someone did.
+func TestPrimeStatsAlsoFillsAHistoryOnlySession(t *testing.T) {
+	d := &primeDial{}
+	p := New(d.dial, 10*time.Millisecond, nil, nil, nil)
+	defer p.Close()
+
+	p.Sync([]Router{{
+		ID: "h", Label: "History", Host: "198.51.100.4",
+		ReportingEnabled: true, AlertsEnabled: false,
+	}}, "", nil)
+	waitFor(t, "the first observation", func() bool { return len(p.Snapshots()) == 1 })
+
+	if got := p.Snapshots()[0]; got.System != nil {
+		t.Fatalf("System = %+v before priming; a history-only session builds "+
+			"ping and traffic, and neither reads the gauges", got.System)
+	}
+
+	p.PrimeStats()
+
+	got := p.Snapshots()[0]
+	if got.System == nil {
+		t.Fatal("a history-only session was not primed: reporting on and " +
+			"alerting off leaves no system collector, so its card has the same " +
+			"green badge over the same blank gauges as a status-only one")
+	}
+	if got.System.CPULoad != 7 {
+		t.Errorf("System.CPULoad = %d, want 7 from the primed read", got.System.CPULoad)
 	}
 }
 

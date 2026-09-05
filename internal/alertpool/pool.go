@@ -290,7 +290,7 @@ func (p *Pool) Status() map[string]bool {
 }
 
 // Snapshot is what the Devices page can learn from THIS pool, for a router the
-// overview pool has not reached.
+// overview pool has not reached OR has reached but not yet collected from.
 //
 // ── WHY THE DEVICES PAGE READS THE ALERT POOL AT ALL ────────────────────────
 //
@@ -301,16 +301,24 @@ func (p *Pool) Status() map[string]bool {
 // no source at all and its card claimed "Offline" until the overview pool
 // finished dialling, about three seconds later.
 //
-// Everything here is ALREADY BEING COLLECTED. Reading it costs no extra router
-// channel, which is the measure that matters (see CLAUDE.md's "more efficient").
+// ALMOST EVERYTHING HERE IS ALREADY BEING COLLECTED, and reading it costs no
+// extra router channel — the measure that matters (see CLAUDE.md's "more
+// efficient"). The ONE exception is the `primedSystem()` branch below: that
+// reading is not a by-product of alerting, it is a command `PrimeStats` spends
+// deliberately, once per collector-less session per Devices focus. It is still
+// on a socket this pool already holds, which is the property worth having, but
+// "costs nothing" is not true of it and a change that leans on that sentence
+// will be leaning on the wrong half.
 //
 // TWO FIELDS, NOT `routers.Summary`'s SIX. `Connected` is available for every
-// router the pool holds, including a status-only one; `System` and `IfStatus`
-// exist only where alerting is enabled, because a status-only session
-// deliberately runs no collectors. There is no `DHCPLeases` — this pool has no
-// leases collector — so a card fed from here shows its Clients count as "—"
-// until the overview pool arrives, which is the honest rendering of "not read
-// yet" and exactly what a null already means on this page.
+// router the pool holds, including a status-only one; `IfStatus` exists only
+// where alerting is enabled, because a status-only session deliberately runs no
+// collectors. `System` is the one that can arrive either way — from the
+// collector where alerting is on, and from the prime where it is not. There is
+// no `DHCPLeases` — this pool has no leases collector — so a card fed from here
+// shows its Clients count as "—" until the overview pool arrives, which is the
+// honest rendering of "not read yet" and exactly what a null already means on
+// this page.
 type Snapshot struct {
 	RouterID  string
 	Connected bool
