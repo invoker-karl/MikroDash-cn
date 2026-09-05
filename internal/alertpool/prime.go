@@ -87,11 +87,34 @@ func (r primeReader) Do(c routeros.Cmd) ([]routeros.Reply, error) {
 //
 // ARCH IS NOT ONE OF THEM, though it reads like one: `architecture-name` comes
 // back on the resource row itself, so the prime already has it.
-func (p *Pool) PrimeStats() { p.primeStats(primeDeadline) }
+func (p *Pool) PrimeStats() { p.primeStats(primeDeadline, false) }
+
+// PrimeUnread is PrimeStats for sessions that have NEVER been primed, and it is
+// what the two-second tick calls.
+//
+// ── A SESSION CAN GO COLLECTOR-LESS AFTER THE FOCUS ────────────────────────
+//
+// `PrimeStats` runs on focus, which covers every session that existed then. One
+// flow creates a connected, collector-less session WHILE the page is open: an
+// interactive session idling out. `SetOnIdle` calls `syncAlertPool` and nothing
+// else, so the alert pool builds a bare socket and connects it in about a
+// hundred milliseconds, while the overview pool does not hear about the router
+// until the next tick and then has to dial and tick a collector of its own. For
+// those two to four seconds the card is the very thing the prime exists to
+// remove: a green badge over blank gauges.
+//
+// ONLY THE UNREAD ONES, which is what makes this safe on a timer. Re-reading
+// every collector-less session every two seconds is a command channel spent on a
+// question already answered — the cost the reporting toggle exists to avoid, and
+// the reason the prime is not a poll. A session is primed at most once here, and
+// its reading is short-lived anyway: as soon as the overview pool reports the
+// router `Known`, `syncAlertPool` drops the session and the row comes from
+// there instead.
+func (p *Pool) PrimeUnread() { p.primeStats(primeDeadline, true) }
 
 // primeStats is PrimeStats with the deadline injected, so a test need not wait
-// out a real one.
-func (p *Pool) primeStats(within time.Duration) {
+// out a real one. `unreadOnly` skips a session that already holds a reading.
+func (p *Pool) primeStats(within time.Duration, unreadOnly bool) {
 	p.mu.Lock()
 	cand := make([]*poolSession, 0, len(p.sessions))
 	for _, s := range p.sessions {
@@ -114,6 +137,11 @@ func (p *Pool) primeStats(within time.Duration) {
 	// router that had already failed to answer the first one.
 	todo := make([]*poolSession, 0, len(cand))
 	for _, s := range cand {
+		// Both of these take `s.mu`, which is why they are here and not in the
+		// loop above: see the note on the claim.
+		if unreadOnly && s.primedSystem() != nil {
+			continue
+		}
 		if s.startPriming() {
 			todo = append(todo, s)
 		}

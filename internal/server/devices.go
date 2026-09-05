@@ -705,6 +705,22 @@ func (cn *conn) startDevicesTick() {
 				// own `syncSessions` keeps current on every routers.json write.
 				cn.srv.syncPool()
 				cn.srv.syncAlertPool()
+				// ── AND ANY SESSION THAT WENT COLLECTOR-LESS SINCE ────
+				//
+				// `PrimeStats` on focus covers what existed then. An
+				// interactive session idling out builds a bare alert-pool
+				// session WHILE the page is open — `SetOnIdle` calls
+				// `syncAlertPool` and nothing else — and it connects in
+				// about a hundred milliseconds, well before the overview
+				// pool has dialled and ticked. That card is the green
+				// badge over blank gauges all over again.
+				//
+				// UNREAD ONLY: this is a timer, and re-reading a session
+				// that already answered is the poll the toggle exists to
+				// avoid.
+				if cn.srv.alertPool != nil {
+					cn.srv.alertPool.PrimeUnread()
+				}
 				cn.sendRoutersStats()
 			}
 		}

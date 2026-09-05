@@ -182,7 +182,7 @@ func TestPrimeStatsLeavesASessionWithACollectorAlone(t *testing.T) {
 	}
 	p.mu.Unlock()
 
-	p.primeStats(time.Second)
+	p.primeStats(time.Second, false)
 
 	if n := c.reads(); n != 0 {
 		t.Errorf("PrimeStats read the gauges %d time(s) on a session that already "+
@@ -226,6 +226,55 @@ func TestPrimeStatsAlsoFillsAHistoryOnlySession(t *testing.T) {
 	}
 }
 
+// ── THE TICK FILLS A GAP ONCE, AND THEN LEAVES IT ALONE ────────────────────
+//
+// `PrimeStats` on focus covers the sessions that existed then; an interactive
+// session idling out builds a connected, collector-less one WHILE the page is
+// open, and nothing would prime it until the next focus. `PrimeUnread` is what
+// the two-second tick calls, so it has to do both things: fill a session that
+// has never answered, and cost nothing on one that has. The second half is the
+// whole reason the prime is not a poll.
+func TestPrimeUnreadFillsAGapOnceAndDoesNotPollIt(t *testing.T) {
+	d := &primeDial{}
+	p := New(d.dial, 10*time.Millisecond, nil, nil, nil)
+	defer p.Close()
+
+	p.Sync([]Router{{ID: "a", Label: "Alpha", Host: "198.51.100.1"}}, "", nil)
+	waitFor(t, "the first observation", func() bool { return len(p.Snapshots()) == 1 })
+
+	p.PrimeUnread()
+	if got := p.Snapshots()[0]; got.System == nil {
+		t.Fatal("PrimeUnread left an unread session unread — a router whose " +
+			"interactive session idled out keeps its blank card until the next " +
+			"focus")
+	}
+
+	d.mu.Lock()
+	c := d.conns[0]
+	d.mu.Unlock()
+	if n := c.reads(); n != 1 {
+		t.Fatalf("%d reads to fill the gap, want 1 (saw %s)", n, c.saw())
+	}
+
+	// Four more ticks. A session that has answered must not be asked again.
+	for range 4 {
+		p.PrimeUnread()
+	}
+	if n := c.reads(); n != 1 {
+		t.Errorf("%d reads after four more ticks, want 1: re-reading a session "+
+			"that already answered is exactly the poll the reporting toggle "+
+			"exists to avoid (saw %s)", n, c.saw())
+	}
+
+	// And the focus path still REFRESHES, which is the difference between the
+	// two entry points.
+	p.PrimeStats()
+	if n := c.reads(); n != 2 {
+		t.Errorf("%d reads after a focus, want 2: PrimeStats takes a fresh "+
+			"reading for the frame it is about to build", n)
+	}
+}
+
 // ── THE READ ENDS WHEN THE WAIT DOES ───────────────────────────────────────
 //
 // The deadline used to bound only how long `primeStats` waited. The read itself
@@ -241,7 +290,7 @@ func TestThePrimeBoundsTheReadItStarts(t *testing.T) {
 	p.Sync([]Router{{ID: "a", Label: "Alpha", Host: "198.51.100.1"}}, "", nil)
 	waitFor(t, "the first observation", func() bool { return len(p.Snapshots()) == 1 })
 
-	p.primeStats(700 * time.Millisecond)
+	p.primeStats(700*time.Millisecond, false)
 
 	d.mu.Lock()
 	conns := append([]*primeConn{}, d.conns...)
@@ -278,13 +327,13 @@ func TestASecondPrimeDoesNotStackAReadOnTheSameSession(t *testing.T) {
 	// The first focus: its read blocks, so it is still outstanding when the
 	// second and third arrive. A short deadline so the call itself returns.
 	first := make(chan struct{})
-	go func() { defer close(first); p.primeStats(50 * time.Millisecond) }()
+	go func() { defer close(first); p.primeStats(50*time.Millisecond, false) }()
 	waitFor(t, "the first read to reach the router", func() bool {
 		return len(c.bounds()) == 1
 	})
 
-	p.primeStats(50 * time.Millisecond)
-	p.primeStats(50 * time.Millisecond)
+	p.primeStats(50*time.Millisecond, false)
+	p.primeStats(50*time.Millisecond, false)
 
 	if n := len(c.bounds()); n != 1 {
 		t.Errorf("%d reads outstanding (saw %s), want 1: a focus must not stack "+
@@ -307,7 +356,7 @@ func TestPrimeStatsToleratesASessionWithNoConnection(t *testing.T) {
 	p.sessions["x"] = s
 	p.mu.Unlock()
 
-	p.primeStats(time.Second)
+	p.primeStats(time.Second, false)
 
 	if got := s.primedSystem(); got != nil {
 		t.Errorf("primed %+v from a session with no connection", got)
