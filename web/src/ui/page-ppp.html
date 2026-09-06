@@ -20,7 +20,86 @@
         </div>
       </div>
 
-      <div class="card" id="pppCard">
+      <!-- PPP CONFIGURATION. Three RouterOS menus behind one tab strip, the
+           first two editable through the shared resource dialog and Servers
+           read-only. It sits ABOVE Active Sessions because this is the half an
+           operator comes here to CHANGE; the sessions table below is what the
+           change produces.
+
+           EACH TBODY KEEPS ITS OWN `data-res-rows` rather than one being
+           rewritten as the tab moves. `mountRows` is delegated from the
+           document, so a hidden panel simply cannot be clicked, and a row can
+           never be addressed as the wrong resource. Only the Add slot has to
+           follow the tab, because there is exactly one of it. -->
+      <div class="card" id="pppCfgCard">
+        <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
+          <div class="stab-bar" id="pppCfgTabBar" role="tablist" aria-label="PPP configuration">
+            <button class="stab active" data-ppptab="secrets" role="tab" aria-selected="true"
+                    aria-controls="ppptab-secrets" id="pppTabBtn-secrets">Secrets <span id="pppSecretBadge" class="card-badge" style="margin-left:.3rem">0</span></button>
+            <button class="stab" data-ppptab="profiles" role="tab" aria-selected="false"
+                    aria-controls="ppptab-profiles" id="pppTabBtn-profiles">Profiles <span id="pppProfileBadge" class="card-badge" style="margin-left:.3rem">0</span></button>
+            <button class="stab" data-ppptab="servers" role="tab" aria-selected="false"
+                    aria-controls="ppptab-servers" id="pppTabBtn-servers">PPPoE Servers</button>
+          </div>
+          <div class="hdr-actions">
+            <input id="pppSecretSearch" class="form-control form-control-sm"
+                   placeholder="Search user, profile or address&hellip;" style="flex:0 1 260px;width:260px"/>
+            <!-- Which resource this means follows the active tab: ppp.ts rewrites
+                 data-res-add and fires mikrodash:resmount. data-res-add-dynamic
+                 declares the whole range it can become, so the mount is greppable
+                 and a resource reachable only after a tab change still counts.
+                 SERVERS SETS IT EMPTY, which mountAddSlots renders as no button
+                 at all -- the table is read-only and must not offer an Add. -->
+            <span id="pppAddSlot" data-res-add="pppSecret"
+                  data-res-add-dynamic="pppSecret,pppProfile"></span>
+          </div>
+        </div>
+        <div class="card-body p-0">
+
+          <div class="capstab-panel" id="ppptab-secrets" role="tabpanel"
+               aria-labelledby="pppTabBtn-secrets">
+            <div class="data-scroll" style="max-height:360px;overflow-y:auto">
+              <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:820px">
+                <colgroup><col style="width:11%"><col style="width:18%"><col style="width:10%"><col style="width:14%">
+                          <col style="width:14%"><col style="width:14%"><col style="width:19%"></colgroup>
+                <thead><tr id="pppSecretThead"></tr></thead>
+                <tbody id="pppSecretTable" data-res-rows="pppSecret">
+                  <tr><td colspan="7" class="empty-state">Waiting for PPP secrets&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="capstab-panel" id="ppptab-profiles" role="tabpanel"
+               aria-labelledby="pppTabBtn-profiles" hidden>
+            <div class="data-scroll" style="max-height:360px;overflow-y:auto">
+              <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:640px">
+                <colgroup><col style="width:24%"><col style="width:20%"><col style="width:20%"><col style="width:18%"><col style="width:18%"></colgroup>
+                <thead><tr><th>Name</th><th>Local Address</th><th>Remote Address</th><th>Rate Limit</th><th>Encryption</th></tr></thead>
+                <tbody id="pppProfileTable" data-res-rows="pppProfile">
+                  <tr><td colspan="5" class="empty-state">Waiting for PPP configuration&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="capstab-panel" id="ppptab-servers" role="tabpanel"
+               aria-labelledby="pppTabBtn-servers" hidden>
+            <div class="data-scroll" style="max-height:360px;overflow-y:auto">
+              <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:640px">
+                <colgroup><col style="width:26%"><col style="width:26%"><col style="width:24%"><col style="width:24%"></colgroup>
+                <thead><tr><th>Service Name</th><th>Interface</th><th>Sessions</th><th>State</th></tr></thead>
+                <tbody id="pppServerTable">
+                  <tr><td colspan="4" class="empty-state">Waiting for PPP configuration&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="card" id="pppCard" style="margin-top:.85rem">
         <div class="stale-overlay">&#9679; stale</div>
         <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
           <div class="d-flex align-items-center gap-2">
@@ -38,80 +117,6 @@
               <thead><tr id="pppThead"></tr></thead>
               <tbody id="pppTable">
                 <tr><td colspan="7" class="empty-state">Waiting for PPP data&hellip;</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <div class="card" id="pppSecretCard" style="margin-top:.85rem">
-        <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
-          <div class="d-flex align-items-center gap-2">
-            <h3 class="card-title mb-0">Secrets</h3>
-            <span id="pppSecretBadge" class="card-badge">0</span>
-          </div>
-          <div class="hdr-actions">
-            <input id="pppSecretSearch" class="form-control form-control-sm"
-                   placeholder="Search user, profile or address…" style="flex:0 1 260px;width:260px"/>
-            <span data-res-add="pppSecret"></span>
-          </div>
-        </div>
-        <div class="card-body p-0">
-          <div class="data-scroll" style="max-height:360px;overflow-y:auto">
-            <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:820px">
-              <colgroup><col style="width:11%"><col style="width:18%"><col style="width:10%"><col style="width:14%">
-                        <col style="width:14%"><col style="width:14%"><col style="width:19%"></colgroup>
-              <thead><tr id="pppSecretThead"></tr></thead>
-              <tbody id="pppSecretTable" data-res-rows="pppSecret">
-                <tr><td colspan="7" class="empty-state">Waiting for PPP secrets&hellip;</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <div class="card" id="pppProfileCard" style="margin-top:.85rem">
-        <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
-          <div class="d-flex align-items-center gap-2">
-            <h3 class="card-title mb-0">Profiles</h3>
-            <span id="pppProfileBadge" class="card-badge">0</span>
-          </div>
-          <div class="hdr-actions">
-            <span data-res-add="pppProfile"></span>
-          </div>
-        </div>
-        <div class="card-body p-0">
-          <div class="data-scroll" style="max-height:300px;overflow-y:auto">
-            <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:640px">
-              <colgroup><col style="width:24%"><col style="width:20%"><col style="width:20%"><col style="width:18%"><col style="width:18%"></colgroup>
-              <thead><tr><th>Name</th><th>Local Address</th><th>Remote Address</th><th>Rate Limit</th><th>Encryption</th></tr></thead>
-              <tbody id="pppProfileTable" data-res-rows="pppProfile">
-                <tr><td colspan="5" class="empty-state">Waiting for PPP configuration&hellip;</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- SERVERS STAY READ-ONLY, and in their own card rather than sharing one
-           with the profiles as they used to. A row that opens an edit dialog and
-           a row that does nothing must not sit in the same table under one
-           "+ Add" button: `mountRows` opens the form for any row carrying a
-           data-id inside a [data-res-rows] tbody, so a mixed table would have
-           half its rows inert with nothing to say why. Editing a PPPoE server
-           can also cut the operator's own management path, which needs a guard
-           this change does not provide. -->
-      <div class="card" id="pppServerCard" style="margin-top:.85rem">
-        <div class="card-header d-flex align-items-center gap-2">
-          <h3 class="card-title mb-0">PPPoE Servers</h3>
-        </div>
-        <div class="card-body p-0">
-          <div class="data-scroll" style="max-height:300px;overflow-y:auto">
-            <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:640px">
-              <colgroup><col style="width:26%"><col style="width:26%"><col style="width:24%"><col style="width:24%"></colgroup>
-              <thead><tr><th>Service Name</th><th>Interface</th><th>Sessions</th><th>State</th></tr></thead>
-              <tbody id="pppServerTable">
-                <tr><td colspan="4" class="empty-state">Waiting for PPP configuration&hellip;</td></tr>
               </tbody>
             </table>
           </div>

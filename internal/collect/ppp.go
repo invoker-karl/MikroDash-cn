@@ -99,6 +99,33 @@ var (
 // Config is re-read every N ticks; sessions are read every tick.
 const pppConfigEvery = 12
 
+// pppHeartbeat bounds how long the dirty check may stay silent.
+//
+// ── A CARD WITH NOTHING TO SAY WAS BEING CALLED STALE ──────────────────────
+//
+// The emit is gated on a fingerprint, so an unchanged tick sends nothing. That
+// is right for bandwidth and wrong for LIVENESS, because the browser measures
+// staleness as "how long since a payload arrived" and cannot tell a collector
+// that is quiet from one that has stopped.
+//
+// The two contracts only conflict where the data can be genuinely static, and
+// PPP is exactly that: a router with no sessions and no configuration changes
+// produces an identical fingerprint for ever. So the first frame arrived, the
+// timer ran, and 25 seconds later the Active Sessions card wore a "stale" badge
+// while the collector was polling perfectly happily. Reported from the live
+// install, on the routers that run no PPP at all.
+//
+// FIFTEEN SECONDS IS NOT ARBITRARY. `web/src/stale.ts` retunes each card's
+// threshold to `pollMs + STALE_GRACE`, and STALE_GRACE is 20 s, so the smallest
+// threshold this collector can face is its 2 s poll floor plus 20 s. A heartbeat
+// below that is safe at every interval `clampPoll` allows, and 15 s clears the
+// tightest case with room to spare. A slower poll simply emits on every tick,
+// which is what it did before the dirty check existed.
+//
+// This does NOT make the fingerprint pointless: between heartbeats an unchanged
+// tick still sends nothing, which on a 2 s poll is seven frames saved in eight.
+const pppHeartbeat = 15 * time.Second
+
 // Bytes unchanged for longer than this means idle, not "still at the last rate".
 const pppIdleAfterSec = 10.0
 
@@ -206,6 +233,7 @@ type PPP struct {
 	servers  []PPPServer
 	ticks    int
 	lastFP   string
+	lastEmit time.Time
 	last     *PPPPayload
 	// nil = unprobed, false = this router has no such menu, stop asking.
 	activeAvail  *bool
@@ -495,10 +523,15 @@ func (p *PPP) Tick() {
 			sv.MaxSessions + "|" + sv.Auth + "|" + strconv.FormatBool(sv.Disabled) + ";")
 	}
 	fp.WriteString("|" + strconv.FormatBool(payload.Available))
-	if fp.String() == p.lastFP {
+	// CHANGED, OR THE HEARTBEAT IS DUE. See pppHeartbeat: suppressing an
+	// unchanged frame is right, suppressing them all is what made an idle
+	// router's card claim to be stale.
+	now := time.Now()
+	if fp.String() == p.lastFP && now.Sub(p.lastEmit) < pppHeartbeat {
 		return
 	}
 	p.lastFP = fp.String()
+	p.lastEmit = now
 	p.emit("page-ppp", "ppp:update", payload)
 }
 

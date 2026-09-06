@@ -59,6 +59,20 @@ export interface PppPayload {
   available: boolean;
 }
 
+/**
+ * Which resource each tab's Add button means, and which panel it shows.
+ *
+ * `servers` maps to the EMPTY STRING deliberately: `mountAddSlots` renders no
+ * button for a slot naming nothing, which is exactly right for a table this page
+ * does not let you edit. Giving it a resource would offer an Add that the write
+ * path would then have to refuse.
+ */
+const PPP_TAB_RES: Record<string, string> = {
+  secrets: 'pppSecret',
+  profiles: 'pppProfile',
+  servers: '',
+};
+
 const COLS_SECRET: SortCol[] = [
   { key: 'state', label: 'State' },
   { key: 'name', label: 'User' },
@@ -94,6 +108,7 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
   // are different lists answering different questions, and one shared SortState
   // would have a click on either header reorder both.
   const secretSort: SortState = { col: 'name', dir: 'asc' };
+  let cfgTab = 'secrets';
 
   /**
    * The sort key for one column.
@@ -320,6 +335,43 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
   // The secrets box filters only its own table, so it re-renders only that one.
   const sse = el<HTMLInputElement>('pppSecretSearch');
   sse?.addEventListener('input', debounce(renderSecrets, 150));
+
+  /** Point the Add slot at the table now on screen, and redraw its buttons. */
+  function syncAddSlot(): void {
+    const slot = el('pppAddSlot');
+    if (!slot) return;
+    slot.setAttribute('data-res-add', PPP_TAB_RES[cfgTab] ?? 'pppSecret');
+    // WITHOUT THIS THE BUTTON KEEPS THE PREVIOUS TAB'S RESOURCE. Three pages
+    // announced this event and nothing listened, so pressing Add on the NAT
+    // table opened the filter-rule form; `resource.ts` listens now and
+    // `web/test/resmount-seam.test.ts` is what keeps it listening.
+    document.dispatchEvent(new CustomEvent('mikrodash:resmount'));
+  }
+
+  function setCfgTab(t: string): void {
+    if (!(t in PPP_TAB_RES)) return;
+    cfgTab = t;
+    document.querySelectorAll<HTMLElement>('[data-ppptab]').forEach((b) => {
+      const on = b.dataset.ppptab === t;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    Object.keys(PPP_TAB_RES).forEach((k) => {
+      const panel = el('ppptab-' + k);
+      if (panel) panel.hidden = k !== t;
+    });
+    // The search box belongs to the Secrets list and filters nothing else, so
+    // it goes away rather than sitting there implying a filter that does not
+    // happen. Secrets is the only tab that can run to hundreds of rows.
+    const box = el('pppSecretSearch');
+    if (box) box.hidden = t !== 'secrets';
+    syncAddSlot();
+  }
+
+  el('pppCfgTabBar')?.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement | null)?.closest?.('[data-ppptab]') as HTMLElement | null;
+    if (btn) setCfgTab(btn.dataset.ppptab || '');
+  });
 
   // The row and the Add button both open the resource form. The row carries the
   // `.id` and the identity that resRow() wrote onto it, which is what lets the

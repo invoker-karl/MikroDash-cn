@@ -50,6 +50,8 @@ const IDS = [
   'pppSumCount', 'pppSumServices', 'pppSumRx', 'pppSumTx',
   'pppSecretTable', 'pppSecretThead', 'pppSecretBadge', 'pppSecretSearch',
   'pppProfileTable', 'pppProfileBadge', 'pppServerTable',
+  'pppCfgTabBar', 'pppAddSlot',
+  'ppptab-secrets', 'ppptab-profiles', 'ppptab-servers',
 ];
 
 // A MARKER THE PAGE COULD ONLY RENDER IF SOMETHING WENT WRONG.
@@ -216,6 +218,57 @@ function boot() {
     'the page looked up ids this test never declared, so parts of it rendered ' +
     'into nothing while the assertions passed: ' + missed.join(', '));
   say('ok  every id the page reads was declared by this test');
+}
+
+// ── 8. the tab strip, and the Add button that follows it ───────────────────
+//
+// THE HAZARD IS THE ADD BUTTON, NOT THE PANELS. `mountAddSlots` fills a slot
+// from its `data-res-add`, so a tab change that rewrites the attribute without
+// announcing `mikrodash:resmount` leaves the PREVIOUS tab's button in place.
+// That exact bug shipped once already: three pages announced the event and
+// nothing listened, so pressing Add on the NAT table opened the filter-rule
+// form. Both halves are asserted here, the attribute and the announcement.
+//
+// And Servers must offer NO Add at all: the table is read-only, so the slot
+// names nothing rather than naming a resource the write path would refuse.
+{
+  const { doc, send, restore } = boot();
+  send(payload([secret({})]));
+
+  let announced = 0;
+  doc.addEventListener('mikrodash:resmount', () => { announced += 1; });
+
+  const bar = doc.nodes.pppCfgTabBar;
+  const slot = doc.nodes.pppAddSlot;
+  // THE SHIM'S DEFAULT getAttribute ANSWERS null. setAttribute records into
+  // `node.attributes`, so that is where the written value is read back from;
+  // asserting through getAttribute would compare null to null and pass on a
+  // page that never wrote anything.
+  const addRes = () => slot.attributes['data-res-add'];
+  const click = (tab) => bar.fire('click', {
+    target: { closest: (sel) => (sel === '[data-ppptab]' ? { dataset: { ppptab: tab } } : null) },
+  });
+
+  click('profiles');
+  assert.strictEqual(addRes(), 'pppProfile',
+    'the Add slot did not follow the tab to Profiles');
+  assert.ok(announced >= 1, 'no mikrodash:resmount after a tab change — the Add ' +
+    'button keeps the previous tab\'s resource');
+  assert.strictEqual(doc.nodes['ppptab-profiles'].hidden, false, 'profiles panel stayed hidden');
+  assert.strictEqual(doc.nodes['ppptab-secrets'].hidden, true, 'secrets panel stayed visible');
+
+  const before = announced;
+  click('servers');
+  assert.strictEqual(addRes(), '',
+    'the read-only Servers tab offers an Add button');
+  assert.ok(announced > before, 'no resmount when moving to Servers, so the ' +
+    'Profiles Add button is still on screen over a read-only table');
+
+  click('secrets');
+  assert.strictEqual(addRes(), 'pppSecret',
+    'the Add slot did not come back to Secrets');
+  restore();
+  say('ok  the tab strip moves the panels, the Add slot and the announcement');
 }
 
 fs.rmSync(OUT, { force: true });

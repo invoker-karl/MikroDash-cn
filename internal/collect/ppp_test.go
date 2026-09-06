@@ -187,3 +187,54 @@ func ptrFloat(p *float64) any {
 	}
 	return *p
 }
+
+// ── AN IDLE ROUTER MUST STILL PROVE IT IS ALIVE ────────────────────────────
+//
+// The emit is gated on a fingerprint, and a router with no PPP produces the same
+// fingerprint for ever: no sessions, no secrets, no profiles, nothing to change.
+// So after the first frame the collector went silent, and `web/src/stale.ts`
+// measures staleness as "how long since a payload arrived" — it cannot tell a
+// quiet collector from a stopped one. Twenty-five seconds later the Active
+// Sessions card wore a "stale" badge while the poll loop was perfectly healthy.
+// Reported off the live install.
+//
+// `pppHeartbeat` bounds the silence. This drives the real Tick with a reader
+// that never changes its answer, and asserts BOTH halves: an unchanged tick
+// inside the window still sends nothing (the dirty check is not thrown away),
+// and a tick past the window sends anyway (the card cannot go stale).
+func TestAnUnchangingRouterStillEmitsAHeartbeat(t *testing.T) {
+	rd := fakeReader{rows: map[string][]routeros.Reply{
+		"/ppp/active/print":                    {},
+		"/ppp/secret/print":                    {},
+		"/ppp/profile/print":                   {},
+		"/interface/pppoe-server/server/print": {},
+	}}
+	emits := 0
+	p := NewPPP(rd, func(room, event string, payload any) { emits++ }, 5000)
+
+	p.Tick()
+	if emits != 1 {
+		t.Fatalf("%d emits after the first tick, want 1 — nothing was sent at all", emits)
+	}
+
+	// INSIDE the window: the fingerprint has not moved, so the dirty check must
+	// still suppress. Losing this half would make the heartbeat a per-tick emit.
+	p.Tick()
+	p.Tick()
+	if emits != 1 {
+		t.Errorf("%d emits, want 1 — an unchanged tick inside the heartbeat "+
+			"window sent a frame, so the dirty check is doing nothing", emits)
+	}
+
+	// PAST the window. Reaching back to `lastEmit` rather than sleeping: the
+	// real wait is fifteen seconds and a test that takes that long gets deleted.
+	p.mu.Lock()
+	p.lastEmit = p.lastEmit.Add(-pppHeartbeat - time.Second)
+	p.mu.Unlock()
+
+	p.Tick()
+	if emits != 2 {
+		t.Errorf("%d emits, want 2 — nothing changed and the heartbeat was due, "+
+			"so the card is about to be called stale while the collector is fine", emits)
+	}
+}
