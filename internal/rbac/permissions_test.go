@@ -1,6 +1,54 @@
 package rbac
 
-import "testing"
+import (
+	"testing"
+
+	"mikrodash/internal/pages"
+)
+
+// ── A PERMISSION CONFERRED BY A PAGE NOBODY CAN HOLD IS UNREACHABLE ────────
+//
+// `readConfers` and `writeConfers` are keyed by PAGE KEY: a role holding that
+// page at that access level gains the listed permissions. So a key naming a page
+// that no longer exists does not merely fail to help — it makes those
+// permissions ungrantable by any role, through any scope, for ever.
+//
+// IT HAD ALREADY HAPPENED. `writeConfers["wireless"]` survived the 2026-09-01
+// rename to `wifi-clients`, and `wireless` confers `router:scan`, which is the
+// only thing gating the WiFi scan (`internal/server/wifiscan.go`). Every RBAC
+// principal was refused a scan, and the projection looked perfectly healthy:
+// the table had an entry, the permission was in `Scoped`, and `known()` accepted
+// it. Nothing anywhere joined the key back to the page list.
+//
+// The same rename left three resource declarations and the roles catalogue
+// stale. This is the third table to be pinned against `internal/pages`, which is
+// the fix CLAUDE.md records for `rbac.PageKeys` itself.
+func TestConfersTablesNameLivePages(t *testing.T) {
+	live := map[string]bool{}
+	for _, k := range pages.Keys() {
+		live[k] = true
+	}
+	if len(live) < 20 {
+		t.Fatalf("only %d live page keys — the source moved and this would pass "+
+			"anything", len(live))
+	}
+	for label, table := range map[string]map[string][]string{
+		"readConfers": readConfers, "writeConfers": writeConfers,
+	} {
+		for page, confers := range table {
+			if live[page] {
+				continue
+			}
+			msg := ""
+			if to, renamed := pages.Renamed[page]; renamed {
+				msg = " — renamed to " + to
+			}
+			t.Errorf("%s is keyed on %q, which is not a live page%s. No role can "+
+				"hold that page, so %v cannot be conferred on anyone.",
+				label, page, msg, confers)
+		}
+	}
+}
 
 func perm(t *testing.T, r *Resolver, user, permission, router string) bool {
 	t.Helper()

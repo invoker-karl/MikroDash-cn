@@ -1363,7 +1363,7 @@ func pskLength(field string) func(map[string]string) []Error {
 func wifiRemovable(r map[string]string) bool { return r["master-interface"] != "" }
 
 var WifiNet = &Resource{
-	Key: "wifiNet", Page: "wifi", Label: "Wifi Network",
+	Key: "wifiNet", Page: "wifi-networks", Label: "Wifi Network",
 	Title: "Wifi Network", Menu: "/interface/wifi", Identity: []string{"name"},
 	RequiresMenu: "/interface/wifi",
 	// TWO GUARDS, TWO DIFFERENT QUESTIONS. selfPath asks whether this cuts the
@@ -1428,7 +1428,7 @@ var WifiNet = &Resource{
 }
 
 var WlNet = &Resource{
-	Key: "wlNet", Page: "wifi", Label: "Wifi Network",
+	Key: "wlNet", Page: "wifi-networks", Label: "Wifi Network",
 	Title: "Wifi Network (legacy)", Menu: "/interface/wireless", Identity: []string{"name"},
 	RequiresMenu: "/interface/wireless",
 	// NO wifiInherit here: the legacy stack has no configuration profiles to
@@ -1477,7 +1477,7 @@ var WlNet = &Resource{
 }
 
 var WlSecProfile = &Resource{
-	Key: "wlSecProfile", Page: "wifi", Label: "Security Profile",
+	Key: "wlSecProfile", Page: "wifi-networks", Label: "Security Profile",
 	Title: "Wifi Security Profile", Menu: "/interface/wireless/security-profiles",
 	Identity: []string{"name"}, RequiresMenu: "/interface/wireless/security-profiles",
 	// BOTH KEYS ARE `secret`, so neither is read back into the form and neither
@@ -1513,7 +1513,7 @@ var WlSecProfile = &Resource{
 // the moment it is saved, which is what `capsmanPush` warns about.
 //
 // PAGE SCOPE IS THE AUTHORISATION BOUNDARY, and the asymmetry is deliberate:
-// these are `Page: "capsman"` while wifiNet is `Page: "wifi"`, so a role holding
+// these are `Page: "capsman"` while wifiNet is `Page: "wifi-networks"`, so a role holding
 // write on wifi but not capsman can override a value on ONE interface but cannot
 // edit the shared profile every CAP follows. Smaller blast radius for the lesser
 // grant. Do not "simplify" the two pages onto one key.

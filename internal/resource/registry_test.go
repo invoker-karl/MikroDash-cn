@@ -6,7 +6,59 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"mikrodash/internal/pages"
 )
+
+// ── EVERY RESOURCE'S `Page` MUST BE A LIVE PAGE KEY ────────────────────────
+//
+// `Page` is not a label. It is the RBAC key, and both gates that read it refuse
+// an unknown page BEFORE they consult any role:
+//
+//	Session.CanPage   `s.Pages[page]` is absent  → deny
+//	rbac.CanPage      `r.pages[page]` is false   → deny, before the builtin
+//	                  short circuit, so not even an administrator gets through
+//
+// So a `Page` naming a renamed key does not degrade — it denies everyone with an
+// identity, and only `AuthMode: "none"` (which short-circuits to true) still
+// works. That is the worst possible shape for a bug: it behaves perfectly on the
+// install with authentication switched off, which is where most testing happens.
+//
+// IT HAD ALREADY HAPPENED. `wifiNet`, `wlNet` and `wlSecProfile` declared
+// `Page: "wifi"` after the 2026-09-01 rename moved that key to `wifi-networks`.
+// Because `resSchema` is gated on READ, the WiFi Networks page did not merely
+// refuse writes: it never received a schema, so no Add button was drawn and
+// clicking a row did nothing. Nothing logged, nothing errored.
+//
+// CLAUDE.md's page-key table calls the permission meaning "the dangerous one"
+// and records `rbac.PageKeys` being fixed to read `internal/pages` so it could
+// not drift again. This is the same medicine one layer out: the registry is now
+// compared against the same source, so a rename that misses a resource fails
+// here instead of in the field.
+func TestEveryResourcePageIsALivePageKey(t *testing.T) {
+	live := map[string]bool{}
+	for _, k := range pages.Keys() {
+		live[k] = true
+	}
+	if len(live) < 20 {
+		t.Fatalf("only %d page keys read from internal/pages — the source moved "+
+			"and this check would pass anything", len(live))
+	}
+
+	for _, r := range All() {
+		if live[r.Page] {
+			continue
+		}
+		msg := ""
+		if to, renamed := pages.Renamed[r.Page]; renamed {
+			msg = " — it was renamed to " + to + ", so use that"
+		}
+		t.Errorf("resource %q declares Page %q, which is not a live page key%s.\n"+
+			"Both permission gates deny an unknown page before consulting any "+
+			"role, so this resource is unreachable for every principal except "+
+			"AuthMode \"none\".", r.Key, r.Page, msg)
+	}
+}
 
 // The registry must hold EVERY declared resource.
 //

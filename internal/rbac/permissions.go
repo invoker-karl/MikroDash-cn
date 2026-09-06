@@ -80,10 +80,14 @@ var readConfers = map[string][]string{
 var writeConfers = map[string][]string{
 	"dashboard": {"router:ack"},
 	"firewall":  {"router:diagnose"},
-	"wireless":  {"router:scan"},
-	"reports":   {"router:schedule"},
-	"devices":   {"router:manage"},
-	"settings":  {"system:settings", "router:purge"},
+	// `wifi-clients`, renamed from `wireless` on 2026-09-01. The rename missed
+	// this table: `router:scan` is conferred by nothing else, so every RBAC
+	// principal was refused a WiFi scan while the projection looked perfectly
+	// healthy. Pinned now by TestConfersTablesNameLivePages.
+	"wifi-clients": {"router:scan"},
+	"reports":      {"router:schedule"},
+	"devices":      {"router:manage"},
+	"settings":     {"system:settings", "router:purge"},
 }
 
 // writeConfersAlways is conferred by ANY write row. `router:write` has no call

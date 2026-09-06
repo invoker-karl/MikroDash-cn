@@ -1031,7 +1031,11 @@ func (cn *conn) refreshFor(res *resource.Resource) {
 		if cn.rsession.CollectorEnabled("firewall") {
 			cn.rsession.Firewall().RefreshNow()
 		}
-	case "wifi":
+	// TWO NAMESPACES ON ONE LINE, AND ONLY ONE OF THEM MOVED. The case label is
+	// a PAGE key and was renamed to `wifi-networks` on 2026-09-01;
+	// `CollectorEnabled("wifi")` is a COLLECTOR key and was not renamed at all.
+	// Changing both would break the refresh; changing neither left it dead.
+	case "wifi-networks":
 		if cn.rsession.CollectorEnabled("wifi") {
 			cn.rsession.Wifi().RefreshNow()
 		}

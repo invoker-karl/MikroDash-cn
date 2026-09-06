@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"mikrodash/internal/pages"
 )
 
 type rbacTables struct {
@@ -83,25 +85,60 @@ func TestThePermissionVocabularyMatches(t *testing.T) {
 	sameSet(t, "SCOPED", keys(Scoped), f.Scoped)
 }
 
+// current translates a Node-era page key into this app's key for the same page.
+//
+// ── THE RECORDING PREDATES THE RENAME, AND CANNOT BE RE-CUT ────────────────
+//
+// Six page keys were renamed on 2026-09-01. The frozen tables here were taken
+// from `src/rbac.js` before that and name the OLD keys, and the generator that
+// produced them reads a source that no longer exists — so the recording can
+// never be brought forward. Comparing key names literally therefore asks the
+// wrong question: it demands the port keep names it deliberately changed.
+//
+// IT WAS NOT MERELY WRONG, IT HELD A BUG IN PLACE. `writeConfers` kept
+// `"wireless"` because this gate required it to, and `wireless` has not been a
+// page since the rename — so `router:scan` was conferred by a page no role could
+// hold, and the WiFi scan was refused for every RBAC principal. A correct fix
+// failed this test, which is the strongest possible reason to distrust a name
+// comparison here.
+//
+// `pages.Renamed` is append-only and is exactly the old→new map needed, so the
+// comparison now runs through it. What is still checked is the PROPERTY worth
+// checking: that a given page confers the same permissions it always did.
+func current(k string) string {
+	if to, ok := pages.Renamed[k]; ok {
+		return to
+	}
+	return k
+}
+
 // TestTheProjectionMatches — which permissions a page's READ or WRITE row hands
 // out. This is what a role edit in the UI actually grants.
 func TestTheProjectionMatches(t *testing.T) {
 	f := loadRBACTables(t)
 
 	for page, want := range f.ReadConfers {
-		sameSet(t, "READ_CONFERS["+page+"]", readConfers[page], want)
+		sameSet(t, "READ_CONFERS["+current(page)+"]", readConfers[current(page)], want)
+	}
+	recordedRead := map[string]bool{}
+	for page := range f.ReadConfers {
+		recordedRead[current(page)] = true
 	}
 	for page := range readConfers {
-		if _, ok := f.ReadConfers[page]; !ok {
+		if !recordedRead[page] {
 			t.Errorf("READ_CONFERS: this port projects %q and the live module does not", page)
 		}
 	}
 
 	for page, want := range f.WriteConfers {
-		sameSet(t, "WRITE_CONFERS["+page+"]", writeConfers[page], want)
+		sameSet(t, "WRITE_CONFERS["+current(page)+"]", writeConfers[current(page)], want)
+	}
+	recordedWrite := map[string]bool{}
+	for page := range f.WriteConfers {
+		recordedWrite[current(page)] = true
 	}
 	for page := range writeConfers {
-		if _, ok := f.WriteConfers[page]; !ok {
+		if !recordedWrite[page] {
 			t.Errorf("WRITE_CONFERS: this port projects %q and the live module does not — "+
 				"a write grant here would confer a permission the live app never gives", page)
 		}
