@@ -9,9 +9,10 @@
 // acceptance criterion is that it renders identically, not that it renders
 // correctly.
 
-import { esc, el, debounce, renderSortHeader, sortMul, fmtMbps, fmtBytes,
+import { esc, el, resRow, debounce, renderSortHeader, sortMul, fmtMbps, fmtBytes,
          parseUptime, type SortCol, type SortState } from '../dom';
 import type { Socket } from '../socket';
+import { mountAdds, mountRows } from '../resource';
 
 export interface PppSession {
   id: string; name: string; service: string; address: string; callerId: string;
@@ -21,8 +22,26 @@ export interface PppSession {
   rxRate: number | null; txRate: number | null;
 }
 
+/**
+ * One /ppp/secret row — an ACCOUNT, not a session.
+ *
+ * THERE IS NO PASSWORD FIELD, AND THERE MUST NEVER BE ONE. The collector's
+ * proplist does not ask the router for it, so nothing on this side could carry
+ * one; the edit form writes a password through the resource engine's `secret`
+ * field type, which travels to the router and never back.
+ *
+ * `connected` is joined server-side against /ppp/active by name — it is not a
+ * property of the account.
+ */
+export interface PppSecret {
+  id: string; name: string; service: string; profile: string;
+  localAddress: string; remoteAddress: string; callerId: string;
+  routes: string; limitIn: number | null; limitOut: number | null;
+  comment: string; disabled: boolean; connected: boolean;
+}
+
 export interface PppProfile {
-  name: string; localAddress: string; remoteAddress: string;
+  id: string; name: string; localAddress: string; remoteAddress: string;
   rateLimit: string; onlyOne: string; encryption: string;
 }
 
@@ -33,11 +52,22 @@ export interface PppServer {
 
 export interface PppPayload {
   ts: number; pollMs: number;
-  sessions: PppSession[]; profiles: PppProfile[]; servers: PppServer[];
+  sessions: PppSession[]; secrets: PppSecret[];
+  profiles: PppProfile[]; servers: PppServer[];
   byService: Record<string, number>;
   totalRxRate: number | null; totalTxRate: number | null;
   available: boolean;
 }
+
+const COLS_SECRET: SortCol[] = [
+  { key: 'state', label: 'State' },
+  { key: 'name', label: 'User' },
+  { key: 'service', label: 'Service' },
+  { key: 'profile', label: 'Profile' },
+  { key: 'localAddress', label: 'Local' },
+  { key: 'remoteAddress', label: 'Remote' },
+  { key: 'comment', label: 'Comment' },
+];
 
 const COLS: SortCol[] = [
   { key: 'name', label: 'User' },
@@ -60,6 +90,10 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
 
   let data: PppPayload | null = null;
   const sort: SortState = { col: 'name', dir: 'asc' };
+  // The secrets table sorts independently of the sessions table above it: they
+  // are different lists answering different questions, and one shared SortState
+  // would have a click on either header reorder both.
+  const secretSort: SortState = { col: 'name', dir: 'asc' };
 
   /**
    * The sort key for one column.
@@ -74,6 +108,19 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
     if (key === 'rate') return (s.rxRate || 0) + (s.txRate || 0);
     if (key === 'total') return s.rx + s.tx;
     if (key === 'uptime') return parseUptime(s.uptime);
+    return String((s as unknown as Record<string, unknown>)[key] || '').toLowerCase();
+  }
+
+  /**
+   * The sort key for one secrets column.
+   *
+   * `state` orders by what the pill says rather than by any single field:
+   * online, then offline, then disabled. Sorting on `disabled` alone would put
+   * a connected account and an idle one in the same bucket, which is the
+   * distinction the column exists to draw.
+   */
+  function secretSortVal(s: PppSecret, key: string): string | number {
+    if (key === 'state') return s.disabled ? 2 : s.connected ? 0 : 1;
     return String((s as unknown as Record<string, unknown>)[key] || '').toLowerCase();
   }
 
@@ -125,25 +172,107 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
     renderConfig();
   }
 
-  // Servers and profiles share one table, distinguished by a Kind pill. Servers
-  // first, then profiles — the order is the order of the two loops in the
-  // original, and it is visible.
-  function renderConfig(): void {
+  /**
+   * The subscriber accounts (issue #125).
+   *
+   * THREE STATES, NOT TWO. "disabled" and "offline" are different facts about an
+   * account and an operator acts on them differently: a disabled account is one
+   * somebody switched off, an offline one is simply not dialled in right now.
+   * Collapsing them into a single "not online" pill would hide the only thing
+   * the enable/disable action changes.
+   */
+  function renderSecrets(): void {
+    const tb = el('pppSecretTable');
+    if (!tb || !data) return;
+    const search = el<HTMLInputElement>('pppSecretSearch');
+    const q = ((search && search.value) || '').toLowerCase().trim();
+    const all = data.secrets || [];
+
+    const rows = all.filter((s) => {
+      if (!q) return true;
+      return (s.name + ' ' + s.profile + ' ' + s.localAddress + ' ' +
+        s.remoteAddress + ' ' + s.callerId + ' ' + s.comment)
+        .toLowerCase().indexOf(q) !== -1;
+    }).slice().sort((a, b) => {
+      const av = secretSortVal(a, secretSort.col);
+      const bv = secretSortVal(b, secretSort.col);
+      if (typeof av === 'string') return sortMul(secretSort) * av.localeCompare(bv as string);
+      return sortMul(secretSort) * ((av as number) - (bv as number));
+    });
+
+    renderSortHeader('pppSecretThead', COLS_SECRET, secretSort, () => renderSecrets());
+
+    const badge = el('pppSecretBadge');
+    // THE UNFILTERED COUNT, like every other badge here: it says how many
+    // accounts exist, not how many survived the search box.
+    if (badge) {
+      badge.textContent = String(all.length);
+      badge.className = 'card-badge' + (all.length ? ' active-blue' : '');
+    }
+
+    const empty = data.available
+      ? 'No PPP secrets. Add one to let a subscriber connect.'
+      : 'This router has no PPP service configured.';
+
+    tb.innerHTML = rows.length ? rows.map((s) => {
+      const pill = s.disabled
+        ? '<span class="lease-pill expired">disabled</span>'
+        : s.connected
+          ? '<span class="lease-pill bound">online</span>'
+          : '<span class="lease-pill">offline</span>';
+      const dash = '<span style="color:var(--text-muted)">&mdash;</span>';
+      const cell = (v: string): string => '<td>' + (v ? esc(v) : dash) + '</td>';
+      return '<tr' + (s.disabled ? ' style="opacity:.55"' : '') + resRow(s.id, s.name) + '>' +
+        '<td>' + pill + '</td>' +
+        '<td>' + esc(s.name) + '</td>' +
+        '<td><span class="vpn-proto-pill">' + esc(s.service || 'any') + '</span></td>' +
+        cell(s.profile) + cell(s.localAddress) + cell(s.remoteAddress) + cell(s.comment) +
+      '</tr>';
+    }).join('') : '<tr><td colspan="7" class="empty-state">' +
+      esc(q ? 'No secrets match that search.' : empty) + '</td></tr>';
+  }
+
+  function renderProfiles(): void {
+    const tb = el('pppProfileTable');
+    if (!tb || !data) return;
+    const rows = data.profiles || [];
+    const badge = el('pppProfileBadge');
+    if (badge) {
+      badge.textContent = String(rows.length);
+      badge.className = 'card-badge' + (rows.length ? ' active-blue' : '');
+    }
+    const dash = '<span style="color:var(--text-muted)">&mdash;</span>';
+    const cell = (v: string): string => '<td>' + (v ? esc(v) : dash) + '</td>';
+    tb.innerHTML = rows.length ? rows.map((p) =>
+      '<tr' + resRow(p.id, p.name) + '>' +
+      '<td>' + esc(p.name) + '</td>' +
+      cell(p.localAddress) + cell(p.remoteAddress) + cell(p.rateLimit) + cell(p.encryption) +
+      '</tr>').join('')
+      : '<tr><td colspan="5" class="empty-state">No PPP profiles.</td></tr>';
+  }
+
+  function renderServers(): void {
     const tb = el('pppServerTable');
     if (!tb || !data) return;
-    const rows: string[][] = [];
-    for (const s of data.servers || []) {
-      rows.push(['Server', s.serviceName || '(unnamed)', s.interface,
-        s.maxSessions ? ('max ' + s.maxSessions) : '',
-        s.disabled ? 'disabled' : 'enabled']);
-    }
-    for (const p of data.profiles || []) {
-      rows.push(['Profile', p.name, p.localAddress, p.rateLimit || p.remoteAddress || '', p.onlyOne || '']);
-    }
-    tb.innerHTML = rows.length ? rows.map((r) =>
-      '<tr><td><span class="wl-band wl-band-24">' + esc(r[0] as string) + '</span></td>' +
-      r.slice(1).map((c) => '<td>' + (c ? esc(String(c)) : '<span style="color:var(--text-muted)">&mdash;</span>') + '</td>').join('') +
-      '</tr>').join('') : '<tr><td colspan="5" class="empty-state">No PPP servers or profiles.</td></tr>';
+    const rows = data.servers || [];
+    const dash = '<span style="color:var(--text-muted)">&mdash;</span>';
+    const cell = (v: string): string => '<td>' + (v ? esc(v) : dash) + '</td>';
+    tb.innerHTML = rows.length ? rows.map((s) =>
+      '<tr>' +
+      '<td>' + esc(s.serviceName || '(unnamed)') + '</td>' +
+      cell(s.interface) +
+      cell(s.maxSessions ? 'max ' + s.maxSessions : '') +
+      '<td>' + (s.disabled
+        ? '<span class="lease-pill expired">disabled</span>'
+        : '<span class="lease-pill bound">enabled</span>') + '</td>' +
+      '</tr>').join('')
+      : '<tr><td colspan="4" class="empty-state">No PPPoE servers.</td></tr>';
+  }
+
+  function renderConfig(): void {
+    renderSecrets();
+    renderProfiles();
+    renderServers();
   }
 
   function renderSummary(): void {
@@ -187,4 +316,14 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
 
   const se = el<HTMLInputElement>('pppSearch');
   se?.addEventListener('input', debounce(render, 150));
+
+  // The secrets box filters only its own table, so it re-renders only that one.
+  const sse = el<HTMLInputElement>('pppSecretSearch');
+  sse?.addEventListener('input', debounce(renderSecrets, 150));
+
+  // The row and the Add button both open the resource form. The row carries the
+  // `.id` and the identity that resRow() wrote onto it, which is what lets the
+  // server refuse a write against a row that has changed underneath.
+  mountAdds(socket);
+  mountRows(socket);
 }

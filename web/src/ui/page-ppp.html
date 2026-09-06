@@ -44,17 +44,74 @@
         </div>
       </div>
 
-      <div class="card" id="pppServerCard" style="margin-top:.85rem">
-        <div class="card-header d-flex align-items-center gap-2">
-          <h3 class="card-title mb-0">Servers &amp; Profiles</h3>
+      <div class="card" id="pppSecretCard" style="margin-top:.85rem">
+        <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
+          <div class="d-flex align-items-center gap-2">
+            <h3 class="card-title mb-0">Secrets</h3>
+            <span id="pppSecretBadge" class="card-badge">0</span>
+          </div>
+          <div class="hdr-actions">
+            <input id="pppSecretSearch" class="form-control form-control-sm"
+                   placeholder="Search user, profile or address…" style="flex:0 1 260px;width:260px"/>
+            <span data-res-add="pppSecret"></span>
+          </div>
+        </div>
+        <div class="card-body p-0">
+          <div class="data-scroll" style="max-height:360px;overflow-y:auto">
+            <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:820px">
+              <colgroup><col style="width:11%"><col style="width:18%"><col style="width:10%"><col style="width:14%">
+                        <col style="width:14%"><col style="width:14%"><col style="width:19%"></colgroup>
+              <thead><tr id="pppSecretThead"></tr></thead>
+              <tbody id="pppSecretTable" data-res-rows="pppSecret">
+                <tr><td colspan="7" class="empty-state">Waiting for PPP secrets&hellip;</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="pppProfileCard" style="margin-top:.85rem">
+        <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-2">
+          <div class="d-flex align-items-center gap-2">
+            <h3 class="card-title mb-0">Profiles</h3>
+            <span id="pppProfileBadge" class="card-badge">0</span>
+          </div>
+          <div class="hdr-actions">
+            <span data-res-add="pppProfile"></span>
+          </div>
         </div>
         <div class="card-body p-0">
           <div class="data-scroll" style="max-height:300px;overflow-y:auto">
             <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:640px">
-              <colgroup><col style="width:14%"><col style="width:22%"><col style="width:22%"><col style="width:22%"><col style="width:20%"></colgroup>
-              <thead><tr><th>Kind</th><th>Name</th><th>Interface / Local</th><th>Detail</th><th>State</th></tr></thead>
-              <tbody id="pppServerTable">
+              <colgroup><col style="width:24%"><col style="width:20%"><col style="width:20%"><col style="width:18%"><col style="width:18%"></colgroup>
+              <thead><tr><th>Name</th><th>Local Address</th><th>Remote Address</th><th>Rate Limit</th><th>Encryption</th></tr></thead>
+              <tbody id="pppProfileTable" data-res-rows="pppProfile">
                 <tr><td colspan="5" class="empty-state">Waiting for PPP configuration&hellip;</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SERVERS STAY READ-ONLY, and in their own card rather than sharing one
+           with the profiles as they used to. A row that opens an edit dialog and
+           a row that does nothing must not sit in the same table under one
+           "+ Add" button: `mountRows` opens the form for any row carrying a
+           data-id inside a [data-res-rows] tbody, so a mixed table would have
+           half its rows inert with nothing to say why. Editing a PPPoE server
+           can also cut the operator's own management path, which needs a guard
+           this change does not provide. -->
+      <div class="card" id="pppServerCard" style="margin-top:.85rem">
+        <div class="card-header d-flex align-items-center gap-2">
+          <h3 class="card-title mb-0">PPPoE Servers</h3>
+        </div>
+        <div class="card-body p-0">
+          <div class="data-scroll" style="max-height:300px;overflow-y:auto">
+            <table class="table table-vcenter mb-0" style="table-layout:fixed;width:100%;min-width:640px">
+              <colgroup><col style="width:26%"><col style="width:26%"><col style="width:24%"><col style="width:24%"></colgroup>
+              <thead><tr><th>Service Name</th><th>Interface</th><th>Sessions</th><th>State</th></tr></thead>
+              <tbody id="pppServerTable">
+                <tr><td colspan="4" class="empty-state">Waiting for PPP configuration&hellip;</td></tr>
               </tbody>
             </table>
           </div>

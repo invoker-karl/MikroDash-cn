@@ -107,6 +107,20 @@ func TestDocumentedClaimsAreTrue(t *testing.T) {
 			measure: webTestFiles,
 		},
 		{
+			// THE OTHER NUMBER'S PROSE, pinned for the same reason the verify
+			// count's was: adding one frontend test moved FOUR written figures
+			// and the audit saw only two of them. Both survivors said 22 with a
+			// green audit until they were found by hand.
+			label:   "CLAUDE.md prose, web/test: frontend tests",
+			find:    regexp.MustCompile(`holds (\d+) frontend tests that bundle`),
+			measure: webTestFiles,
+		},
+		{
+			label:   "CLAUDE.md commands, web/test: frontend tests",
+			find:    regexp.MustCompile(`The frontend's own tests: (\d+) of them`),
+			measure: webTestFiles,
+		},
+		{
 			// CONTRIBUTING.md CARRIES THE SAME TABLE and was never read by this
 			// audit, so it drifted freely: 23 and 15 against a measured 34 and
 			// 22. A contributor reads that file first.
