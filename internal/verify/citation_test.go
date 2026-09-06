@@ -35,7 +35,13 @@ import (
 // dangling references to deleted generators until it was widened, which is
 // exactly the failure this check exists to prevent, committed by the check.
 var citePattern = regexp.MustCompile(
-	"`(?:[a-z]+ )*((?:web/src|internal|tools|cmd|testdata|docs)/[A-Za-z0-9_./-]+\\.(?:ts|go|js|mjs|json|md|sh|css|html))`")
+	// `web/test` JOINED THIS LIST ON 2026-09-06, and the omission had teeth: a
+	// comment citing a test file as the thing that keeps a rule honest is a
+	// citation like any other, and six of them were already in the tree
+	// unchecked. `web/src/caps.ts` now names the test that replaced a deleted
+	// gate — precisely the citation that must not be allowed to rot into a
+	// reference to a file nobody wrote.
+	"`(?:[a-z]+ )*((?:web/src|web/test|internal|tools|cmd|testdata|docs)/[A-Za-z0-9_./-]+\\.(?:ts|go|js|mjs|json|md|sh|css|html))`")
 
 // isIllustrative: a path written as a shape rather than a location, e.g.
 // `internal/.../thing.go`. Nothing is claimed to exist, so nothing is checked.

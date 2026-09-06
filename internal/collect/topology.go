@@ -85,6 +85,26 @@ var boardMatch = []struct {
 	{"switch", regexp.MustCompile(`(?i)^(crs|css|fiberbox)`)},
 	{"ap", regexp.MustCompile(`(?i)^(cap|wap|map|wsap|audience|sxt|lhg|ldf|disc|groove|metal|qrt|basebox|omnitik|netmetal|cube|ltap|knot|sextant)`)},
 	{"router", regexp.MustCompile(`(?i)^(ccr|rb|hap|hex|chateau|powerbox|l0\d|c5\d|d52|stormboard)`)},
+	// CHR, AND IT IS A PREFIX LIKE THE REST — MEASURED, NOT ASSUMED.
+	//
+	// A Cloud Hosted Router does not report a board name of "CHR". It reports
+	// CHR followed by whatever the hypervisor claims to be, so on QEMU/KVM it is
+	//
+	//	CHR QEMU Standard PC (Q35 + ICH9, 2009)
+	//
+	// read off a real CHR 7.24.2 on 2026-09-06. The suffix is the hypervisor's
+	// SMBIOS product string and differs per platform, which is exactly why this
+	// is a prefix and not an exact match — an exact match reads plausibly and
+	// matches nothing at all.
+	//
+	// No MikroTik board name begins "chr" otherwise; Chateau is `cha`, and the
+	// router row above already claims it.
+	//
+	// Without this a CHR fell through to the platform test below, which does
+	// reach the right answer ("MikroTik" means router) but reaches it by
+	// inference — and the page then badges it "Inferred from the board or
+	// platform". A CHR saying it is a CHR is not an inference.
+	{"router", regexp.MustCompile(`(?i)^chr\b`)},
 }
 
 func matchBoard(board string) string {

@@ -77,6 +77,17 @@ let lastRtrRows: RouterStatsRow[] = [];
  * however the column is pointing — an unreachable router has no CPU reading, and
  * burying those at the bottom is more useful than treating them as zero.
  */
+/**
+ * How a licence level is written on a pill.
+ *
+ * `4` becomes `L4`, MikroTik's own notation for a RouterBOARD licence. `free`,
+ * `p1`, `p10` and `p-unlimited` are CHR licence levels and are already words, so
+ * they are left exactly as the router said them: `Lfree` is not a thing.
+ */
+export function licenseLabel(level: string): string {
+  return /^\d+$/.test(level) ? 'L' + level : level;
+}
+
 const RTL_COLS: Record<string, { str?: boolean }> = {
   connected: {}, label: { str: true }, host: { str: true },
   boardName: { str: true }, version: { str: true },
@@ -357,7 +368,11 @@ function renderGrid(rows: RouterStatsRow[], q: string): void {
     if (r.version) footerPills += '<span style="display:inline-flex;align-items:center;padding:.1rem .5rem;border-radius:20px;font-size:.7rem;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.2);' + mr + '">ROS ' + esc(r.version) + '</span>';
     if (r.arch) footerPills += '<span style="display:inline-flex;align-items:center;padding:.1rem .5rem;border-radius:20px;font-size:.7rem;background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.25);' + mr + '">' + esc(r.arch) + '</span>';
     if (r.serial) footerPills += '<span style="display:inline-flex;align-items:center;padding:.1rem .5rem;border-radius:20px;font-size:.7rem;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);' + mr + '">SN: ' + esc(r.serial) + '</span>';
-    if (r.licenseLevel) footerPills += '<span style="display:inline-flex;align-items:center;padding:.1rem .5rem;border-radius:20px;font-size:.7rem;background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.25)">L' + esc(r.licenseLevel) + '</span>';
+    // THE `L` IS ONLY RIGHT FOR A ROUTERBOARD. A physical router reports a bare
+    // number and the pill reads L4 or L6, which is how MikroTik writes it. A CHR
+    // reports a WORD — free, p1, p10, p-unlimited — and the prefix turned those
+    // into "Lfree" and "Lp-unlimited", a licence level no MikroTik product has.
+    if (r.licenseLevel) footerPills += '<span style="display:inline-flex;align-items:center;padding:.1rem .5rem;border-radius:20px;font-size:.7rem;background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.25)">' + esc(licenseLabel(r.licenseLevel)) + '</span>';
     const footer = footerPills ? '<div class="mt-2">' + footerPills + '</div>' : '';
 
     const hostSub = r.host && r.host !== r.label

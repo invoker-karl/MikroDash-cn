@@ -171,8 +171,16 @@ func buildSystem(r routeros.Reply, health []routeros.Reply, update routeros.Repl
 	latest := update["latest-version"]
 	status := update["status"]
 
-	// board-name OR platform: a CHR has no board name and answers on platform
-	// instead, and a card headed by neither reads as broken.
+	// board-name OR platform, for a device that reports no board at all.
+	//
+	// NOT FOR A CHR, WHICH THIS USED TO SAY. Measured against a real Cloud
+	// Hosted Router (7.24.2, QEMU, 2026-09-06): a CHR reports
+	// `board-name: CHR QEMU Standard PC (Q35 + ICH9, 2009)` and
+	// `platform: MikroTik`, so the board name is present and it is the more
+	// specific of the two — the fallback never fires for one. Whatever device
+	// does report an empty board name, a card headed by neither field reads as
+	// broken, so the fallback stays; only the claim about which device needs it
+	// has been withdrawn.
 	board := r["board-name"]
 	if board == "" {
 		board = r["platform"]
@@ -505,8 +513,15 @@ func (s *System) readStatic() {
 		}
 	}
 	if rows, err := s.ros.Do(systemLicenseCmd); err == nil && len(rows) > 0 {
-		// `level` on a routerboard, `nlevel` on some x86 builds. Neither is
-		// guaranteed, so the first one present wins.
+		// `nlevel` ON A ROUTERBOARD, `level` ON A CHR — and this comment had it
+		// the other way round until both were measured on 2026-09-06:
+		//
+		//	hAP (RouterOS 7)  software-id: HR2S-3YN6   nlevel: 6
+		//	CHR 7.24.2        system-id: <redacted>     level: free
+		//
+		// The order below is unchanged and was always right; only the
+		// explanation was wrong, which is the half a reader would have acted on.
+		// Neither key is guaranteed, so the first one present wins.
 		v := rows[0]["level"]
 		if v == "" {
 			v = rows[0]["nlevel"]

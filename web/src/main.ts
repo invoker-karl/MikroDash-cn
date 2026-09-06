@@ -392,8 +392,12 @@ async function main(): Promise<void> {
   // click became a bounce back to the dashboard — which is what the operator
   // hit on Devices and on Settings.
   //
-  // So `serves` is a fourth term in the visibility calculation, alongside the
-  // install toggle, the role and the router count. A page that is not in
+  // So `serves` is a THIRD term in the visibility calculation, alongside the
+  // install toggle and the role. It read "fourth… and the router count" until
+  // that count gate was deleted (issue #121): it hid Devices on a one-device
+  // install, and its own driver had already been dead since the parity harness
+  // went. A comment naming a term that no longer exists is how the next reader
+  // concludes a rule is still enforced. A page that is not in
   // `PORTED` has no markup in this bundle and cannot be shown by anything; the
   // honest interface is to leave it out of the nav until it mounts, at which
   // point it reappears with no further change here.

@@ -61,10 +61,6 @@ export interface NavHost {
 
 let pageInstall: Record<string, unknown> = {};
 let pageAccess: Record<string, boolean> | null = null;
-/** Routers is meaningless on a single-router install. Starts true so the nav is
- *  not blanked before the router list has loaded — the same "not known yet means
- *  allow" rule `pageAccess` follows. */
-let routersMultiple = true;
 let host: NavHost | null = null;
 /** The install's display timezone, empty for the browser's own. Read by the
  *  topbar clock; the Reports page keeps its own copy fed from its own payload. */
@@ -113,11 +109,6 @@ export function settingsAllowed(): boolean {
   return !!(c.manageSettings || c.managePrincipals);
 }
 
-export function setRoutersMultiple(multiple: boolean): void {
-  routersMultiple = multiple;
-  applyPageVisibility();
-}
-
 /**
  * Re-run the nav sweep. `pages` is the install's settings payload; omitted, the
  * last one is reused — which is what lets caps arriving later re-run it.
@@ -157,12 +148,30 @@ export function applyPageVisibility(pages?: Record<string, unknown>): void {
     const sKey = settingKeyFor[pageName];
     const byInstall = !sKey || p[sKey] !== false;
     const byRole = !pageAccess || !!pageAccess[pageName];
-    const byCount = pageName !== 'devices' || routersMultiple;
+    // ── THERE WAS A FOURTH TERM HERE AND IT IS NOT COMING BACK ────────────
+    //
+    // `byCount` hid `devices` unless the install had more than one router, from
+    // `_routers.length > 1` in the live app (`public/app.js:7995`) — a fleet
+    // page being deemed meaningless for a fleet of one.
+    //
+    // It was reported as a bug (issue #121) by an operator whose only device
+    // was a CHR: no Devices entry at all until they added a second router. They
+    // read it as the app failing to recognise a virtual router, which it was
+    // not — the rule never looked at the router's type, only at how many there
+    // were, and any second device would have revealed the page.
+    //
+    // In this port the rule was already DEAD: its only setter had no callers
+    // after the parity harness went, so the flag stayed true and the term
+    // always passed. That is worse than either behaviour, because it reads as a
+    // live rule. Removed rather than rewired, because hiding a page the
+    // operator's own Visible Pages toggle says to show is the complaint, not
+    // the feature. `web/test/nav-single-router.test.ts` is what stops it
+    // returning by accident.
     // A page this build cannot serve, with no Node behind it, is hidden rather
     // than offered and then bounced. Composed with the other three so the
     // "move off a page that just became hidden" branch below covers it too.
     const byBuild = host ? host.serves(pageName) : true;
-    const visible = byInstall && byRole && byCount && byBuild;
+    const visible = byInstall && byRole && byBuild;
 
     document.querySelectorAll<HTMLElement>('.nav-item[data-page="' + pageName + '"]')
       .forEach((navEl) => { navEl.style.display = visible ? '' : 'none'; });

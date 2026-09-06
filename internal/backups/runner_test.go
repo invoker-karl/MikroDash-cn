@@ -202,3 +202,65 @@ func TestGeneratePasswordIsUrlSafeAndLongEnough(t *testing.T) {
 		}
 	}
 }
+
+// ── A DEVICE WITH NO BOARD NAME STILL HAS A MODEL ──────────────────────────
+//
+// `internal/collect/system.go` falls back from `board-name` to `platform` for
+// the Devices card, and this read did not — so one device could be stored with
+// two different models depending on which path asked. That is the whole defect:
+// not that either answer is wrong, but that they disagree.
+//
+// NOT A CHR FIX. A CHR reports `board-name: CHR QEMU Standard PC (…)`, measured
+// against a real one on 2026-09-06, so its model was never empty. No device is
+// known to report an empty board name; the fallback exists because the
+// collector's does.
+//
+// ── THE FAKE HONOURS THE PROPLIST, AND THAT IS THE POINT ───────────────────
+//
+// A fake that volunteers every key it knows would pass this test against code
+// that added the fallback and forgot to add `platform` to the proplist — the
+// router would never send the field, and the fallback would read an empty map
+// entry for ever. Honouring the proplist is what makes the test able to see
+// that, and it is the drift this repository already has a gate for elsewhere.
+func TestIdentityFallsBackToPlatformWhenThereIsNoBoardName(t *testing.T) {
+	// Everything a resource row could carry; the fake returns only what the
+	// proplist asks for.
+	full := map[string]string{
+		"platform": "MikroTik", "version": "7.24 (stable)",
+		"free-hdd-space": "1000", "total-hdd-space": "2000",
+	}
+	w := func(cmd string, args ...string) ([]map[string]string, error) {
+		if strings.HasPrefix(cmd, "/system/routerboard") {
+			return nil, errors.New("no such command prefix")
+		}
+		var want []string
+		for _, a := range args {
+			if strings.HasPrefix(a, "=.proplist=") {
+				want = strings.Split(strings.TrimPrefix(a, "=.proplist="), ",")
+			}
+		}
+		if want == nil {
+			t.Fatal("ReadIdentity asked for the resource row with no proplist")
+		}
+		row := map[string]string{}
+		for _, k := range want {
+			if v, ok := full[k]; ok {
+				row[k] = v
+			}
+		}
+		return []map[string]string{row}, nil
+	}
+
+	id, err := ReadIdentity(w)
+	if err != nil {
+		t.Fatalf("identity read failed: %v", err)
+	}
+	if id.Model != "MikroTik" {
+		t.Errorf("Model = %q, want the platform to stand in for an absent "+
+			"board name. Either the fallback is gone, or `platform` is not in "+
+			"the proplist and the router was never asked for it.", id.Model)
+	}
+	if id.OSVersion != "7.24" {
+		t.Errorf("OSVersion = %q, want 7.24", id.OSVersion)
+	}
+}

@@ -101,13 +101,29 @@ type Identity struct {
 func ReadIdentity(w Writer) (Identity, error) {
 	var id Identity
 	rows, err := w("/system/resource/print",
-		"=.proplist=board-name,version,free-hdd-space,total-hdd-space")
+		"=.proplist=board-name,platform,version,free-hdd-space,total-hdd-space")
 	if err != nil {
 		return id, err
 	}
 	if len(rows) > 0 {
 		r := rows[0]
 		id.Model = r["board-name"]
+		// board-name OR platform, the same fallback `internal/collect/system.go`
+		// applies to the Devices card. Duplicated rather than shared: this
+		// package stays free of the client, as its own header says, and
+		// `internal/server/routers_conntest.go` already carries the third copy
+		// for the same reason.
+		//
+		// NOT A CHR FIX, though it was filed as one. A CHR reports
+		// `board-name: CHR QEMU Standard PC (…)` — measured 2026-09-06 — so its
+		// model was never empty here. This is consistency work: the identity
+		// stored beside a backup and the one on the Devices card are read by two
+		// rules, and one device with two models is worse than either answer. No
+		// device is KNOWN to report an empty board name; the fallback exists
+		// because the collector's does, and the two must not disagree.
+		if id.Model == "" {
+			id.Model = r["platform"]
+		}
 		// `7.24 (stable)` -> `7.24`. The guard compares versions, and the
 		// channel suffix is not part of one.
 		id.OSVersion = ShortVersion(r["version"])

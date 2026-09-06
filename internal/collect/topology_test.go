@@ -39,6 +39,23 @@ func TestClassifyDevice(t *testing.T) {
 			routeros.Reply{"platform": "Cisco"}, "other", "platform"},
 		{"platform MikroTik with no board at all",
 			routeros.Reply{"platform": "MikroTik"}, "router", "platform"},
+		// ── A CHR IS A ROUTER BY ITS BOARD, NOT BY INFERENCE ────────────────
+		//
+		// The board name is REAL, read off a CHR 7.24.2 on 2026-09-06. A CHR does
+		// not answer "CHR" — it answers CHR followed by whatever the hypervisor
+		// says it is, so an exact match would look right and match nothing.
+		//
+		// The assertion that matters is `src`, not `typ`. Without the rule a CHR
+		// still classified as a router, via the platform line above; but the page
+		// badges anything whose source is not `caps` as "Inferred from the board
+		// or platform", and a CHR naming itself is not an inference.
+		{"a CHR is a router by its board, hypervisor suffix and all",
+			routeros.Reply{"board": "CHR QEMU Standard PC (Q35 + ICH9, 2009)",
+				"platform": "MikroTik"}, "router", "board"},
+		// And the prefix must not swallow a board that merely starts with those
+		// three letters. `^chr\b` needs a word boundary, so this falls through.
+		{"a board merely beginning chr is not a CHR",
+			routeros.Reply{"board": "CHRomecast"}, "unknown", "unknown"},
 		{"nothing to go on", routeros.Reply{}, "unknown", "unknown"},
 		{"supported caps are used when nothing is enabled",
 			routeros.Reply{"system-caps": "wlan"}, "ap", "caps"},

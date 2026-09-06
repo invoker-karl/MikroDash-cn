@@ -201,15 +201,31 @@ func (cn *conn) restoreLocked(req restoreReq) {
 // The version is the FIRST token of what RouterOS reports: `7.24 (stable)` is
 // the same build as `7.24`, and comparing the whole string would make every
 // stable release read as a mismatch.
+// ── THE ROUTERBOARD READ IS ALLOWED TO FAIL, AND MUST BE ───────────────────
+//
+// It was not, and that refused every restore on a CHR. `/system/routerboard` is
+// OPTIONAL HARDWARE: a CHR or an x86 install has no routerboard and answers the
+// menu with an error, which this returned, which the caller turned into a flat
+// "failed". A virtual router could take a backup and never put one back.
+//
+// `internal/backups/runner.go` had already reached this conclusion for the
+// BACKUP half and says so: "refusing the whole backup because a virtual router
+// has no serial number would be refusing it for being a virtual router." Only
+// the restore half was never given the same treatment.
+//
+// It is safe because the guard was written for it: `backups.CheckRestore`
+// compares serials only when BOTH sides are non-empty, under a header naming CHR
+// by name. An empty serial here is "unknown", and unknown is not a mismatch.
+//
+// THE RESOURCE READ BELOW STAYS FATAL, and the difference is the point. Every
+// router has `/system/resource`; one that cannot answer it is broken rather than
+// virtual, and restoring onto a device that cannot say what it is running is not
+// something to do quietly.
 func (cn *conn) readIdentity() (serial, version string, err error) {
-	rb, err := cn.rsession.Exec(routeros.Cmd{
+	if rb, rbErr := cn.rsession.Exec(routeros.Cmd{
 		Path: "/system/routerboard/print",
 		Args: []string{"=.proplist=serial-number"},
-	})
-	if err != nil {
-		return "", "", err
-	}
-	if len(rb) > 0 {
+	}); rbErr == nil && len(rb) > 0 {
 		serial = rb[0]["serial-number"]
 	}
 	res, err := cn.rsession.Exec(routeros.Cmd{
