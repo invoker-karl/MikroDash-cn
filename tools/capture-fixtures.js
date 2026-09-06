@@ -415,13 +415,13 @@ function scrub(key, value, keys = IDENTIFYING_KEYS) {
   // into a 2001:db8:: address. Each match is parked behind a placeholder so no
   // later pattern can see, and therefore clobber, an earlier substitution.
   const parked = [];
-  const park = (fn) => (m) => { parked.push(fn(m)); return ' ' + (parked.length - 1) + ' '; };
+  const park = (fn) => (m) => { parked.push(fn(m)); return '\0' + (parked.length - 1) + '\0'; };
   return s
     .replace(MAC_RE,  park(fakeMac))
     .replace(BARE_MAC_RE, park(fakeBareMac))
     .replace(IPV6_RE, park(fakeIpv6))
     .replace(IPV4_RE, park(fakeIpv4))
-    .replace(/ (\d+) /g, (_, i) => parked[Number(i)]);
+    .replace(/\0(\d+)\0/g, (_, i) => parked[Number(i)]);
 }
 
 /**

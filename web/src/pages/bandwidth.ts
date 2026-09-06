@@ -117,8 +117,14 @@ const SORT_COLS: Array<{ id: string; key: SortKey }> = [
  * later. The `|| 0` stays because this is a port and the original has it; the
  * surviving mutation is the honest note that it cannot be observed.
  *
- * Pinned by tools/bandwidth-rate-cases.js, which lifts the original rather than
- * retyping it.
+ * Pinned by `web/test/rate-and-spectrum-corpora.test.ts`, which replays the 30
+ * recorded cases in `testdata/bandwidth-rate-cases.json`. The generator that
+ * MADE that corpus (tools/bandwidth-rate-cases.js, deliberately un-backticked
+ * because the citation check enforces that a quoted path exists) went with the
+ * parity
+ * harness on 2026-09-01, and this line went on citing it for five days while
+ * nothing read the corpus at all — the citation named a file that no longer
+ * existed, for a pinning that was no longer happening.
  */
 export function splitRate(mbps: unknown): { num: string; unit: string } {
   const n = Number(mbps) || 0;
