@@ -1,0 +1,368 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "MikroDash Architecture",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "read-path",
+        "label": "Read path",
+        "focus": [
+          "browser",
+          "server",
+          "session",
+          "collect",
+          "routeros",
+          "router"
+        ],
+        "note": "A watched router: one Session owns the connection every collector shares."
+      },
+      {
+        "id": "background-pools",
+        "label": "Background pools",
+        "focus": [
+          "routers",
+          "alertpool",
+          "alert",
+          "session"
+        ],
+        "note": "Routers nobody is watching are still polled for overview and alerting."
+      },
+      {
+        "id": "write-path",
+        "label": "Write path",
+        "focus": [
+          "browser",
+          "server",
+          "resource",
+          "guard",
+          "routeros",
+          "router"
+        ],
+        "note": "Every write is declared, validated, then put to a pure guard before it reaches a router."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "browser",
+      "type": "frontend",
+      "label": "Browser",
+      "sublabel": "web/src TypeScript",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "internal/server",
+      "sublabel": "HTTP + WebSocket :3081",
+      "pos": [
+        250,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "session",
+      "type": "backend",
+      "label": "internal/session",
+      "sublabel": "one per watched router",
+      "pos": [
+        460,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "collect",
+      "type": "backend",
+      "label": "internal/collect",
+      "sublabel": "one per subsystem",
+      "pos": [
+        670,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "routeros",
+      "type": "backend",
+      "label": "internal/routeros",
+      "sublabel": "adapter, async mode",
+      "pos": [
+        880,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "go-routeros/v3"
+    },
+    {
+      "id": "routers",
+      "type": "backend",
+      "label": "internal/routers",
+      "sublabel": "pool: unwatched routers",
+      "pos": [
+        460,
+        130
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "alertpool",
+      "type": "backend",
+      "label": "internal/alertpool",
+      "sublabel": "pool: alerting routers",
+      "pos": [
+        670,
+        130
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "alert",
+      "type": "backend",
+      "label": "internal/alert",
+      "sublabel": "rules: rows in, verdict out",
+      "pos": [
+        880,
+        130
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "pure"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "internal/db",
+      "sublabel": "SQLite history + audit",
+      "pos": [
+        40,
+        470
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "pure Go"
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "internal/store",
+      "sublabel": "/data: settings, users",
+      "pos": [
+        250,
+        470
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "AES-256-GCM"
+    },
+    {
+      "id": "resource",
+      "type": "backend",
+      "label": "internal/resource",
+      "sublabel": "what may be written",
+      "size": [
+        140,
+        64
+      ],
+      "pos": [
+        460,
+        470
+      ],
+      "tag": "declarative"
+    },
+    {
+      "id": "guard",
+      "type": "security",
+      "label": "internal/guard",
+      "sublabel": "refuse or allow",
+      "pos": [
+        670,
+        470
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "pure"
+    },
+    {
+      "id": "router",
+      "type": "external",
+      "label": "MikroTik router",
+      "sublabel": "RouterOS binary API",
+      "pos": [
+        880,
+        470
+      ],
+      "size": [
+        140,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "mikrodash container, /data its only mount",
+      "wraps": [
+        "server",
+        "session",
+        "collect",
+        "routeros",
+        "routers",
+        "alertpool",
+        "alert",
+        "guard",
+        "store",
+        "db"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "browser-to-server",
+      "from": "browser",
+      "to": "server",
+      "label": "HTTPS + WS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "server-to-session",
+      "from": "server",
+      "to": "session",
+      "label": "watch"
+    },
+    {
+      "id": "session-to-collect",
+      "from": "session",
+      "to": "collect",
+      "label": "one connection",
+      "labelDy": -40
+    },
+    {
+      "id": "collect-to-routeros",
+      "from": "collect",
+      "to": "routeros",
+      "label": "Cmd / Reply"
+    },
+    {
+      "id": "routeros-to-router",
+      "from": "routeros",
+      "to": "router",
+      "label": "TCP / TLS",
+      "variant": "emphasis",
+      "labelDy": 40
+    },
+    {
+      "id": "routers-to-session",
+      "from": "routers",
+      "to": "session",
+      "label": "overview polls",
+      "variant": "dashed",
+      "labelDy": 40
+    },
+    {
+      "id": "alertpool-to-session",
+      "from": "alertpool",
+      "to": "session",
+      "label": "alert polls",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "alertpool-to-alert",
+      "from": "alertpool",
+      "to": "alert",
+      "label": "rows"
+    },
+    {
+      "id": "server-to-store",
+      "from": "server",
+      "to": "store",
+      "label": "settings, auth",
+      "labelDy": 40
+    },
+    {
+      "id": "server-to-db",
+      "from": "server",
+      "to": "db",
+      "label": "history, audit"
+    },
+    {
+      "id": "server-to-resource",
+      "from": "server",
+      "to": "resource",
+      "label": "writes",
+      "variant": "security"
+    },
+    {
+      "id": "resource-to-guard",
+      "from": "resource",
+      "to": "guard",
+      "label": "verdict",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Frontend",
+      "items": [
+        "TypeScript bundled by cmd/webbuild via esbuild\u2019s Go API",
+        "Pages join WebSocket rooms named page-<key>"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Router side",
+      "items": [
+        "Async mode is mandatory: the tag map absorbs a cancelled reply",
+        "Bottleneck is concurrent API channels on the MikroTik, not CPU"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Safety",
+      "items": [
+        "Guards and alert rules are pure: rows in, verdict out",
+        "A resource declaring an unported guard has its writes REFUSED",
+        "Secret fields travel to the router and never back"
+      ]
+    }
+  ]
+}
