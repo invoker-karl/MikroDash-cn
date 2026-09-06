@@ -1039,6 +1039,15 @@ func (cn *conn) refreshFor(res *resource.Resource) {
 		if cn.rsession.CollectorEnabled("capsman") {
 			cn.rsession.Capsman().RefreshNow()
 		}
+	case "ppp":
+		// The PPP collector reads its config tables — profiles, servers and the
+		// secrets — only every `pppConfigEvery` ticks, so without this a saved
+		// subscriber would not appear for up to a minute. `RefreshNow` resets
+		// that counter, which is the whole reason it exists rather than being a
+		// plain Tick.
+		if cn.rsession.CollectorEnabled("ppp") {
+			cn.rsession.PPP().RefreshNow()
+		}
 	default:
 		log.Printf("[res] %s belongs to page %q, which has no collector to refresh",
 			res.Key, res.Page)

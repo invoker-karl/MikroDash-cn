@@ -6,10 +6,42 @@ package collect
 //	/ppp/active                     the sessions
 //	/ppp/profile                    the profiles they were assigned
 //	/interface/pppoe-server/server  the PPPoE servers that accept them
+//	/ppp/secret                     the accounts themselves, MINUS THE PASSWORD
 //
-// /ppp/secret IS NEVER READ. It stores account passwords in clear text, and a
-// page listing who is connected has no need of them. The Node original records
-// the same decision in two collectors and a test enforces it across both.
+// ── THE PASSWORD IS NEVER READ. THE REST OF THE MENU NOW IS ─────────────────
+//
+// This file used to say "/ppp/secret IS NEVER READ", and the reason recorded
+// with it (CHANGELOG, issue #64) was two claims joined by "and":
+//
+//	it holds credentials, and the active list already carries everything
+//	worth showing.
+//
+// Only the first survives. The second was true of a MONITORING page and is
+// false of a MANAGEMENT one — managing subscribers is precisely the thing the
+// active list cannot do (issue #125).
+//
+// So the rule is NARROWED, not reversed. `pppSecretCmd` names every property
+// this page needs and does NOT name `password`, and that absence is the whole
+// security property: a password cannot reach a browser through a payload it was
+// never read into. Writes go the other way entirely, through
+// `internal/resource`'s `TypeSecret`, which is write-only by construction.
+//
+// `TestNoProplistNamesACredential` enforces this now. It is worth knowing that
+// the sentence this replaces claimed "a test enforces it across both" — that
+// test was the Node original's and went at cutover, so the rule spent the whole
+// port with nothing holding it up.
+//
+// ── WHAT THIS DOES NOT CLAIM ────────────────────────────────────────────────
+//
+// The property is "no password reaches a BROWSER", not "no password is ever
+// read". The write path is a separate road: `internal/server`'s `readMenu`
+// prints the whole menu with NO proplist — deliberately, because `ReadOnlyWhen`
+// needs properties no page asks for — so a save, a delete or an enable does pull
+// cleartext passwords into server memory for the length of that call. They stop
+// there: `RowValues` drops every secret-typed field, `PreviewCommand` masks it,
+// and the audit trail masks it by type. Narrowing that read too is a change to
+// shared machinery and belongs in its own piece of work; what must not happen is
+// this comment being read as covering it.
 //
 // ── RATES ARE DERIVED, AND null IS NOT ZERO ──────────────────────────────────
 //
@@ -53,6 +85,15 @@ var (
 		"=.proplist=.id,name,local-address,remote-address,rate-limit,only-one,use-encryption"}}
 	pppServerCmd = routeros.Cmd{Path: "/interface/pppoe-server/server/print", Args: []string{
 		"=.proplist=.id,service-name,interface,disabled,max-sessions,authentication"}}
+	// EVERY PROPERTY THE PAGE NEEDS, AND NOT `password`.
+	//
+	// The proplist is the enforcement point, not a convention: an explicit list
+	// is the difference between "we chose not to show it" and "we never asked
+	// for it". `/ppp/secret` also carries `remote-ipv6-prefix`, which nothing
+	// renders yet and which is therefore left out rather than carried unused.
+	pppSecretCmd = routeros.Cmd{Path: "/ppp/secret/print", Args: []string{
+		"=.proplist=.id,name,service,profile,local-address,remote-address,caller-id," +
+			"routes,limit-bytes-in,limit-bytes-out,comment,disabled"}}
 )
 
 // Config is re-read every N ticks; sessions are read every tick.
@@ -79,7 +120,41 @@ type PPPSession struct {
 	TXRate    *float64 `json:"txRate"`
 }
 
+// PPPSecret is one row of /ppp/secret — an ACCOUNT, not a session.
+//
+// THERE IS NO PASSWORD FIELD, AND THERE MUST NEVER BE ONE. See the header: the
+// proplist does not ask for it, so there is nothing here to hold. The edit form
+// writes one through `resource.TypeSecret`, which is write-only in the other
+// direction.
+//
+// `Connected` is NOT read from the router. It is joined onto each account at
+// emit time from the /ppp/active names — see Tick for why that is not done when
+// the secrets are read.
+type PPPSecret struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Service       string `json:"service"`
+	Profile       string `json:"profile"`
+	LocalAddress  string `json:"localAddress"`
+	RemoteAddress string `json:"remoteAddress"`
+	CallerID      string `json:"callerId"`
+	Routes        string `json:"routes"`
+	LimitIn       *int   `json:"limitIn"`
+	LimitOut      *int   `json:"limitOut"`
+	Comment       string `json:"comment"`
+	Disabled      bool   `json:"disabled"`
+	Connected     bool   `json:"connected"`
+}
+
+// ID IS CARRIED ON THE PROFILE AND NOT ON THE SERVER, which is the difference
+// between the two tables rather than an oversight. `.id` was requested and
+// dropped for both while they were read-only; the edit form addresses a row by
+// it, so a profile now keeps it. A PPPoE server stays read-only — see the plan:
+// changing one can cut the operator's own management path, which needs a guard
+// nothing here provides — so carrying its id would be exactly the unused field
+// the proplist comment above refuses to carry.
 type PPPProfile struct {
+	ID            string `json:"id"`
 	Name          string `json:"name"`
 	LocalAddress  string `json:"localAddress"`
 	RemoteAddress string `json:"remoteAddress"`
@@ -100,6 +175,7 @@ type PPPPayload struct {
 	TS          int64          `json:"ts"`
 	PollMs      int            `json:"pollMs"`
 	Sessions    []PPPSession   `json:"sessions"`
+	Secrets     []PPPSecret    `json:"secrets"`
 	Profiles    []PPPProfile   `json:"profiles"`
 	Servers     []PPPServer    `json:"servers"`
 	ByService   map[string]int `json:"byService"`
@@ -125,6 +201,7 @@ type PPP struct {
 	mu       sync.Mutex
 	prev     map[string]pppSample
 	sessions []PPPSession
+	secrets  []PPPSecret
 	profiles []PPPProfile
 	servers  []PPPServer
 	ticks    int
@@ -134,6 +211,7 @@ type PPP struct {
 	activeAvail  *bool
 	profileAvail *bool
 	serverAvail  *bool
+	secretAvail  *bool
 }
 
 func NewPPP(ros Reader, emit Emit, pollMs int) *PPP {
@@ -162,6 +240,21 @@ func pppInt(v string) int {
 		return 0
 	}
 	return n
+}
+
+// pppLimit is a byte cap as the page renders it: ABSENT is nil, and a present
+// zero is a real zero.
+//
+// RouterOS uses 0 for "no limit", so the two cannot be collapsed — nil means the
+// router did not report the property at all, and the page draws a dash for one
+// and "0" for the other. Extracted from ParsePPPSessions when /ppp/secret grew
+// the same pair of properties; the behaviour is unchanged in both callers.
+func pppLimit(v string) *int {
+	if v == "" {
+		return nil
+	}
+	n := pppInt(v)
+	return &n
 }
 
 // read fetches one menu, latching the flag off when the router says the menu
@@ -233,15 +326,7 @@ func ParsePPPSessions(rows []routeros.Reply, prev map[string]pppSample, now time
 			prev[key] = pppSample{rx: rx, tx: tx, ts: now}
 		}
 
-		var limitIn, limitOut *int
-		if r["limit-bytes-in"] != "" {
-			n := pppInt(r["limit-bytes-in"])
-			limitIn = &n
-		}
-		if r["limit-bytes-out"] != "" {
-			n := pppInt(r["limit-bytes-out"])
-			limitOut = &n
-		}
+		limitIn, limitOut := pppLimit(r["limit-bytes-in"]), pppLimit(r["limit-bytes-out"])
 
 		out = append(out, PPPSession{
 			ID: r[".id"], Name: r["name"],
@@ -273,7 +358,7 @@ func (p *PPP) loadConfig() {
 			continue
 		}
 		profiles = append(profiles, PPPProfile{
-			Name: r["name"], LocalAddress: r["local-address"],
+			ID: r[".id"], Name: r["name"], LocalAddress: r["local-address"],
 			RemoteAddress: r["remote-address"], RateLimit: r["rate-limit"],
 			OnlyOne: r["only-one"], Encryption: r["use-encryption"],
 		})
@@ -289,7 +374,29 @@ func (p *PPP) loadConfig() {
 			Disabled: boolOf(r["disabled"]),
 		})
 	}
-	p.profiles, p.servers = profiles, servers
+	// SECRETS RIDE THE CONFIG CADENCE, not the tick. A subscriber list does not
+	// change every five seconds, and CLAUDE.md's measure of efficiency is router
+	// channels rather than CPU — so this is one command a minute, not twelve.
+	// A write does not wait for it: `RefreshNow` re-reads immediately.
+	secrets := make([]PPPSecret, 0)
+	for _, r := range p.read(pppSecretCmd, &p.secretAvail) {
+		if r["name"] == "" {
+			continue
+		}
+		secrets = append(secrets, PPPSecret{
+			ID: r[".id"], Name: r["name"], Service: r["service"],
+			Profile: r["profile"], LocalAddress: r["local-address"],
+			RemoteAddress: r["remote-address"], CallerID: r["caller-id"],
+			Routes: r["routes"], Comment: r["comment"],
+			LimitIn: pppLimit(r["limit-bytes-in"]), LimitOut: pppLimit(r["limit-bytes-out"]),
+			Disabled: boolOf(r["disabled"]),
+		})
+	}
+	// The same ordering the sessions table uses for a name column.
+	sort.SliceStable(secrets, func(i, j int) bool {
+		return Collate(secrets[i].Name, secrets[j].Name) < 0
+	})
+	p.profiles, p.servers, p.secrets = profiles, servers, secrets
 }
 
 func (p *PPP) Tick() {
@@ -331,9 +438,31 @@ func (p *PPP) Tick() {
 		totalRX, totalTX = &sumRX, &sumTX
 	}
 
+	// ── CONNECTED IS JOINED HERE, NOT WHERE THE SECRETS WERE READ ──────────
+	//
+	// The two halves move at different speeds: sessions every tick, secrets once
+	// every `pppConfigEvery` ticks. Setting `Connected` when the secrets are read
+	// would freeze the pill for up to a minute — an account that dialled in four
+	// seconds ago would read as offline, which is exactly the question the column
+	// exists to answer.
+	//
+	// Joining at emit time costs no extra command and makes the pill as live as
+	// the session table beside it. A FRESH SLICE each tick, because `p.secrets`
+	// is the cached read: writing `Connected` into it would leave last tick's
+	// answer behind on the next one.
+	active := make(map[string]bool, len(p.sessions))
+	for _, s := range p.sessions {
+		active[s.Name] = true
+	}
+	secrets := make([]PPPSecret, len(p.secrets))
+	for i, s := range p.secrets {
+		s.Connected = active[s.Name]
+		secrets[i] = s
+	}
+
 	payload := &PPPPayload{
 		TS: time.Now().UnixMilli(), PollMs: p.pollMs.ms(),
-		Sessions: p.sessions, Profiles: p.profiles, Servers: p.servers,
+		Sessions: p.sessions, Secrets: secrets, Profiles: p.profiles, Servers: p.servers,
 		ByService: byService, TotalRXRate: totalRX, TotalTXRate: totalTX,
 		Available: p.activeAvail == nil || *p.activeAvail,
 	}
@@ -344,8 +473,28 @@ func (p *PPP) Tick() {
 		fp.WriteString(s.ID + "|" + s.Name + "|" + s.Service + "|" + s.Address + "|" +
 			strconv.Itoa(s.RX) + "|" + strconv.Itoa(s.TX) + ";")
 	}
-	fp.WriteString("|" + strconv.Itoa(len(p.profiles)) + "|" + strconv.Itoa(len(p.servers)) +
-		"|" + strconv.FormatBool(payload.Available))
+	// ── THE CONFIG TABLES ARE FINGERPRINTED BY CONTENT, NOT BY COUNT ───────
+	//
+	// This counted profiles and servers, which was survivable while both were
+	// read-only: nothing could change a row without adding or removing one. The
+	// moment a profile can be EDITED that becomes a silent hole — change a
+	// rate-limit, the count is identical, the fingerprint matches, and the frame
+	// is suppressed. The operator saves and the table does not move.
+	for _, s := range secrets {
+		fp.WriteString(s.ID + "|" + s.Name + "|" + s.Service + "|" + s.Profile + "|" +
+			s.LocalAddress + "|" + s.RemoteAddress + "|" + s.Comment + "|" +
+			strconv.FormatBool(s.Disabled) + "|" + strconv.FormatBool(s.Connected) + ";")
+	}
+	for _, pr := range p.profiles {
+		fp.WriteString(pr.ID + "|" + pr.Name + "|" + pr.LocalAddress + "|" +
+			pr.RemoteAddress + "|" + pr.RateLimit + "|" + pr.OnlyOne + "|" +
+			pr.Encryption + ";")
+	}
+	for _, sv := range p.servers {
+		fp.WriteString(sv.ServiceName + "|" + sv.Interface + "|" +
+			sv.MaxSessions + "|" + sv.Auth + "|" + strconv.FormatBool(sv.Disabled) + ";")
+	}
+	fp.WriteString("|" + strconv.FormatBool(payload.Available))
 	if fp.String() == p.lastFP {
 		return
 	}
@@ -369,10 +518,27 @@ func (p *PPP) Reconnected() {
 	clear(p.prev)
 	p.lastFP = ""
 	p.ticks = 0
-	p.activeAvail, p.profileAvail, p.serverAvail = nil, nil, nil
+	p.activeAvail, p.profileAvail, p.serverAvail, p.secretAvail = nil, nil, nil, nil
 	p.mu.Unlock()
 	p.Tick()
 	p.poll.start()
+}
+
+// RefreshNow re-reads everything at once, including the config tables.
+//
+// `ticks = 0` is what makes that true: the config menus — profiles, servers and
+// the secrets — are read only when `ticks%pppConfigEvery == 0`, so a plain Tick
+// would return the same subscriber list the write just changed. This is called
+// from the resource write path, which is the one moment the slow tables are
+// known to be stale.
+func (p *PPP) RefreshNow() {
+	if !p.ros.Connected() {
+		return
+	}
+	p.mu.Lock()
+	p.ticks = 0
+	p.mu.Unlock()
+	p.Tick()
 }
 
 func (p *PPP) Suspend() { p.poll.stop() }

@@ -2,8 +2,10 @@
   "ts": 0,
   "pollMs": 30000,
   "sessions": [],
+  "secrets": [],
   "profiles": [
     {
+      "id": "*0",
       "name": "default",
       "localAddress": "",
       "remoteAddress": "",
@@ -12,6 +14,7 @@
       "encryption": "default"
     },
     {
+      "id": "*FFFFFFFE",
       "name": "default-encryption",
       "localAddress": "",
       "remoteAddress": "",

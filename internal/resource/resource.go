@@ -644,6 +644,133 @@ var DNSStatic = &Resource{
 	},
 }
 
+// pppActions: a subscriber account can be switched off without deleting it,
+// which is what an ISP does to a customer rather than removing them.
+var pppActions = []Action{
+	{Key: "enable", Verb: "enable", Label: "Enable",
+		When: func(r map[string]string) bool { return r["disabled"] == "true" },
+		Note: "enabled a PPP secret"},
+	{Key: "disable", Verb: "disable", Label: "Disable",
+		When: func(r map[string]string) bool { return r["disabled"] != "true" },
+		Note: "disabled a PPP secret"},
+}
+
+// PPPSecret is the PPPoE/PPP subscriber account — issue #125.
+//
+// ── THE PASSWORD IS WRITE-ONLY, AND THAT IS THE WHOLE DESIGN ────────────────
+//
+// `/ppp/secret` holds account passwords in clear text, which is why
+// `internal/collect/ppp.go` refused to read the menu at all for the whole life
+// of the project. This resource does not change that rule so much as split it:
+// the collector's proplist never asks for `password`, so no password can reach a
+// browser, and TypeSecret carries one in the other direction only. RowValues
+// drops it, so the edit form opens blank and an unchanged save leaves the
+// router's password alone; PreviewCommand masks it; the audit trail masks it by
+// type. That is the same arrangement `WgPeer.presharedKey` already relies on.
+//
+// ── SERVICE IS SUGGESTIONS, NOT A SELECT, AND THAT IS DELIBERATE ────────────
+//
+// All eight values RouterOS documents are listed, because listing a subset is
+// how `dnsStatic` rewrote MX records as A records. But the type stays TEXT: a
+// hard select refuses a value the router itself accepts, and this vocabulary is
+// version-dependent in a way DNS record types are not — `async` and `isdn` are
+// legacy, and MikroTik has added transports before. The renderer still draws a
+// dropdown, and `web/src/resource.ts` re-inserts the router's current value when
+// the list does not name it, so an unknown service displays honestly AND saves
+// unharmed. That is one more defence than a select can offer.
+//
+// NO GUARD. `selfPath` answers "which interfaces is the management session
+// behind", and a secret is an account rather than an interface: disabling one
+// cuts the SUBSCRIBER, not the operator, whose path is a WAN or LAN interface.
+// The same reasoning `WgPeer` records. The residual case — an operator managing
+// a router through a PPPoE session that this same router authenticates — is
+// narrow, self-inflicted, and not modelled by any guard that exists.
+var PPPSecret = &Resource{
+	Key: "pppSecret", Page: "ppp", Label: "PPP Secret",
+	Title: "PPP Secret", Menu: "/ppp/secret", Identity: []string{"name"},
+	Actions: pppActions,
+	Fields: []Field{
+		{Name: "name", ROS: "name", Label: "User", Type: TypeText, Required: true,
+			Placeholder: "subscriber01"},
+		{Name: "password", ROS: "password", Label: "Password", Type: TypeSecret,
+			Help: "leave blank to keep the current password"},
+		{Name: "service", ROS: "service", Label: "Service", Type: TypeText,
+			OptionsFrom: &OptionsFrom{Values: []string{
+				"any", "async", "isdn", "l2tp", "pppoe", "pptp", "ovpn", "sstp"}},
+			Placeholder: "any"},
+		{Name: "profile", ROS: "profile", Label: "Profile", Type: TypeText,
+			OptionsFrom: &OptionsFrom{Menu: "/ppp/profile", Value: "name"},
+			Placeholder: "default"},
+		{Name: "localAddress", ROS: "local-address", Label: "Local Address",
+			Type: TypeIP, Clearable: true},
+		{Name: "remoteAddress", ROS: "remote-address", Label: "Remote Address",
+			Type: TypeIP, Clearable: true},
+		// A MAC for PPPoE and an IP for PPTP/L2TP, so it cannot be TypeMac.
+		{Name: "callerId", ROS: "caller-id", Label: "Caller ID", Type: TypeText,
+			Clearable: true, Help: "MAC address for PPPoE, IP address for PPTP and L2TP"},
+		// MAX RAISED FROM THE 255-CHARACTER DEFAULT. `Field.check` caps TypeText
+		// at 255 unless told otherwise, and `routes` is a COMMA-SEPARATED LIST —
+		// four entries clear 255 easily. The default would have refused a value
+		// the router accepts, with a message about length that says nothing about
+		// why. `Max` only reaches the browser for number inputs, so this changes
+		// validation and not rendering.
+		{Name: "routes", ROS: "routes", Label: "Routes", Type: TypeText, Clearable: true,
+			Max:  intp(2048),
+			Help: "dst-address gateway metric, several separated by commas. Ignored for OpenVPN"},
+		// CLEARABLE, because both default to 0 and 0 means "no limit". Without it
+		// an operator could set a cap and never take it off again: an emptied box
+		// sends nothing, so the router would keep the old figure.
+		{Name: "limitBytesIn", ROS: "limit-bytes-in", Label: "Limit In (bytes)",
+			Type: TypeInt, Min: intp(0), Clearable: true, Placeholder: "0"},
+		{Name: "limitBytesOut", ROS: "limit-bytes-out", Label: "Limit Out (bytes)",
+			Type: TypeInt, Min: intp(0), Clearable: true, Placeholder: "0"},
+		{Name: "comment", ROS: "comment", Label: "Comment", Type: TypeText, Clearable: true},
+		{Name: "disabled", ROS: "disabled", Label: "Disabled", Type: TypeBool, Clearable: true},
+	},
+}
+
+// PPPProfile is the settings block a secret points at — issue #125.
+//
+// `default` and `default-encryption` are RouterOS built-ins. The router refuses
+// to delete them, so RemovableWhen refuses first: the operator gets a sentence
+// saying why rather than a bare `router-denied` from the far end. They remain
+// EDITABLE, because RouterOS does allow that and operators legitimately set a
+// local address or a rate limit on the default profile.
+//
+// NO GUARD, for the same reason as the secret: a profile is addressing and rate
+// policy for dial-in clients, not a path to the router.
+var PPPProfile = &Resource{
+	Key: "pppProfile", Page: "ppp", Label: "PPP Profile",
+	Title: "PPP Profile", Menu: "/ppp/profile", Identity: []string{"name"},
+	RemovableWhen: func(r map[string]string) bool {
+		return r["name"] != "default" && r["name"] != "default-encryption"
+	},
+	Fields: []Field{
+		{Name: "name", ROS: "name", Label: "Name", Type: TypeText, Required: true,
+			Placeholder: "for-pppoe"},
+		// An IP or a POOL NAME, per the RouterOS reference — "single IP addresses
+		// always take precedence over IP pools" — so free text, not TypeIP.
+		{Name: "localAddress", ROS: "local-address", Label: "Local Address",
+			Type: TypeText, Clearable: true, Help: "an IP address, or the name of an IP pool"},
+		{Name: "remoteAddress", ROS: "remote-address", Label: "Remote Address",
+			Type: TypeText, Clearable: true, Help: "an IP address, or the name of an IP pool"},
+		{Name: "rateLimit", ROS: "rate-limit", Label: "Rate Limit", Type: TypeText,
+			Clearable: true, Placeholder: "10M/10M"},
+		// yes | no | default — "default" is not a synonym for no, it means
+		// "inherit", so it has to be offered as its own value.
+		{Name: "onlyOne", ROS: "only-one", Label: "Only One Session", Type: TypeText,
+			OptionsFrom: &OptionsFrom{Values: []string{"default", "yes", "no"}}},
+		// `require`, NOT `required`. Checked against the PPP AAA property table
+		// rather than typed from memory, which is how the first draft of this
+		// line got it wrong — and an unlisted value in a picker is the defect
+		// that rewrote MX records as A records on the DNS page.
+		{Name: "useEncryption", ROS: "use-encryption", Label: "Use Encryption",
+			Type: TypeText, OptionsFrom: &OptionsFrom{Values: []string{
+				"default", "yes", "no", "require"}}},
+		{Name: "comment", ROS: "comment", Label: "Comment", Type: TypeText, Clearable: true},
+	},
+}
+
 // Bridge mirrors the `bridge` entry in src/routeros/resources.js.
 var Bridge = &Resource{
 	Key: "bridge", Page: "bridges", Label: "Bridge",
@@ -882,6 +1009,8 @@ var byKey = map[string]*Resource{
 	Route.Key:               Route,
 	Route6.Key:              Route6,
 	DNSStatic.Key:           DNSStatic,
+	PPPSecret.Key:           PPPSecret,
+	PPPProfile.Key:          PPPProfile,
 	Bridge.Key:              Bridge,
 	BridgePort.Key:          BridgePort,
 	Vlan.Key:                Vlan,

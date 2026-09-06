@@ -503,7 +503,24 @@ export interface PPPSession {
   txRate: number | null;
 }
 
+export interface PPPSecret {
+  id: string;
+  name: string;
+  service: string;
+  profile: string;
+  localAddress: string;
+  remoteAddress: string;
+  callerId: string;
+  routes: string;
+  limitIn: number | null;
+  limitOut: number | null;
+  comment: string;
+  disabled: boolean;
+  connected: boolean;
+}
+
 export interface PPPProfile {
+  id: string;
   name: string;
   localAddress: string;
   remoteAddress: string;
@@ -524,6 +541,7 @@ export interface PPPPayload {
   ts: number;
   pollMs: number;
   sessions: PPPSession[] | null;
+  secrets: PPPSecret[] | null;
   profiles: PPPProfile[] | null;
   servers: PPPServer[] | null;
   byService: Record<string, number> | null;
