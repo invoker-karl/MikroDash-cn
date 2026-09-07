@@ -9,13 +9,25 @@
             <span class="log-count-badge log-count-info" id="logCountInfo" title="Filter info" data-sev="info">0 info</span>
             <span class="log-count-badge log-count-debug" id="logCountDebug" title="Filter debug" data-sev="debug">0 debug</span>
           </div>
-          <div class="d-flex align-items-center gap-2 flex-wrap">
+          <!-- flex-NOwrap, and the reason is worth keeping. These four controls
+               need 415px and this group was being given 414 — one pixel short,
+               with 729px of the header sitting unused beside it — so Clear
+               wrapped onto a second line on its own and made the header 89px
+               tall for the sake of a 27px button.
+
+               Wrapping is not what should absorb a narrow window here: the
+               card-header itself already wraps, so the whole group drops below
+               the title as one unit, which is the sensible responsive step. The
+               search box carries min-width:0 so it can SHRINK before that
+               happens, because a flex line wraps before it shrinks and without
+               it the group would rather break than give up input width. -->
+          <div class="d-flex align-items-center gap-2 flex-nowrap">
             <select id="logSeverity" class="form-select form-select-sm" style="max-width:110px;font-size:.73rem" aria-label="Log severity filter">
               <option value="">All levels</option><option value="error">Error</option><option value="warning">Warning</option><option value="info">Info</option><option value="debug">Debug</option>
             </select>
-            <input id="logSearch" class="form-control form-control-sm" placeholder="Search&#8230;" style="max-width:200px;font-size:.73rem"/>
-            <button id="toggleScroll" class="btn btn-sm btn-outline-secondary" style="font-size:.7rem">Pause</button>
-            <button id="clearLogs"   class="btn btn-sm btn-outline-secondary" style="font-size:.7rem">Clear</button>
+            <input id="logSearch" class="form-control form-control-sm" placeholder="Search&#8230;" style="max-width:200px;min-width:0;font-size:.73rem"/>
+            <button id="toggleScroll" class="btn btn-sm btn-outline-secondary" style="font-size:.7rem;flex:0 0 auto">Pause</button>
+            <button id="clearLogs"   class="btn btn-sm btn-outline-secondary" style="font-size:.7rem;flex:0 0 auto">Clear</button>
           </div>
         </div>
         <div class="card-body" style="padding:.75rem"><div id="logs"></div></div>
