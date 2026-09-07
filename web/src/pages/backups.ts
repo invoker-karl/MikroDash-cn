@@ -251,10 +251,34 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
         '<td><span class="bk-id-pill">' + esc(String(r.id)) + '</span></td>' +
         '<td>' + esc(fmtWhen(r.takenAt)) +
           (detail ? '<div class="muted-note" style="font-size:.7rem">' + detail + '</div>' : '') + '</td>' +
-        '<td><span class="badge ' + o.cls + '">' + esc(o.label) + '</span></td>' +
+        // ── A PRUNED ROW SAID "Stored", AND 3.3 MB ─────────────────────────
+        //
+        // `outcome` records what the RUN did and never changes afterwards, so a
+        // row whose files retention has since removed went on reporting the
+        // outcome of the day it ran: a green "Stored" badge and the size of a
+        // file that no longer exists. The only thing saying otherwise was the
+        // word "pruned" in the actions column.
+        //
+        // That is why "Keep at most 10" read as broken. This table is HISTORY
+        // and legitimately holds more rows than there are restore points — the
+        // summary card counts those correctly — but nine tombstones claiming to
+        // be stored 3.3MB backups is not history, it is nine wrong rows. The
+        // count in the header is the number of runs; the number of BACKUPS is
+        // what the badges have to be honest about.
+        //
+        // The state is applied over the outcome rather than folded into
+        // OUTCOME, because they answer different questions and both are worth
+        // keeping: the run DID store something, and that something is gone now.
+        '<td><span class="badge ' + (r.pruned ? 'bg-secondary-lt' : o.cls) + '"' +
+          (r.pruned ? ' title="Stored at the time, then removed by retention"' : '') +
+          '>' + esc(r.pruned ? 'Pruned' : o.label) + '</span></td>' +
         '<td>' + esc(r.source === 'manual' ? ('Manual' + (r.actor ? ' · ' + r.actor : '')) : 'Schedule') + '</td>' +
         '<td>' + esc(r.osVersion || '—') + '</td>' +
-        '<td>' + (r.bytes ? esc(fmtBytes(r.bytes)) : '—') + '</td>' +
+        // NO SIZE ON A PRUNED ROW. The bytes are still in the record and are
+        // still true of the past, but printing them here claims disk that has
+        // been freed — and contradicts the Disk used card, which already counts
+        // live rows only.
+        '<td>' + (r.bytes && !r.pruned ? esc(fmtBytes(r.bytes)) : '—') + '</td>' +
         '<td class="text-end">' + actions.join(' ') + '</td>' +
       '</tr>';
     }).join('');
