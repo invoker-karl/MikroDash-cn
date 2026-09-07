@@ -26,6 +26,18 @@ services:
     volumes:
       - data:/data
     restart: unless-stopped
+    environment:
+      # ONLY AFFECTS WHAT THE LOG LINES SAY. Scheduling does not read this: a
+      # backup or report time is resolved through the `displayTimezone` SETTING,
+      # and backup filenames are stamped UTC by `StemFor` on purpose, because a
+      # local stem repeats itself for an hour every autumn. So this is a
+      # readability control and changing it cannot move a schedule or age a file
+      # differently.
+      #
+      # Passed through rather than hard-coded, and defaulted to UTC, so the
+      # committed file carries nobody's location. Set TZ in a local .env (which
+      # is gitignored) to read the logs in your own time.
+      - TZ=${TZ:-UTC}
     # The flags are baked into the image's CMD; they are repeated here so the
     # deployed configuration is readable without inspecting the image.
     #
