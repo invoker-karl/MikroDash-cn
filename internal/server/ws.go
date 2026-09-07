@@ -16,6 +16,8 @@ import (
 	"mikrodash/internal/collect"
 	"mikrodash/internal/collection"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -113,6 +115,20 @@ type conn struct {
 	page string
 }
 
+// sameOriginHost reports whether an Origin header names this same host.
+//
+// The comparison `coder/websocket` itself makes before consulting the patterns,
+// repeated here only to decide whether the log line is worth a hint. A malformed
+// Origin counts as "not the same host", which is the direction that offers help
+// rather than withholding it.
+func sameOriginHost(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	cookie := r.Header.Get("Cookie")
 	user, err := s.auth.Validate(cookie)
@@ -131,6 +147,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		OriginPatterns:  s.originPatterns,
 	})
 	if err != nil {
+		// NAME THE FIX IN THE LOG. An origin rejection is the one handshake
+		// failure an operator can act on, and the library's message states the
+		// mismatch without saying what to do about it — which is how issue #128
+		// arrived as a bug report rather than as a configuration question.
+		//
+		// Detected by comparing the headers rather than by matching the error
+		// text, so a library rewording cannot silently drop the hint.
+		if o := r.Header.Get("Origin"); o != "" && !sameOriginHost(o, r.Host) {
+			log.Printf("[ws] accept: %v — set -origins (or MIKRODASH_ORIGINS) to "+
+				"the host the browser uses if MikroDash is behind a reverse proxy", err)
+			return
+		}
 		log.Printf("[ws] accept: %v", err)
 		return
 	}

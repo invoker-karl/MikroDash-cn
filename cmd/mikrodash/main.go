@@ -106,6 +106,34 @@ func main() {
 			"age rows out of the database per the dbRetentionDays settings (off by "+
 				"default). It DELETES. Do not enable against a /data another "+
 				"MikroDash owns.")
+		// ── THE WEBSOCKET ORIGIN ALLOW-LIST ──────────────────────────────
+		//
+		// `coder/websocket` accepts a handshake only when the browser's Origin
+		// host equals this process's Host header, or matches one of these
+		// patterns. Behind a reverse proxy those two are DIFFERENT BY
+		// DEFINITION — the browser says `dash.example.com`, the proxy forwards
+		// to `192.168.1.10:3081` — so every proxied install was refused with
+		// "request Origin ... is not authorized for Host ...". Reported as
+		// issue #128, and true of every published Go image because nothing ever
+		// set this option (see internal/server.Options.OriginPatterns).
+		//
+		// EMPTY STAYS SAME-ORIGIN ONLY. That is the right default: this check is
+		// what stops a hostile page opening an authenticated socket to a
+		// MikroDash the victim is signed in to, so it is opened deliberately
+		// and never inferred. In particular `X-Forwarded-Host` is NOT trusted —
+		// any client can send it, which would make the check decorative.
+		//
+		// Patterns are host[:port], matched against the Origin's host, and may
+		// wildcard: `dash.example.com`, `192.168.10.45:5081`, `*.example.com`.
+		// A non-default port is part of the Origin and must be written.
+		//
+		// Read from MIKRODASH_ORIGINS when the flag is absent, because the
+		// people this strands are running a NAS or unraid UI where an
+		// environment variable is reachable and a command array often is not.
+		origins = flag.String("origins", os.Getenv("MIKRODASH_ORIGINS"),
+			"comma-separated Origin hosts allowed to open a WebSocket, for "+
+				"reverse-proxied installs (e.g. dash.example.com,10.0.0.5:8443). "+
+				"Empty means same-origin only. Also read from MIKRODASH_ORIGINS")
 		geoDir = flag.String("geo", "/app/geo",
 			"geoip-lite's data directory, read for country lookups")
 	)
@@ -206,6 +234,7 @@ func main() {
 		BackupScheduler: *backupSched,
 		Retention:       *pruneOn,
 		History:         *historyOn,
+		OriginPatterns:  splitOrigins(*origins),
 		// A restore has the ROUTER fetch from us, so the URL it is handed must
 		// name this process's port.
 		ListenAddr: *listen,
@@ -311,4 +340,23 @@ func mustNotProxyToSelf(listen, node string) error {
 			"or give -node the address of a DIFFERENT MikroDash", node, listen)
 	}
 	return nil
+}
+
+// splitOrigins turns the flag's comma list into patterns.
+//
+// Blanks are dropped and each entry is trimmed, so `a, b,` is two patterns
+// rather than four — a trailing comma in a compose file or a NAS text box must
+// not produce an empty pattern, because an empty one matches nothing and would
+// look like the setting was ignored.
+func splitOrigins(s string) []string {
+	out := []string{}
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

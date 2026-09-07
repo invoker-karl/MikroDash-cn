@@ -123,9 +123,24 @@ type Options struct {
 	StaticDir string
 	// WebDir holds the built frontend.
 	WebDir string
-	// OriginPatterns are accepted Origin headers for the WebSocket handshake.
-	// Empty means same-origin only, which is what a reverse-proxied deployment
-	// wants.
+	// OriginPatterns are accepted Origin hosts for the WebSocket handshake.
+	//
+	// ── THIS COMMENT USED TO SAY THE OPPOSITE, AND IT COST A RELEASE ────────
+	//
+	// It read "Empty means same-origin only, which is what a reverse-proxied
+	// deployment wants." That is backwards. A reverse proxy is the one case
+	// where the browser's Origin and this process's Host CANNOT match: the
+	// browser says `dash.example.com`, the proxy forwards to `10.0.0.5:3081`.
+	// So empty is exactly what a proxied deployment does not want, and because
+	// the comment said otherwise nothing ever wired a flag to this field —
+	// leaving every published Go image unable to open a socket behind a proxy
+	// (issue #128, reported against 0.8.20, true since the v0.8.0 cutover).
+	//
+	// Empty still MEANS same-origin only, and that is still the right default:
+	// this check is what stops a hostile page opening an authenticated socket
+	// to a MikroDash the victim is signed in to. It is opened deliberately,
+	// with -origins / MIKRODASH_ORIGINS, and never inferred from a forwarded
+	// header a client could forge.
 	OriginPatterns []string
 	// AuthTTL bounds how long a validated session is cached.
 	AuthTTL time.Duration

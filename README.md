@@ -152,6 +152,37 @@ In `modern` mode, access is granted as **(role, scope)**: a role says *which pag
 
 If you need remote access, enable `modern` auth **and** place MikroDash behind an authenticating reverse proxy (such as Nginx, Authelia, or Cloudflare Access) or access it exclusively over a VPN.
 
+### Behind a reverse proxy
+
+MikroDash refuses a WebSocket handshake whose `Origin` does not match the `Host`
+it sees. Behind a proxy those differ by definition — the browser says
+`dash.example.com`, the proxy forwards to `mikrodash:3081` — so the UI loads and
+then sits empty, with this in the log:
+
+```
+[ws] accept: failed to accept WebSocket connection: request Origin "dash.example.com" is not authorized for Host "10.0.0.5:3081"
+```
+
+Name the host **the browser** uses, comma separated, including the port when it
+is not the default:
+
+```yaml
+environment:
+  - MIKRODASH_ORIGINS=dash.example.com
+```
+
+or `--origins dash.example.com` on the command line. Wildcards work
+(`*.example.com`).
+
+Leaving it empty keeps the default of same-origin only, which is what a direct
+LAN install wants: the check is what stops a hostile page opening an
+authenticated socket to a MikroDash you are signed in to. `X-Forwarded-Host` is
+deliberately **not** trusted, since any client can send one.
+
+The alternative, if you would rather not list origins, is to have the proxy
+preserve the original `Host` header — `proxy_set_header Host $host;` in Nginx —
+so the two match on their own.
+
 **Recommended local hardening:**
 - Enable authentication: switch to `modern` mode and create user accounts in **Settings → Authentication → Access Management**, granting each the narrowest role and scope that suits them
 - Run on a non-default port and bind to your LAN interface only

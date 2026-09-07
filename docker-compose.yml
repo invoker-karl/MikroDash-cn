@@ -38,6 +38,23 @@ services:
       # committed file carries nobody's location. Set TZ in a local .env (which
       # is gitignored) to read the logs in your own time.
       - TZ=${TZ:-UTC}
+      # ── BEHIND A REVERSE PROXY, SET THIS ──────────────────────────────────
+      #
+      # The WebSocket handshake is refused unless the browser's Origin matches
+      # the Host this process sees. A proxy makes those differ by definition —
+      # the browser says `dash.example.com`, the proxy forwards to
+      # `mikrodash:3081` — so a proxied install cannot open a socket and the log
+      # reads "request Origin ... is not authorized for Host ...". Issue #128.
+      #
+      # List the host(s) the BROWSER uses, comma separated, with the port when
+      # it is not the default: `dash.example.com` or `10.0.0.5:8443`. Wildcards
+      # work: `*.example.com`.
+      #
+      # EMPTY IS SAME-ORIGIN ONLY, and that is the right default: this check is
+      # what stops a hostile page opening an authenticated socket to a MikroDash
+      # you are signed in to. `X-Forwarded-Host` is deliberately NOT trusted,
+      # because any client can send one.
+      - MIKRODASH_ORIGINS=${MIKRODASH_ORIGINS:-}
     # The flags are baked into the image's CMD; they are repeated here so the
     # deployed configuration is readable without inspecting the image.
     #
