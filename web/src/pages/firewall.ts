@@ -32,12 +32,31 @@ export interface FirewallRule {
 export interface FirewallPayload {
   ts: number;
   filter: FirewallRule[]; nat: FirewallRule[]; mangle: FirewallRule[]; raw: FirewallRule[];
+  // ABSENT unless this session asked for IPv6. `omitempty` on the Go side drops
+  // them, so `undefined` here means "not collected" and is not the same as an
+  // empty table — the difference is what keeps dormancy correct server-side.
+  filter6?: FirewallRule[] | null; nat6?: FirewallRule[] | null;
+  mangle6?: FirewallRule[] | null; raw6?: FirewallRule[] | null;
+  // THREE STATES. true hides the family switch, false shows it, and
+  // undefined/null means the probe has not run yet and the page must change
+  // nothing — "not asked" must never look like "this router has no IPv6".
+  ipv6Disabled?: boolean | null;
   activeTable: string; pollMs: number;
 }
 
-const FW_RES: Record<string, string> = {
-  filter: 'fwFilter', nat: 'fwNat', mangle: 'fwMangle', raw: 'fwRaw',
+type Fam = 'ip4' | 'ip6';
+
+// One resource per family per table. The family is what decides which RouterOS
+// menu an edit reaches, exactly as it does for routes: editing an IPv6 rule
+// through /ip/firewall would fail at the router.
+const FW_RES: Record<Fam, Record<string, string>> = {
+  ip4: { filter: 'fwFilter', nat: 'fwNat', mangle: 'fwMangle', raw: 'fwRaw' },
+  ip6: { filter: 'fwFilter6', nat: 'fwNat6', mangle: 'fwMangle6', raw: 'fwRaw6' },
 };
+
+// Remembered per browser, off by default. Only the CHECKBOX is persisted: the
+// family resets to IPv4 on page entry, the way Routing resets its tab.
+const V6_CARDS_KEY = 'mdFwShowV6';
 
 const ACTION_COLOUR: Record<string, string> = {
   accept: 'rgba(52,211,153,.8)', drop: 'rgba(248,113,113,.8)',
@@ -85,7 +104,13 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
 
   let data: Partial<FirewallPayload> = {};
   let tab = 'filter';
+  let fam: Fam = 'ip4';
   let search = '';
+  // A browser with site data blocked THROWS on access rather than returning
+  // null, so both directions are wrapped. Absent reads as off, which is the
+  // default we want anyway.
+  let showV6InCards = false;
+  try { showV6InCards = localStorage.getItem(V6_CARDS_KEY) === '1'; } catch { /* site data blocked */ }
   const writable: Record<string, boolean> = {};
   // Which row to pulse once the table redraws. A reorder moves a row among
   // thirty near-identical ones, and without a cue the eye has no way to follow
@@ -93,14 +118,32 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
   let pulse: string | null = null;
   let rafId: number | null = null;
 
-  const rulesFor = (t: string): FirewallRule[] =>
-    (t === 'filter' ? data.filter : t === 'nat' ? data.nat
-      : t === 'raw' ? data.raw : data.mangle) || [];
+  const resKeyFor = (f: Fam, t: string): string => FW_RES[f][t] || FW_RES[f].filter!;
+  /** What `firewall:tab` carries: one namespace for both families. */
+  const wireTab = (): string => (fam === 'ip6' ? tab + '6' : tab);
+
+  /** One table out of a payload, by family. */
+  const tblOf = (d: Partial<FirewallPayload>, f: Fam, t: string): FirewallRule[] => {
+    const k = (f === 'ip6' ? t + '6' : t) as keyof FirewallPayload;
+    return ((d[k] as FirewallRule[] | null | undefined) || []);
+  };
+
+  const rulesFor = (t: string): FirewallRule[] => tblOf(data, fam, t);
+
+  /** The four IPv6 tables, but only when the operator asked for them in cards. */
+  const v6ForCards = (d: Partial<FirewallPayload>, t: string): FirewallRule[] =>
+    (showV6InCards ? tblOf(d, 'ip6', t) : []);
 
   // ── Summary cards ─────────────────────────────────────────────────────────
 
   function updateSummary(d: Partial<FirewallPayload>): void {
-    const filter = d.filter || [], nat = d.nat || [], mangle = d.mangle || [], raw = d.raw || [];
+    // The cards are a view of the whole firewall, and which halves of it count
+    // is the checkbox's only job. Unticked, these are exactly the IPv4 numbers
+    // this page has always shown.
+    const filter = [...(d.filter || []), ...v6ForCards(d, 'filter')];
+    const nat = [...(d.nat || []), ...v6ForCards(d, 'nat')];
+    const mangle = [...(d.mangle || []), ...v6ForCards(d, 'mangle')];
+    const raw = [...(d.raw || []), ...v6ForCards(d, 'raw')];
     const all = [...filter, ...nat, ...mangle, ...raw];
 
     const setCount = (totalId: string, disId: string, rules: FirewallRule[]) => {
@@ -145,7 +188,9 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
   function updateChainCount(d: Partial<FirewallPayload>): void {
     const e = el('fwChainCount');
     if (!e) return;
-    const all = (d.filter || []).concat(d.nat || []).concat(d.mangle || []).concat(d.raw || []);
+    const all = (d.filter || []).concat(d.nat || []).concat(d.mangle || []).concat(d.raw || [])
+      .concat(v6ForCards(d, 'filter'), v6ForCards(d, 'nat'),
+        v6ForCards(d, 'mangle'), v6ForCards(d, 'raw'));
     const counts: Record<string, number> = {};
     // Disabled rules are in the payload now, but a chain's weight is about what
     // actually runs.
@@ -174,8 +219,7 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
   // ── The in-place counter path ─────────────────────────────────────────────
 
   function updateCountersInPlace(d: Partial<FirewallPayload>): boolean {
-    const rules = (tab === 'filter' ? d.filter : tab === 'nat' ? d.nat
-      : tab === 'raw' ? d.raw : d.mangle) || [];
+    const rules = tblOf(d, fam, tab);
     const rows = firewallTable.querySelectorAll<HTMLElement>('tr[data-rule-id]');
     if (!rows.length) return false;
     if (rows.length !== rules.length) return false; // rule count changed — full re-render
@@ -222,7 +266,7 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
     // renumber it.
     const pos: Record<string, number> = {};
     full.forEach((r, i) => { pos[r.id] = i; });
-    const resKey = FW_RES[tab] || 'fwFilter';
+    const resKey = resKeyFor(fam, tab);
     // Two different questions. A viewer who may not write has no use for the
     // controls at all, so their COLUMNS go — leaving two empty columns would be
     // dead space on every row. A search only suppresses the controls:
@@ -307,7 +351,7 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
   function syncAddSlot(): void {
     const slot = document.querySelector('[data-res-add^="fw"]');
     if (!slot) return;
-    slot.setAttribute('data-res-add', FW_RES[tab] || 'fwFilter');
+    slot.setAttribute('data-res-add', resKeyFor(fam, tab));
     document.dispatchEvent(new CustomEvent('mikrodash:resmount'));
   }
 
@@ -316,6 +360,7 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
   socket.on('firewall:update', (d: FirewallPayload) => {
     const wasEmpty = !data.filter;
     data = d;
+    applyV6Presence(d);
     updateSummary(d);
     // A DRAG IS IN PROGRESS, and these are the very rows being rearranged.
     // Rebuilding the table underneath the pointer would replace the node being
@@ -340,11 +385,11 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
     if (!d || !d.key) return;
     writable[d.key] = !!d.permitted;
     // The arrows appear and disappear with the answer, so redraw once it lands.
-    if (FW_RES[tab] === d.key) renderTab();
+    if (resKeyFor(fam, tab) === d.key) renderTab();
   });
 
   socket.on('res:ok', (d: { resource?: string; action?: string; movedId?: string }) => {
-    if (!d || FW_RES[tab] !== d.resource) return;
+    if (!d || resKeyFor(fam, tab) !== d.resource) return;
     if (d.action === 'move' || d.action === 'undo' || d.action === 'redo') {
       pulse = d.movedId || null;
     }
@@ -355,7 +400,7 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
   // table is redrawn from the last one — which still holds what the router
   // actually has.
   socket.on('res:error', (d: { resource?: string }) => {
-    if (!d || FW_RES[tab] !== d.resource) return;
+    if (!d || resKeyFor(fam, tab) !== d.resource) return;
     renderTab();
   });
 
@@ -365,6 +410,99 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
       search = (searchEl.value || '').trim().toLowerCase();
       renderTab();
     }, 200));
+  }
+
+  // ── The address family ────────────────────────────────────────────────────
+
+  /**
+   * Tell the server whether this session wants the IPv6 tables read at all.
+   *
+   * TWO REASONS TO WANT THEM, and either is enough: the IPv6 tab is on screen,
+   * or the cards are folding IPv6 in. Sent on every change and on page entry —
+   * the collector releases the want when the page room empties, so re-entering
+   * has to re-assert it.
+   */
+  function sendWantV6(): void {
+    socket.emit('firewall:v6', fam === 'ip6' || showV6InCards);
+  }
+
+  /**
+   * Switch family.
+   *
+   * Modelled on the Routing page's `setRtTab`: scoped to the bar rather than
+   * `document`, so it cannot reach the four table tabs below, and it carries the
+   * ARIA the `.fw-tab` divs never had.
+   */
+  function setFwFamily(next: Fam): void {
+    if (next !== 'ip4' && next !== 'ip6') return;
+    fam = next;
+    const bar = el('fwFamBar');
+    if (bar) {
+      bar.querySelectorAll<HTMLElement>('.stab').forEach((b) => {
+        const on = b.getAttribute('data-fwfam') === fam;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+    }
+    const panel = el('fwRulesPanel');
+    if (panel) panel.setAttribute('aria-labelledby', 'fwFamBtn-' + fam);
+    firewallTable.setAttribute('data-res-rows', resKeyFor(fam, tab));
+    syncAddSlot();
+    socket.emit('firewall:tab', wireTab());
+    sendWantV6();
+    renderTab();
+  }
+
+  const famBar = el('fwFamBar');
+  if (famBar) {
+    famBar.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement)?.closest?.('[data-fwfam]');
+      if (btn) setFwFamily((btn.getAttribute('data-fwfam') as Fam) || 'ip4');
+    });
+    // A tablist is arrow-navigable or it is not a tablist.
+    famBar.addEventListener('keydown', (e) => {
+      const k = (e as KeyboardEvent).key;
+      if (k !== 'ArrowLeft' && k !== 'ArrowRight') return;
+      e.preventDefault();
+      const next: Fam = fam === 'ip4' ? 'ip6' : 'ip4';
+      setFwFamily(next);
+      el('fwFamBtn-' + next)?.focus();
+    });
+  }
+
+  const v6Box = el<HTMLInputElement>('fwShowV6');
+  if (v6Box) {
+    v6Box.checked = showV6InCards;
+    v6Box.addEventListener('change', () => {
+      showV6InCards = !!v6Box.checked;
+      try { localStorage.setItem(V6_CARDS_KEY, showV6InCards ? '1' : '0'); } catch { /* site data blocked */ }
+      sendWantV6();
+      // Redraw the cards NOW rather than waiting for the next payload: nothing
+      // about the router changed, so the next emit may be seconds away or, on a
+      // quiet ruleset, never.
+      updateSummary(data);
+    });
+  }
+
+  /**
+   * Show or hide the family switch from the router's own answer.
+   *
+   * Hidden ONLY on a definite `disable-ipv6=true`. Not on "no IPv6 rules": a
+   * router with IPv6 on and no rules yet is the normal starting state, and these
+   * tables are editable, so hiding the tab there would hide it exactly when
+   * somebody wants to add their first rule.
+   */
+  function applyV6Presence(d: Partial<FirewallPayload>): void {
+    if (d.ipv6Disabled === undefined || d.ipv6Disabled === null) return;
+    const off = d.ipv6Disabled === true;
+    const bar = el('fwFamBar'), lbl = el('fwShowV6Label');
+    if (bar) bar.hidden = off;
+    if (lbl) lbl.hidden = off;
+    if (off && fam !== 'ip4') {
+      // The stored checkbox preference is deliberately left alone — this router
+      // has no IPv6, the next one may.
+      setFwFamily('ip4');
+    }
   }
 
   // `.fw-tab` and `data-fw`, which is what the MARKUP carries.
@@ -385,17 +523,25 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
         const on = o === b;
         o.classList.toggle('active', on);
       });
-      firewallTable.setAttribute('data-res-rows', FW_RES[tab] || 'fwFilter');
+      firewallTable.setAttribute('data-res-rows', resKeyFor(fam, tab));
       syncAddSlot();
       // Ask the server to point the counter refresh at THIS table. The active
       // table is shared session state, so the server re-checks who may change it.
-      socket.emit('firewall:tab', tab);
+      socket.emit('firewall:tab', wireTab());
       renderTab();
     });
   });
 
   document.addEventListener('mikrodash:pagechange', (e) => {
     if ((e as CustomEvent).detail !== 'firewall') return;
+    // Back to IPv4 on entry, as Routing resets its tab. The CHECKBOX is
+    // remembered and the family is not: one is a preference about what the cards
+    // mean, the other is where you happened to be looking last time.
+    if (fam !== 'ip4') setFwFamily('ip4');
+    // The collector drops the want when this page's room empties, so re-entering
+    // has to ask again — otherwise a remembered checkbox would show stale or
+    // empty IPv6 counts.
+    sendWantV6();
     if (data.filter) renderTab();
   });
 

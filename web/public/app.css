@@ -1007,7 +1007,14 @@
     .fw-cell-flash{animation:fw-flash .6s ease-out}
     @keyframes fw-flash{0%{color:var(--accent-rx)}100%{color:inherit}}
     /* Search */
-    .fw-search-wrap{padding:.45rem .75rem;border-bottom:1px solid var(--border)}
+    .fw-search-wrap{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;padding:.45rem .75rem;border-bottom:1px solid var(--border)}
+/* The search box was width:100% and would eat the whole row once the IPv6
+   checkbox joined it. Allowed to shrink, capped so it does not sprawl. */
+.fw-search-wrap #fwSearch{flex:0 1 320px;min-width:0}
+.fw-v6-toggle{display:flex;align-items:center;gap:.35rem;margin:0;font-family:var(--font-mono);font-size:.68rem;color:var(--text-muted);cursor:pointer;user-select:none;white-space:nowrap}
+.fw-v6-toggle input{margin:0;cursor:pointer}
+/* .stab-bar carries margin-bottom:1rem, which is too much inside a card body. */
+.fwfam-bar{margin:.4rem .75rem 0;padding-bottom:0}
     #fwSearch{width:100%;max-width:280px;background:rgba(13,18,30,.9);border:1px solid var(--border);border-radius:5px;color:var(--text-main);font-size:.72rem;padding:.28rem .6rem;font-family:var(--font-mono)}
     html[data-theme="light"] #fwSearch{background:rgba(255,255,255,.9)}
     /* scroll */

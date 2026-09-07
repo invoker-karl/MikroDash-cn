@@ -378,6 +378,11 @@ export interface FirewallPayload {
   nat: FirewallRule[] | null;
   mangle: FirewallRule[] | null;
   raw: FirewallRule[] | null;
+  filter6?: FirewallRule[] | null;
+  nat6?: FirewallRule[] | null;
+  mangle6?: FirewallRule[] | null;
+  raw6?: FirewallRule[] | null;
+  ipv6Disabled?: boolean | null;
   activeTable: string;
   pollMs: number;
 }
