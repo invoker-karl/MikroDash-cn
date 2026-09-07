@@ -649,8 +649,58 @@ func (cn *conn) devicesFocus() {
 	if cn.srv.alertPool != nil {
 		cn.srv.alertPool.PrimeStats()
 	}
+	cn.logEmptyFleet()
 	cn.sendRoutersStats()
 	cn.startDevicesTick()
+}
+
+// logEmptyFleet says WHY the Devices page is about to be blank.
+//
+// ── TWO CAUSES, ONE APPEARANCE ─────────────────────────────────────────────
+//
+// `BuildStats` drops every row when the RBAC set is empty-but-not-nil
+// (internal/routers/assemble.go: a NIL `Visible` means unrestricted, an EMPTY
+// one means this principal may read nothing). So a viewer holding a page grant
+// and no router-scoped grant sees precisely what somebody with no routers
+// configured sees — "No routers configured." — and nothing anywhere says which
+// of the two it is.
+//
+// That is how issue #129 arrived: a blank Devices page, no logs, and no way to
+// tell an authorization result from an empty fleet without reading the source.
+// The fix for the bug is whatever the grants turn out to be; the fix for the
+// DIAGNOSIS is this line.
+//
+// ── ONCE PER OPEN, NOT PER TICK ────────────────────────────────────────────
+//
+// `sendRoutersStats` runs every two seconds for as long as the page is open, so
+// logging there would bury the log rather than serve it. This sits beside
+// `PrimeStats`, for the reason that function's own comment gives: one line per
+// cold open, which is when somebody is actually asking why the page is blank.
+// scopeHidesWholeFleet reports whether the Devices page will be blank BECAUSE OF
+// ACCESS SCOPE rather than because no routers are configured.
+//
+// NIL IS THE UNRESTRICTED ANSWER, and getting that backwards would log on every
+// open of a healthy install — which is why this is a separate function with a
+// table test rather than a condition inline in a log call.
+func scopeHidesWholeFleet(fleet int, visible map[string]bool) bool {
+	return fleet > 0 && visible != nil && len(visible) == 0
+}
+
+func (cn *conn) logEmptyFleet() {
+	if cn.srv.store == nil || cn.sess == nil {
+		return
+	}
+	all, _ := cn.srv.store.Routers()
+	if len(all) == 0 {
+		return // genuinely no routers; the page's own message is already true
+	}
+	if !scopeHidesWholeFleet(len(all), cn.srv.visibleRouters(cn.sess)) {
+		return
+	}
+	log.Printf("[devices] %q may read none of the %d configured routers, so the "+
+		"page will show nothing — this is an access-scope result, not an empty "+
+		"fleet. Check the grants for this principal in Settings → Authentication",
+		cn.sess.Username, len(all))
 }
 
 // devicesRefresh is the live `setInterval(_emitRouters, 2000)`.
