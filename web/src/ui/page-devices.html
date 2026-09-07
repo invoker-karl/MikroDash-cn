@@ -69,7 +69,12 @@
         </select>
       </div>
 
-      <div class="row row-cards mt-3" id="routers-grid">
+      <!-- `justify-content-center`: a partly filled last row used to pack hard
+           against the left edge, so a fleet of two or three devices sat in the
+           corner of a wide window with everything else on the page spanning it.
+           A full row is unaffected — the columns already fill it — so this only
+           changes where the leftover cards sit. -->
+      <div class="row row-cards mt-3 justify-content-center" id="routers-grid">
         <div class="col-12 text-muted text-center py-4">Loading…</div>
       </div>
 
