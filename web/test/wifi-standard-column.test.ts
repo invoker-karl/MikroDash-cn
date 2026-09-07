@@ -168,5 +168,109 @@ function boot() {
   say('ok  the row has one cell per header column (' + ths + ')');
 }
 
+// ── 5. Band and Standard sort when their headers are clicked ───────────────
+//
+// Reported as "I can't sort by Band or Standard by clicking the header names".
+// Both columns were declared without a sort key, on the stated grounds that they
+// are "derived labels" — which is not a reason, since every column in this table
+// is derived from something.
+//
+// ── THE DISCRIMINATING CASE IS THE UNKNOWN ONE ──────────────────────────────
+//
+// With today's vocabulary, alphabetical and ranked order AGREE: "2.4GHz" <
+// "5GHz" < "6GHz", and "Legacy" < "Wi-Fi 4" < … < "Wi-Fi 7". So a test built
+// only from real values cannot tell a ranked comparator from a `localeCompare`
+// one, and would pass against an implementation that breaks the moment MikroTik
+// ships a band whose name sorts differently from its frequency.
+//
+// The empty value is what separates them, and it is not hypothetical: a CAPsMAN
+// row carries no band at all and therefore no generation. Alphabetically "" is
+// FIRST; ranked, it is last. Every assertion below leans on that.
+//
+// ONE INTERFACE FOR EVERY CLIENT, deliberately. The table groups by interface
+// and only draws group headers when there is more than one, so a single
+// interface isolates the comparator from the grouping — which has its own
+// ordering behaviour and is not what was reported.
+{
+  const IFACE = 'wifi1';
+  const names = (html: string): string[] =>
+    [...html.matchAll(/font-weight:600;font-size:\.78rem">([^<]*)</g)].map((m) => m[1]);
+
+  const { doc, send, restore } = boot();
+  // Fed in an order that is neither the band order nor the standard order, so
+  // neither result can come from the input surviving unsorted.
+  send([
+    client({ mac: '02:00:00:00:00:01', name: 'c-5-wifi6', iface: IFACE, band: '5GHz', standard: 'Wi-Fi 6' }),
+    client({ mac: '02:00:00:00:00:02', name: 'd-none', iface: IFACE, band: '', standard: '' }),
+    client({ mac: '02:00:00:00:00:03', name: 'a-24-legacy', iface: IFACE, band: '2.4GHz', standard: 'Legacy' }),
+    client({ mac: '02:00:00:00:00:04', name: 'b-6-wifi7', iface: IFACE, band: '6GHz', standard: 'Wi-Fi 7' }),
+  ]);
+
+  const ths = doc.nodes['wlThead'].querySelectorAll('th');
+  const idx = { band: 2, standard: 3 };
+  assert.strictEqual(ths.length, 7, 'expected 7 header cells, got ' + ths.length);
+
+  // ── Band ────────────────────────────────────────────────────────────────
+  ths[idx.band].click();
+  let got = names(String(doc.nodes['wirelessTable'].innerHTML));
+  assert.deepStrictEqual(got, ['a-24-legacy', 'c-5-wifi6', 'b-6-wifi7', 'd-none'],
+    'clicking Band did not order by frequency with the unknown last. If the ' +
+    'unknown came FIRST the comparator is alphabetical, not ranked; if nothing ' +
+    'moved the column has no sort key at all, which is the reported bug.\n' +
+    'got: ' + JSON.stringify(got));
+  say('ok  Band sorts by frequency, unknown last');
+
+  // A second click reverses, which is what every other column here does.
+  ths[idx.band].click();
+  got = names(String(doc.nodes['wirelessTable'].innerHTML));
+  assert.deepStrictEqual(got, ['d-none', 'b-6-wifi7', 'c-5-wifi6', 'a-24-legacy'],
+    'clicking Band twice did not reverse the order: ' + JSON.stringify(got));
+  say('ok  a second Band click reverses it');
+
+  // ── Standard ────────────────────────────────────────────────────────────
+  ths[idx.standard].click();
+  got = names(String(doc.nodes['wirelessTable'].innerHTML));
+  assert.deepStrictEqual(got, ['a-24-legacy', 'c-5-wifi6', 'b-6-wifi7', 'd-none'],
+    'clicking Standard did not order by generation with the unknown last. ' +
+    'Legacy before Wi-Fi 6 before Wi-Fi 7, and the CAPsMAN-shaped row with no ' +
+    'generation at the end.\ngot: ' + JSON.stringify(got));
+  say('ok  Standard sorts by generation, unknown last');
+
+  ths[idx.standard].click();
+  got = names(String(doc.nodes['wirelessTable'].innerHTML));
+  assert.deepStrictEqual(got, ['d-none', 'b-6-wifi7', 'c-5-wifi6', 'a-24-legacy'],
+    'clicking Standard twice did not reverse the order: ' + JSON.stringify(got));
+  say('ok  a second Standard click reverses it');
+
+  // ── and the header shows WHICH column is sorted ─────────────────────────
+  //
+  // Without the indicator a user cannot tell a sorted table from an unsorted
+  // one, which is half of what "I cannot sort by this" means in practice.
+  const head = String(doc.nodes['wlThead'].innerHTML);
+  assert.ok(/sort-(asc|desc)/.test(head),
+    'no sort indicator class is rendered on the active column, so nothing on ' +
+    'screen says the table is sorted:\n' + head);
+  restore();
+  say('ok  the active sort column is marked');
+}
+
+// ── 6. Interface stays UNSORTABLE, which is not an oversight ────────────────
+//
+// The table groups by interface, so a sort on it would order rows by the very
+// thing the grouping has already collapsed. Pinned so that "make the headers
+// sortable" is not later read as "make them all sortable".
+{
+  const { doc, send, restore } = boot();
+  send([client({})]);
+  const ths = doc.nodes['wlThead'].querySelectorAll('th');
+  const ifaceTh = ths[1];
+  const clickable = (ifaceTh._clicks || []).length;
+  restore();
+  assert.strictEqual(clickable, 0,
+    'the Interface header became clickable. The table is GROUPED by interface, ' +
+    'so sorting on it orders rows by what the grouping already collapsed.');
+  say('ok  Interface is still not sortable, deliberately');
+}
+
 fs.rmSync(OUT, { force: true });
 say('wifi-standard-column: all checks passed');

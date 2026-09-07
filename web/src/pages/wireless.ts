@@ -98,7 +98,35 @@ function uptimeToSecs(u: string): number {
   return total;
 }
 
-type CmpKey = 'name' | 'signal' | 'txRate' | 'uptime';
+type CmpKey = 'name' | 'signal' | 'txRate' | 'uptime' | 'band' | 'standard';
+
+/**
+ * Band and Standard sort by RANK, never alphabetically.
+ *
+ * Both happen to come out right as strings today — "2.4GHz" < "5GHz" < "6GHz",
+ * and "Legacy" < "Wi-Fi 4" < … < "Wi-Fi 6E" < "Wi-Fi 7" — and both are right by
+ * LUCK rather than by construction. A 6 GHz band written "6E" or a future
+ * "Wi-Fi 10" sorts straight to the wrong place, and nothing would fail: the
+ * column would simply be ordered wrongly, which is the quietest kind of bug this
+ * table could have.
+ *
+ * The vocabularies are closed and owned by the collector — `BandLabel` emits
+ * exactly three strings and `WifiStandard` exactly six — so ranking them here is
+ * reading a fixed list, not guessing at free text.
+ *
+ * UNKNOWN RANKS LAST ASCENDING. A client with no band (or a CAPsMAN row, which
+ * has no generation at all) is not the lowest of anything; it is unknown, and
+ * the dash belongs at the end of the natural order rather than in front of
+ * 2.4GHz. Descending reverses the whole array, as every other column here does,
+ * so it leads on the way back — the same trade `name` and `signal` already make.
+ */
+const WL_BAND_RANK: Record<string, number> = { '2.4GHz': 1, '5GHz': 2, '6GHz': 3 };
+const WL_STD_RANK: Record<string, number> = {
+  'Legacy': 1, 'Wi-Fi 4': 4, 'Wi-Fi 5': 5, 'Wi-Fi 6': 6, 'Wi-Fi 6E': 7, 'Wi-Fi 7': 8,
+};
+const UNKNOWN_LAST = 999;
+const rankOf = (table: Record<string, number>, v: string): number =>
+  table[v] ?? UNKNOWN_LAST;
 
 // Comparators are written ASCENDING and reversed for descending, so the button
 // bar and the column headers cannot disagree about ordering.
@@ -107,12 +135,19 @@ const WL_CMP: Record<CmpKey, (a: WirelessClient, b: WirelessClient) => number> =
   signal: (a, b) => (a.signal || 0) - (b.signal || 0),
   txRate: (a, b) => parseTxRateNum(a.txRate) - parseTxRateNum(b.txRate),
   uptime: (a, b) => uptimeToSecs(a.uptime) - uptimeToSecs(b.uptime),
+  band: (a, b) => rankOf(WL_BAND_RANK, a.band) - rankOf(WL_BAND_RANK, b.band),
+  standard: (a, b) => rankOf(WL_STD_RANK, a.standard) - rankOf(WL_STD_RANK, b.standard),
 };
 
 // Preserves what the buttons did before headers existed: strongest signal,
 // fastest rate and longest uptime first, but names A to Z.
 const WL_DEFAULT_DIR: Record<CmpKey, 'asc' | 'desc'> = {
   name: 'asc', signal: 'desc', txRate: 'desc', uptime: 'desc',
+  // Ascending on the first click for both: 2.4GHz before 5GHz, and the OLDEST
+  // standard first. That is the actionable direction — the reason to sort by
+  // generation is to find the clients holding a network back, not to admire the
+  // Wi-Fi 7 ones.
+  band: 'asc', standard: 'asc',
 };
 
 function sortClients(clients: WirelessClient[], key: string, dir: string): WirelessClient[] {
@@ -145,17 +180,26 @@ export function initWirelessPage(socket: Socket, isVisible: (page: string) => bo
 
   function renderWireless(): void {
     if (!wirelessTable) return;
-    // Interface and Band carry NO key on purpose: the table is grouped by
-    // interface, so sorting on it is meaningless, and Band is a derived label.
+    // Interface carries NO key: the table is GROUPED by interface, so sorting on
+    // it would order rows by the thing the grouping has already collapsed.
+    //
+    // BAND AND STANDARD DO SORT, and the earlier note here that they were
+    // "derived labels" was not a reason — every column in this table is derived
+    // from something. What they sort by is ranked rather than alphabetical; see
+    // WL_BAND_RANK.
+    //
+    // What a sort on either does is reorder the GROUPS, because groups are built
+    // in the order the sorted list first mentions each interface. That is the
+    // useful behaviour and worth knowing: sorting by Standard puts the interface
+    // holding the oldest client at the top, and orders within each group too.
+    //
     // The wl-col-* classes are passed through because the matching td carries
     // them.
     renderSortHeader('wlThead', [
       { key: 'name', label: 'Device' },
       { label: 'Interface', cls: 'wl-col-iface' },
-      { label: 'Band' },
-      // Not sortable, for the same reason Band is not: it is a derived label
-      // with a handful of values, so a sort on it groups rather than orders.
-      { label: 'Standard' },
+      { key: 'band', label: 'Band' },
+      { key: 'standard', label: 'Standard' },
       { key: 'signal', label: 'Signal', cls: 'text-end' },
       { key: 'txRate', label: 'TX / RX' },
       { key: 'uptime', label: 'Uptime', cls: 'wl-col-uptime' },
