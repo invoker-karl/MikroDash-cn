@@ -350,6 +350,96 @@ func (r *replayReader) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
 	return nil, nil
 }
 
+// ── deliberate divergence from the Node golden ───────────────────────────────
+
+// addedSinceNode names the fields this port deliberately adds beyond what the
+// Node implementation sent, per collector.
+//
+// ── WHY A LEDGER AND NOT A REGENERATED GOLDEN ───────────────────────────────
+//
+// The goldens cannot be regenerated: `tools/make-golden.js` read the Node source
+// and that source is gone, so the run skips. Hand-editing one is worse than
+// useless — CLAUDE.md's rule is that a hand-copied table "is a fork with no
+// update path" — and deleting the gate to make an addition quiet is the one
+// thing this repository has explicitly lost coverage to before.
+//
+// So an addition is RECORDED. The field is stripped from the Go payload before
+// the diff, and everything else still has to match the Node recording exactly.
+//
+// ── AND IT FAILS IN BOTH DIRECTIONS ─────────────────────────────────────────
+//
+// An unrecorded addition fails the diff, and a recorded one that has STOPPED
+// being produced fails here — otherwise this list becomes folklore: a set of
+// excuses for differences nobody re-measures, outliving the changes it
+// describes. That is the rule the surviving ledgers in internal/verify carry and
+// it is the reason this one is safe to add.
+//
+// Paths are `field` or `list[].field`; one level of list is all any entry has
+// needed, and a form nothing uses is a form nothing tests.
+var addedSinceNode = map[string][]string{
+	// The 802.11 generation a client negotiated. Added 2026-09-07 for the WiFi
+	// Clients page's Standard column: the Node app read the registration table's
+	// `band` and kept only the frequency half, so the generation was collected
+	// and discarded. Purely additive — no existing field changed.
+	"wireless": {"clients[].standard"},
+}
+
+// stripAdded removes one recorded field from the payload.
+//
+// Returns how many rows carried a NON-EMPTY value and how many rows there were,
+// because those are the two different failures: zero out of zero is an empty
+// fixture and says nothing, while zero out of twenty means the addition has
+// stopped happening and the ledger entry is stale.
+//
+// NON-EMPTY, NOT PRESENT, AND THE DIFFERENCE WAS MEASURED. The first version
+// counted presence and a mutation deleting the field's ASSIGNMENT survived it:
+// the struct field has no `omitempty`, so an unset string still marshals as
+// `"standard": ""` and the ledger saw twenty happy rows. A ledger that cannot
+// tell "still produced" from "still declared" is the folklore it was written to
+// avoid.
+func stripAdded(payload any, spec string) (filled, possible int) {
+	root, ok := payload.(map[string]any)
+	if !ok {
+		return 0, 0
+	}
+	listName, field, isList := strings.Cut(spec, "[].")
+	nonEmpty := func(v any) bool {
+		s, isStr := v.(string)
+		return !isStr || s != ""
+	}
+	if !isList {
+		v, has := root[spec]
+		if !has {
+			return 0, 1
+		}
+		delete(root, spec)
+		if nonEmpty(v) {
+			return 1, 1
+		}
+		return 0, 1
+	}
+	rows, ok := root[listName].([]any)
+	if !ok {
+		return 0, 0
+	}
+	for _, r := range rows {
+		row, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		possible++
+		v, has := row[field]
+		if !has {
+			continue
+		}
+		delete(row, field)
+		if nonEmpty(v) {
+			filled++
+		}
+	}
+	return filled, possible
+}
+
 // ── the gate ─────────────────────────────────────────────────────────────────
 
 func TestGoldenPayloads(t *testing.T) {
@@ -379,7 +469,25 @@ func TestGoldenPayloads(t *testing.T) {
 			var want any
 			readJSON(t, g.file, &want)
 
-			if diff := diffJSON(normaliseTS(toAny(t, got)), want, ""); diff != "" {
+			// Recorded additions come out before the comparison, and each one
+			// must actually have been there — see addedSinceNode.
+			gotAny := normaliseTS(toAny(t, got))
+			for _, spec := range addedSinceNode[g.collector] {
+				filled, possible := stripAdded(gotAny, spec)
+				if possible > 0 && filled == 0 {
+					t.Errorf("addedSinceNode records %q for %s, and not one of the "+
+						"%d row(s) carries a value for it. Either the addition was "+
+						"removed and this entry must go with it, or it was renamed "+
+						"and the entry must follow — a ledger that outlives its "+
+						"change is how a difference stops being re-measured.\n"+
+						"If a fixture legitimately has nothing to report here, it is "+
+						"also not proving anything about the addition, and the entry "+
+						"needs a fixture that does.",
+						spec, g.collector, possible)
+				}
+			}
+
+			if diff := diffJSON(gotAny, want, ""); diff != "" {
 				t.Errorf("payload differs from the Node golden:\n%s", diff)
 			}
 		})

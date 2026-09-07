@@ -246,6 +246,46 @@ export function bandBadge(band: string): string {
   return '<span class="wl-band ' + cls + '">' + band + '</span>';
 }
 
+/**
+ * The 802.11 generation a client NEGOTIATED, as a coloured pill.
+ *
+ * ── IT ANSWERS A DIFFERENT QUESTION FROM THE BAND PILL ──────────────────────
+ *
+ * Band says which radio a client is on; this says which standard it agreed with
+ * that radio. They are orthogonal, and the gap between them is the useful part:
+ * a client showing 5GHz + Wi-Fi 5 on a Wi-Fi 6 access point is not getting
+ * Wi-Fi 6, and nothing else on the page would tell you that. Measured on a live
+ * hAP AX3 on 2026-09-07, which is exactly what one of its clients was doing.
+ *
+ * ── EMPTY RENDERS A DASH, NOT AN EMPTY PILL ─────────────────────────────────
+ *
+ * A CAPsMAN row carries no band at all, so its generation is genuinely unknown
+ * rather than old. A blank pill would read as a value; the dash matches what the
+ * other columns already do with an absent field.
+ *
+ * The class carries the colour rather than an inline style, so the palette lives
+ * with the rest of the wireless pills in CSS and a theme can move it.
+ */
+export function standardBadge(standard: string): string {
+  if (!standard) return '<span class="muted-note">&mdash;</span>';
+  // Keyed on the rendered label because that IS the vocabulary: `WifiStandard`
+  // in internal/collect emits exactly these six strings and nothing else, and
+  // its test pins that list against MikroTik's documented band enum.
+  const CLS: Record<string, string> = {
+    'Legacy': 'wl-std-legacy',
+    'Wi-Fi 4': 'wl-std-4',
+    'Wi-Fi 5': 'wl-std-5',
+    'Wi-Fi 6': 'wl-std-6',
+    'Wi-Fi 6E': 'wl-std-6e',
+    'Wi-Fi 7': 'wl-std-7',
+  };
+  // An unrecognised string still renders, in the neutral colour. The collector
+  // should never send one, but a pill that vanishes is a worse way to find out
+  // than a pill that looks plain.
+  const cls = CLS[standard] || 'wl-std-legacy';
+  return '<span class="wl-std ' + cls + '">' + esc(standard) + '</span>';
+}
+
 const SSID_COLOURS = [
   'var(--accent-rx)',      /* blue   */
   'rgba(52,211,153,.95)',  /* green  */

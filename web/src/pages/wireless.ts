@@ -12,13 +12,14 @@
 // comparison. Two copies would mean one network wearing two colours depending on
 // which page you were looking at.
 
-import { esc, el, bandBadge, ssidColours, installWifiGlobals,
+import { esc, el, bandBadge, standardBadge, ssidColours, installWifiGlobals,
   renderSortHeader, type SortState } from '../dom';
 import type { Socket } from '../socket';
 import { initFrequencyAnalyser } from './wireless-fa';
 
 export interface WirelessClient {
   mac: string; signal: number; iface: string; txRate: string; band: string;
+  standard: string;
   ip: string; rxRate: string; uptime: string; ssid: string; name: string;
   source?: string;
 }
@@ -152,6 +153,9 @@ export function initWirelessPage(socket: Socket, isVisible: (page: string) => bo
       { key: 'name', label: 'Device' },
       { label: 'Interface', cls: 'wl-col-iface' },
       { label: 'Band' },
+      // Not sortable, for the same reason Band is not: it is a derived label
+      // with a handful of values, so a sort on it groups rather than orders.
+      { label: 'Standard' },
       { key: 'signal', label: 'Signal', cls: 'text-end' },
       { key: 'txRate', label: 'TX / RX' },
       { key: 'uptime', label: 'Uptime', cls: 'wl-col-uptime' },
@@ -159,7 +163,7 @@ export function initWirelessPage(socket: Socket, isVisible: (page: string) => bo
 
     const rows = sortClients(clients, sort.col, sort.dir);
     if (!rows.length) {
-      wirelessTable.innerHTML = '<tr><td colspan="6" class="empty-state">No wireless clients</td></tr>';
+      wirelessTable.innerHTML = '<tr><td colspan="7" class="empty-state">No wireless clients</td></tr>';
       return;
     }
 
@@ -179,7 +183,7 @@ export function initWirelessPage(socket: Socket, isVisible: (page: string) => bo
       // interface column on every row.
       if (order.length > 1) {
         const isCapsman = g.clients.some((c) => c.source === 'capsman');
-        html += '<tr class="wl-group-row"><td colspan="6">' +
+        html += '<tr class="wl-group-row"><td colspan="7">' +
           '<span class="wl-group-label">' + esc(g.iface) + '</span>' +
           (isCapsman ? '<span class="badge badge-outline-azure ms-1" style="font-size:.6rem">CAP</span>' : '') +
           (g.ssid ? '<span class="wl-group-sub">' + esc(g.ssid) + '</span>' : '') +
@@ -200,6 +204,7 @@ export function initWirelessPage(socket: Socket, isVisible: (page: string) => bo
           '<td class="wl-col-iface" style="color:var(--text-muted);font-size:.73rem">' +
             esc(c.iface || '—') + '</td>' +
           '<td>' + bandBadge(c.band) + '</td>' +
+          '<td>' + standardBadge(c.standard) + '</td>' +
           '<td class="text-end">' +
             signalBars(sig) +
             '<span style="font-size:.68rem;color:var(--text-muted);margin-left:.3rem">' + sig + ' dBm</span>' +

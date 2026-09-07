@@ -29,6 +29,7 @@ import {
 import { STALE_CARDS } from './gen/stale-tables';
 import { PAGE_KEY_SET, pageTitle } from './gen/pages';
 import { initialPage, initRouting, sync, type NavMode } from './routing';
+import { rejoinDecision, type RejoinState } from './rejoin';
 import { initDnsPage } from './pages/dns';
 import { initBridgesPage } from './pages/bridges';
 import { initVlansPage } from './pages/vlans';
@@ -483,13 +484,38 @@ async function main(): Promise<void> {
   // The FIRST one is skipped deliberately — on a fresh connect the room has
   // already been joined by the code that opened the page, and re-emitting would
   // be a second join for the room we are already in.
-  let roomsRouterId = '';
+  //
+  // ── AND A RECONNECT IS NOT A CHANGE OF ID, WHICH IS WHY IT WAS MISSED ─────
+  //
+  // Reacting to a CHANGE of id is right for a switch and silently wrong for a
+  // reconnect, because the router has not changed — so `id === roomsRouterId`
+  // returned early and `page:focus` was never re-sent. Nothing on the server
+  // covers that: room membership is per-CONNECTION, a reconnect arrives as a
+  // brand-new `conn` whose `cn.page` is empty, and `rejoinPage` returns
+  // immediately on an empty page. `router:select` is re-sent on connect and
+  // rejoins the CARDS; the page room had nothing to rejoin it.
+  //
+  // The result was a browser subscribed to no page room at all, on a socket the
+  // server considers healthy — every page-scoped card going stale while the
+  // collector polls happily into a room nobody is in. It is the same failure
+  // `TestSelectRouterRejoinsEveryPerSocketSubscription` was written for, reached
+  // by the other route.
+  //
+  // MEASURED, 2026-09-07: a WebSocket driven through the real sequence received
+  // four `wireless:update` in 75s with `page:focus`, and ZERO in 75s over a
+  // reconnect that sent only `router:select`.
+  //
+  // Keyed on `router:active` rather than on `connect` so the ordering is
+  // structural: the server emits it only after it has processed the select, so
+  // the session exists by the time this asks for the page.
+  // The decision itself is in `./rejoin`, where a test can reach it: this
+  // listener lives inside main(), and main.ts runs main() on import.
+  let rejoinState: RejoinState = { lastId: '', lostRooms: false };
+  socket.on('disconnect', () => { rejoinState = { ...rejoinState, lostRooms: true }; });
   socket.on('router:active', (d: { activeId?: string } | undefined) => {
-    const id = (d && d.activeId) || '';
-    if (!id || id === roomsRouterId) return;
-    const first = !roomsRouterId;
-    roomsRouterId = id;
-    if (first) return;
+    const { rejoin, next } = rejoinDecision((d && d.activeId) || '', rejoinState);
+    rejoinState = next;
+    if (!rejoin) return;
     socket.emit('page:focus', currentPage);
     document.dispatchEvent(new CustomEvent('socket:reconnect'));
   });

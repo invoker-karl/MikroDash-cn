@@ -1536,6 +1536,24 @@
     .wl-band-24{background:rgba(167,139,250,.15);color:rgba(167,139,250,.9);border:1px solid rgba(167,139,250,.25)}
     .wl-band-5{background:rgba(56,189,248,.12);color:var(--accent-rx);border:1px solid rgba(56,189,248,.25)}
     .wl-band-6{background:rgba(52,211,153,.12);color:rgba(52,211,153,.9);border:1px solid rgba(52,211,153,.25)}
+    /* ── The Standard pill ──────────────────────────────────────────────────
+       Sits beside the band pill and answers a different question: the band is
+       WHICH RADIO, this is WHICH STANDARD the client negotiated with it. Same
+       geometry so the two read as one pair, deliberately different hues so they
+       are never confused for each other -- the band palette is purple/blue/green
+       and this one runs warm to cool.
+
+       THE COLOURS ARE A PROGRESSION, not six arbitrary picks: older standards
+       are warmer and duller, newer ones cooler and brighter, so a table full of
+       Wi-Fi 4 clients looks different at a glance from one full of Wi-Fi 6. That
+       is the whole reason an operator opens this column. */
+    .wl-std{display:inline-block;font-family:var(--font-mono);font-size:.58rem;font-weight:700;padding:1px 5px;border-radius:3px;white-space:nowrap}
+    .wl-std-legacy{background:rgba(148,163,184,.12);color:rgba(148,163,184,.9);border:1px solid rgba(148,163,184,.25)}
+    .wl-std-4{background:rgba(248,113,113,.12);color:rgba(248,113,113,.9);border:1px solid rgba(248,113,113,.25)}
+    .wl-std-5{background:rgba(251,191,36,.12);color:rgba(251,191,36,.95);border:1px solid rgba(251,191,36,.25)}
+    .wl-std-6{background:rgba(45,212,191,.12);color:rgba(45,212,191,.95);border:1px solid rgba(45,212,191,.25)}
+    .wl-std-6e{background:rgba(34,211,238,.12);color:rgba(34,211,238,.95);border:1px solid rgba(34,211,238,.28)}
+    .wl-std-7{background:rgba(244,114,182,.12);color:rgba(244,114,182,.95);border:1px solid rgba(244,114,182,.28)}
     .wl-idle td{opacity:.55}
     .wl-idle .wl-idle-tag{display:inline-block;font-family:var(--font-mono);font-size:.56rem;color:var(--text-muted);border:1px solid var(--border);border-radius:3px;padding:0 4px;margin-left:.3rem;vertical-align:middle}
     .wl-rate{font-family:var(--font-mono);font-size:.7rem}

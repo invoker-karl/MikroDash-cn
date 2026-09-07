@@ -18,6 +18,7 @@ package collect
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,11 +42,14 @@ type WirelessClient struct {
 	Iface  string `json:"iface"`
 	TxRate string `json:"txRate"`
 	Band   string `json:"band"`
-	IP     string `json:"ip"`
-	RxRate string `json:"rxRate"`
-	Uptime string `json:"uptime"`
-	SSID   string `json:"ssid"`
-	Name   string `json:"name"`
+	// Standard is the 802.11 generation this client NEGOTIATED, which is not the
+	// same question as what the radio supports. See WifiStandard.
+	Standard string `json:"standard"`
+	IP       string `json:"ip"`
+	RxRate   string `json:"rxRate"`
+	Uptime   string `json:"uptime"`
+	SSID     string `json:"ssid"`
+	Name     string `json:"name"`
 	// Source marks a CAPsMAN row. Absent on local clients, because the live
 	// payload omits it there rather than sending an empty string.
 	Source string `json:"source,omitempty"`
@@ -77,6 +81,78 @@ type WirelessPayload struct {
 	// here — so the card can say so rather than rendering an empty list that
 	// looks like a failure.
 	SSIDsManagedElsewhere int `json:"ssidsManagedElsewhere"`
+}
+
+// wifiGenRank maps one 802.11 token to a Wi-Fi Alliance generation number.
+//
+// Zero means "older than the Alliance ever named". 802.11a/b/g predate the
+// generation numbering and calling them Wi-Fi 1/2/3 would be inventing a label
+// nobody prints on a box — the Alliance applied the scheme from 4 onward and
+// only ever marketed 4, 5, 6, 6E and 7.
+var wifiGenRank = map[string]int{
+	"b": 0, "a": 0, "g": 0,
+	"n": 4, "an": 4,
+	"ac": 5,
+	"ax": 6,
+	"be": 7,
+}
+
+// WifiStandard is the generation a client negotiated, from a RouterOS band.
+//
+// ── THE VALUE IS NOT A SUFFIX, WHICH IS THE TRAP ────────────────────────────
+//
+// The obvious reading — take everything after the dash — is wrong twice over,
+// and both forms are real. Checked against MikroTik's documentation rather than
+// against the one router to hand, because a fixture proves what one radio
+// answered and the docs say what a radio MAY answer:
+//
+//	modern (/interface/wifi/channel band):
+//	  2ghz-g 2ghz-n 2ghz-ax 2ghz-be 5ghz-a 5ghz-ac 5ghz-an 5ghz-ax
+//	  5ghz-be 6ghz-ax 6ghz-be
+//	legacy (/interface/wireless):
+//	  2ghz-b/g/n, 5ghz-a/n/ac, 2ghz-onlyn, 5ghz-onlyac
+//
+// So `5ghz-an` is ONE token meaning a/n, and `5ghz-a/n/ac` is THREE. A suffix
+// test also fails on the pair it matters most for: "an" ends in "n" and would
+// read as plain 802.11n, which is the same answer by luck, while "be" and "ac"
+// share no letters with anything and would be fine. Luck is not a reason.
+//
+// THE HIGHEST TOKEN WINS. A slash list is what the radio offers, and a client in
+// it negotiated the best both ends support — reporting the lowest would label a
+// Wi-Fi 5 client as Wi-Fi 4 on every legacy AP.
+//
+// An empty result is normal and must stay renderable: a CAPsMAN row carries no
+// band at all, which is why wlBandOf falls back to the interface name.
+func WifiStandard(rawBand string) string {
+	s := strings.ToLower(strings.TrimSpace(rawBand))
+	if s == "" {
+		return ""
+	}
+	prefix, rest, found := strings.Cut(s, "-")
+	if !found {
+		return ""
+	}
+	best := -1
+	for _, tok := range strings.Split(rest, "/") {
+		tok = strings.TrimPrefix(strings.TrimSpace(tok), "only")
+		if rank, ok := wifiGenRank[tok]; ok && rank > best {
+			best = rank
+		}
+	}
+	switch {
+	case best < 0:
+		// A token nothing recognises. Saying nothing beats guessing a
+		// generation, because the pill is read as a fact about the client.
+		return ""
+	case best == 0:
+		return "Legacy"
+	case best == 6 && strings.HasPrefix(prefix, "6"):
+		// 6E IS 802.11ax ON 6 GHZ and nothing else — the band is half the
+		// answer, so this is the one case the prefix is consulted for. Wi-Fi 7
+		// on 6 GHz stays "Wi-Fi 7"; there is no "7E".
+		return "Wi-Fi 6E"
+	}
+	return "Wi-Fi " + strconv.Itoa(best)
 }
 
 // wlBandOf reads the band a client is on.
@@ -121,16 +197,17 @@ func parseWirelessClient(row routeros.Reply, capsman bool, ip, name string) Wire
 	}
 	iface := firstNonEmptyStr(row["interface"], row["ap-interface"])
 	c := WirelessClient{
-		MAC:    mac,
-		Signal: signal,
-		Iface:  iface,
-		TxRate: firstNonEmptyStr(row["tx-rate"], row["tx-rate-set"]),
-		Band:   wlBandOf(row, iface, capsman),
-		IP:     ip,
-		RxRate: row["rx-rate"],
-		Uptime: row["uptime"],
-		SSID:   row["ssid"],
-		Name:   name,
+		MAC:      mac,
+		Signal:   signal,
+		Iface:    iface,
+		TxRate:   firstNonEmptyStr(row["tx-rate"], row["tx-rate-set"]),
+		Band:     wlBandOf(row, iface, capsman),
+		Standard: WifiStandard(row["band"]),
+		IP:       ip,
+		RxRate:   row["rx-rate"],
+		Uptime:   row["uptime"],
+		SSID:     row["ssid"],
+		Name:     name,
 	}
 	if capsman {
 		c.Source = "capsman"

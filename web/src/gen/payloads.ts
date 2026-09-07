@@ -1118,6 +1118,7 @@ export interface WirelessClient {
   iface: string;
   txRate: string;
   band: string;
+  standard: string;
   ip: string;
   rxRate: string;
   uptime: string;
