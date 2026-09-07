@@ -21,9 +21,11 @@ const (
 var attrsExpectedUnread = map[string]string{
 	"alert-id": "rendered by the live bell too and read by nothing there either; kept as the " +
 		"row handle rather than invented later",
-	"router-id":       attrUnshipped,
-	"bulk":            attrMarkup,
-	"role-preset":     attrMarkup,
+	"router-id": attrUnshipped,
+	// `bulk` and `role-preset` were here as attrMarkup — "a feature this port
+	// has not taken on". Both are wired now (settings-principals.ts), so the
+	// entries are DELETED rather than left as notes that stopped being true.
+	// That is this list's own rule, and the reason it fails in both directions.
 	"res-add-dynamic": attrMarkup,
 	"sev":             attrMarkup,
 }

@@ -34,6 +34,7 @@ import {
   type EditableGrant, type GrantView,
 } from './settings';
 import { sitesById } from './settings-sites';
+import { PAGE_NAV_MAP, VIEW_PRESETS } from '../gen/view-presets';
 import {
   userSavePlan, userSaveOutcome, groupSavePlan, groupSaveOutcome,
   roleSavePlan, roleSaveOutcome, groupMembersHtml, rolePagesFrom,
@@ -291,6 +292,85 @@ async function saveGroup(): Promise<void> {
   if (outcome.reload) await loadGroups();
 }
 
+/**
+ * Set one page row's level, in the only place the level is recorded: the markup.
+ *
+ * `saveRole` reads the row back out of the DOM — "the segmented control is the
+ * state" — so a preset that did not move these classes would be a preset that
+ * did nothing on save.
+ */
+function setRoleRowLevel(row: Element, level: string): void {
+  const want = row.querySelector<HTMLButtonElement>('[data-page-set][data-level="' + level + '"]');
+  // A Write toggle is DISABLED on a page with no write actions. Asking for
+  // write there falls back to read rather than silently leaving the row alone,
+  // which would make "All write" mean different things on different rows with
+  // nothing on screen to say so.
+  const target = want && !want.disabled
+    ? want
+    : row.querySelector<HTMLButtonElement>('[data-page-set][data-level="read"]');
+  if (!target) return;
+  row.querySelectorAll('[data-page-set]').forEach((b) => {
+    b.classList.toggle('sbtn-primary', b === target);
+    b.classList.toggle('sbtn-outline', b !== target);
+  });
+}
+
+/**
+ * Wire the role matrix's Preset and All read / All write buttons.
+ *
+ * ── THESE WERE NEVER PORTED, AND THE AUDIT SAID SO ─────────────────────────
+ *
+ * `data-role-preset` and `data-bulk` sat in `attrsExpectedUnread` as "markup for
+ * a feature this port has not taken on". That was an accurate record, not an
+ * oversight — but it is a record of a gap, and the gap is what an operator hits
+ * when they click Home and nothing happens. Ported now; the entries come out of
+ * that list in the same change, because a note that has stopped being true is
+ * worse than no note.
+ *
+ * The tiers are the SAME lists the Appearance presets use, so "Standard" means
+ * one thing in this app. `advanced` is derived from PAGE_NAV_MAP rather than
+ * frozen, so a page added to the nav joins it by existing.
+ *
+ * READ, not write, on the chosen tier — which is what the markup beside the
+ * buttons has always promised: "sets read on that tier and clears the rest".
+ */
+function mountRolePresets(): void {
+  const advanced = Object.keys(PAGE_NAV_MAP).map((k) => PAGE_NAV_MAP[k] as string);
+  const tiers: Record<string, string[]> = {
+    home: VIEW_PRESETS.home as string[],
+    standard: VIEW_PRESETS.standard as string[],
+    advanced,
+  };
+
+  // Delegated on document, like the segmented control above: `#rf_pages` is
+  // rebuilt on every open, and the buttons live outside it anyway.
+  document.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement | null;
+
+    const preset = t?.closest?.('[data-role-preset]') as HTMLElement | null;
+    if (preset) {
+      e.preventDefault();
+      const want = tiers[preset.getAttribute('data-role-preset') || ''];
+      if (!want) return;
+      const on: Record<string, boolean> = {};
+      want.forEach((pg) => { on[pg] = true; });
+      document.querySelectorAll('#rf_pages [data-page-row]').forEach((row) => {
+        const key = row.getAttribute('data-page-row') || '';
+        setRoleRowLevel(row, on[key] ? 'read' : 'none');
+      });
+      return;
+    }
+
+    const bulk = t?.closest?.('[data-bulk]') as HTMLElement | null;
+    if (bulk) {
+      e.preventDefault();
+      const level = bulk.getAttribute('data-bulk') || 'read';
+      document.querySelectorAll('#rf_pages [data-page-row]')
+        .forEach((row) => setRoleRowLevel(row, level));
+    }
+  });
+}
+
 function showRoleForm(role: RoleView | null): void {
   formError('rf_error', '');
   setVal('rf_id', role ? role.id : '');
@@ -466,6 +546,8 @@ function wireForms(): void {
   el('addGroupBtn')?.addEventListener('click', () => showGroupForm(null));
   el('gf_save')?.addEventListener('click', () => { void saveGroup(); });
   el('gf_cancel')?.addEventListener('click', () => openForm('groupFormWrap', false));
+
+  mountRolePresets();
 
   el('addRoleBtn')?.addEventListener('click', () => showRoleForm(null));
   el('rf_save')?.addEventListener('click', () => { void saveRole(); });

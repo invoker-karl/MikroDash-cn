@@ -707,8 +707,23 @@ export function renderRoutersStats(rows: RouterStatsRow[] | null): void {
   // comment from code, so naming it reads as a producer this port dropped.)
   syncRoutersSiteFilter(all);
 
+  // ── THE SITE FILTER, WHICH WAS POPULATED AND NEVER APPLIED ────────────────
+  //
+  // `syncRoutersSiteFilter` above has always filled this dropdown, so it looked
+  // alive: it listed the right sites and remembered a selection. Nothing ever
+  // read it. `rtrSiteFilter()` was written, exported and never called, and this
+  // line filtered on the search box alone — so choosing a site changed nothing.
+  //
+  // Neither audit could see it. `selectors_test` asks whether the id the page
+  // QUERIES exists in the markup, and `rtrSiteFilter` does query it; nothing
+  // notices that the querying function is itself never called.
+  const site = rtrSiteFilter();
+  const pool = !site ? all : all.filter((r) => (site === RTR_UNASSIGNED
+    ? siteIdsOf(r).length === 0
+    : siteIdsOf(r).indexOf(site) !== -1));
+
   const q = rtrQuery();
-  const visible = q ? all.filter((r) => rtrMatches(r, q)) : all;
+  const visible = q ? pool.filter((r) => rtrMatches(r, q)) : pool;
 
   const shown = el('routersShown');
   if (shown) {
@@ -916,6 +931,11 @@ export function mountRouters(socket: { on(ev: string, cb: (d: unknown) => void):
 
   const search = el<HTMLInputElement>('routersSearch');
   if (search) search.addEventListener('input', () => renderRoutersStats(lastRtrRows));
+
+  // The site filter re-renders exactly as the search box does. It had no
+  // listener at all, which is half of why selecting a site did nothing.
+  const siteSel = el<HTMLSelectElement>('routersSiteFilter');
+  if (siteSel) siteSel.addEventListener('change', () => renderRoutersStats(lastRtrRows));
 
   const sel = el<HTMLSelectElement>('routersView');
   if (sel) {

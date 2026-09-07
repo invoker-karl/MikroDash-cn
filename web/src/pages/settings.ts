@@ -161,6 +161,10 @@ export function populateSettings(data: SettingsPayload): void {
     input.value = '';
     input.placeholder = data[key] ? texts.whenSet : texts.whenNot;
   }
+
+  // The preset buttons describe the checkboxes above them, so they can only be
+  // marked once those hold real values. This is that moment.
+  setViewPresetUI(detectViewPreset());
 }
 
 /**
@@ -252,6 +256,65 @@ export function mountSettingsTabs(): void {
     if ((e as CustomEvent).detail !== 'settings') return;
     activateSettingsTab('routers');
   });
+  mountViewPresets();
+}
+
+/**
+ * Wire the Visible Pages presets.
+ *
+ * ── THEY WERE INERT, AND BOTH AUDITS PASSED ────────────────────────────────
+ *
+ * The four buttons have been in the markup all along, `detectViewPreset` and
+ * `setViewPresetUI` were both written and exported, and NOTHING EVER CALLED
+ * EITHER. No click listener existed, so the buttons did nothing and none of them
+ * was ever marked active.
+ *
+ * The attributes audit did not catch it because `data-view-preset` IS read —
+ * inside `setViewPresetUI`, which is itself dead. A dead reader satisfies a scan
+ * that asks "is this attribute referenced in source". That is the same shape as
+ * the `.fw-tab` selector that matched nothing and the reorder arrows nobody
+ * bound: rendered control, absent wiring, green suite.
+ *
+ * `custom` deliberately changes no checkbox. It is a LABEL for a selection that
+ * matches no preset, not a fifth arrangement, which is why `detectViewPreset`
+ * returns it as a fallback rather than listing it.
+ */
+export function mountViewPresets(): void {
+  const wrap = el('viewPresetWrap');
+  if (!wrap) return;
+
+  const advanced = Object.keys(PAGE_NAV_MAP).map((k) => PAGE_NAV_MAP[k] as string);
+  const named: Record<string, string[]> = {
+    home: VIEW_PRESETS.home as string[],
+    standard: VIEW_PRESETS.standard as string[],
+    advanced,
+  };
+
+  wrap.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement | null)?.closest?.('[data-view-preset]') as HTMLElement | null;
+    if (!btn) return;
+    const name = btn.dataset.viewPreset || '';
+    const pages = named[name];
+    if (pages) {
+      const on: Record<string, boolean> = {};
+      pages.forEach((pg) => { on[pg] = true; });
+      for (const sKey of Object.keys(PAGE_NAV_MAP)) {
+        const box = el<HTMLInputElement>('s_' + sKey);
+        // A page whose checkbox is not rendered is SKIPPED, not forced off —
+        // the same rule `detectViewPreset` applies when it compares.
+        if (!box) continue;
+        box.checked = !!on[PAGE_NAV_MAP[sKey] as string];
+      }
+    }
+    setViewPresetUI(pages ? name : 'custom');
+  });
+
+  // Touching any page checkbox by hand is what makes the selection Custom, and
+  // the button strip has to say so rather than keep claiming Standard.
+  for (const sKey of Object.keys(PAGE_NAV_MAP)) {
+    el<HTMLInputElement>('s_' + sKey)
+      ?.addEventListener('change', () => setViewPresetUI(detectViewPreset()));
+  }
 }
 
 // ── the principals card ─────────────────────────────────────────────────────
