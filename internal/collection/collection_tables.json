@@ -187,7 +187,11 @@
         "filter",
         "nat",
         "mangle",
-        "raw"
+        "raw",
+        "filter6",
+        "nat6",
+        "mangle6",
+        "raw6"
       ],
       "sessionProp": "firewall"
     },
