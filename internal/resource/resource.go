@@ -1145,14 +1145,24 @@ func fwHead(chains, actions []string) []Field {
 	}
 }
 
-func fwMatch() []Field {
+// fwProtocols is the IPv4 vocabulary; fwProtocols6 the IPv6 one.
+//
+// THE TWO DIFFER BY ONE VALUE AND IT IS NOT COSMETIC. `/ip/firewall` names
+// ICMPv6 `ipv6-icmp`; `/ipv6/firewall` REFUSES that spelling and calls it
+// `icmpv6` — "input does not match any value of protocol", measured on 7.24.1.
+// Reusing one list meant the IPv6 form offered a value its own menu rejects, so
+// picking ICMPv6 there failed at the router. Caught by driving the page, not by
+// any test: the shared helper compiled perfectly.
+var fwProtocols = []string{"tcp", "udp", "icmp", "ipv6-icmp", "gre", "ipsec-esp", "ipsec-ah"}
+var fwProtocols6 = []string{"tcp", "udp", "icmpv6", "gre", "ipsec-esp", "ipsec-ah"}
+
+func fwMatch(protocols []string) []Field {
 	return []Field{
 		{Name: "srcAddress", ROS: "src-address", Label: "Source Address", Type: TypeText,
 			Placeholder: "10.0.0.0/24"},
 		{Name: "dstAddress", ROS: "dst-address", Label: "Destination Address", Type: TypeText},
 		{Name: "protocol", ROS: "protocol", Label: "Protocol", Type: TypeText,
-			OptionsFrom: &OptionsFrom{Values: []string{
-				"tcp", "udp", "icmp", "ipv6-icmp", "gre", "ipsec-esp", "ipsec-ah"}}},
+			OptionsFrom: &OptionsFrom{Values: protocols}},
 		{Name: "srcPort", ROS: "src-port", Label: "Source Port", Type: TypeText},
 		// A port match is a list or a range as often as it is a number, so this
 		// is text: `443`, `80,443` and `1000-2000` are all valid to RouterOS.
@@ -1241,7 +1251,7 @@ var FWFilter = &Resource{
 			[]string{"accept", "drop", "reject", "tarpit", "log", "passthrough",
 				"fasttrack-connection", "jump", "return",
 				"add-src-to-address-list", "add-dst-to-address-list"}),
-		fwMatch(),
+		fwMatch(fwProtocols),
 		[]Field{
 			// A comma list, not one value — `established,related` is the single
 			// most common thing written here.
@@ -1266,7 +1276,7 @@ var FWNat = &Resource{
 		fwHead([]string{"srcnat", "dstnat"},
 			[]string{"accept", "masquerade", "dst-nat", "src-nat", "redirect", "netmap", "same",
 				"log", "jump", "return", "add-src-to-address-list", "add-dst-to-address-list"}),
-		fwMatch(),
+		fwMatch(fwProtocols),
 		[]Field{
 			{Name: "toAddresses", ROS: "to-addresses", Label: "To Addresses", Type: TypeText,
 				ShowIf: &ShowIf{Field: "action", In: []string{"dst-nat", "src-nat", "netmap", "same"}}},
@@ -1287,7 +1297,7 @@ var FWMangle = &Resource{
 			[]string{"accept", "mark-connection", "mark-packet", "mark-routing",
 				"change-mss", "change-ttl", "change-dscp", "route", "log",
 				"passthrough", "jump", "return"}),
-		fwMatch(),
+		fwMatch(fwProtocols),
 		[]Field{
 			{Name: "newConnectionMark", ROS: "new-connection-mark", Label: "New Connection Mark",
 				Type: TypeText, Required: true,
@@ -1318,7 +1328,7 @@ var FWRaw = &Resource{
 		fwHead([]string{"prerouting", "output"},
 			[]string{"accept", "drop", "notrack", "log", "jump", "return",
 				"add-src-to-address-list", "add-dst-to-address-list"}),
-		fwMatch(),
+		fwMatch(fwProtocols),
 		fwTail(),
 	),
 }
@@ -1367,7 +1377,7 @@ var FWFilter6 = &Resource{
 			[]string{"accept", "drop", "reject", "log", "passthrough",
 				"fasttrack-connection", "jump", "return",
 				"add-src-to-address-list", "add-dst-to-address-list"}),
-		fwMatch(),
+		fwMatch(fwProtocols6),
 		[]Field{
 			{Name: "connectionState", ROS: "connection-state", Label: "Connection State",
 				Type: TypeText, Placeholder: "established,related"},
@@ -1396,7 +1406,7 @@ var FWNat6 = &Resource{
 			[]string{"accept", "masquerade", "dst-nat", "src-nat", "redirect", "netmap",
 				"log", "passthrough", "jump", "return",
 				"add-src-to-address-list", "add-dst-to-address-list"}),
-		fwMatch(),
+		fwMatch(fwProtocols6),
 		[]Field{
 			// `to-address`, SINGULAR. IPv4 NAT calls this `to-addresses`, and the
 			// plural is an "unknown parameter" trap on every IPv6 save.
@@ -1421,7 +1431,7 @@ var FWMangle6 = &Resource{
 			[]string{"accept", "mark-connection", "mark-packet", "mark-routing",
 				"change-mss", "change-hop-limit", "change-dscp", "log",
 				"passthrough", "jump", "return"}),
-		fwMatch(),
+		fwMatch(fwProtocols6),
 		[]Field{
 			{Name: "newConnectionMark", ROS: "new-connection-mark", Label: "New Connection Mark",
 				Type: TypeText, Required: true,
@@ -1450,7 +1460,7 @@ var FWRaw6 = &Resource{
 		fwHead([]string{"prerouting", "output"},
 			[]string{"accept", "drop", "notrack", "log", "jump", "return",
 				"add-src-to-address-list", "add-dst-to-address-list"}),
-		fwMatch(),
+		fwMatch(fwProtocols6),
 		fwTail(),
 	),
 }

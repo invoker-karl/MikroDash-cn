@@ -272,6 +272,13 @@ func (f *Firewall) Tick() {
 // than being dropped, because this read is not authoritative about membership —
 // only Tick is.
 func (f *Firewall) pollCounters() {
+	// Retry the IPv6 probe here, and ONLY here, because this loop runs exactly
+	// when somebody is looking: Resume() starts it, Suspend() stops it. A no-op
+	// once the router has answered. Page focus is the timely attempt; this is
+	// the one that recovers when focus happened to land before the session was
+	// connected.
+	f.ProbeV6()
+
 	f.mu.Lock()
 	table := f.activeTable
 	f.mu.Unlock()
@@ -470,15 +477,24 @@ func (f *Firewall) ProbeV6() {
 		Args: []string{"=.proplist=disable-ipv6"},
 	})
 
+	// LATCH ONLY ON AN ANSWER. Setting `v6Probed` unconditionally was wrong and
+	// live verification is what caught it: page focus can land before the
+	// session has a connection, `Do` returns "routeros: not connected", and
+	// latching there meant the probe NEVER ran again — the family tab stayed
+	// hidden for the life of the connection, on a router that does IPv6
+	// perfectly well. Silent, and invisible to every test, because no test has a
+	// half-connected session.
+	//
+	// A router that genuinely lacks the menu therefore re-probes on each page
+	// focus. That is one cheap failed command per visit, not per poll, and it is
+	// the right way round: never latch an answer we did not get.
+	if err != nil || len(rows) == 0 {
+		return
+	}
 	f.mu.Lock()
 	f.v6Probed = true
-	if err == nil && len(rows) > 0 {
-		// A router without the menu at all traps, which lands in `err` and leaves
-		// this nil — "no answer", which the page reads as "change nothing". That
-		// is the right default: it never hides a tab on a guess.
-		v := boolOf(rows[0]["disable-ipv6"])
-		f.ipv6Disabled = &v
-	}
+	v := boolOf(rows[0]["disable-ipv6"])
+	f.ipv6Disabled = &v
 	f.mu.Unlock()
 	f.buildAndEmit()
 }
