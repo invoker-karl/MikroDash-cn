@@ -2,6 +2,53 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.8.21] - The IPv6 firewall, and the WebSocket works behind a reverse proxy again
+
+The Firewall page gains IPv6, per device and fully editable. MikroDash can be reached
+through a reverse proxy again, which has been broken since the 0.8 rewrite (#128).
+Four controls that were drawn but never wired now do what they say.
+
+### Added
+
+- **The Firewall page has an IPv4 | IPv6 switch.** All four IPv6 tables — filter, NAT,
+  mangle and raw — with the same add, edit, reorder and delete as IPv4. The rule
+  vocabularies are IPv6's own: no `tarpit`, `change-hop-limit` in place of
+  `change-ttl`, `icmpv6` rather than `ipv6-icmp`, and a different `reject-with` set.
+- **"Show IPv6 in cards"**, beside the search box, folds IPv6 into Rule Counts, Action
+  Breakdown and Chain Count. Off by default and remembered per browser.
+- **IPv6 is only read when it is being looked at.** Nothing is asked of a router until
+  the IPv6 tab is open or that box is ticked, so an IPv4-only device costs nothing. The
+  tab hides itself on a router with IPv6 switched off.
+- **`MIKRODASH_ORIGINS`** (or `--origins`) allows the Origin hosts a reverse proxy
+  presents. Comma separated, wildcards allowed. (#128)
+
+### Fixed
+
+- **MikroDash would not work behind a reverse proxy, and had not since 0.8.1.** The
+  WebSocket handshake was refused whenever the browser's address differed from the
+  address MikroDash sees, which is every proxied setup. The UI loaded and stayed empty.
+  Set `MIKRODASH_ORIGINS` to the host you browse to. (#128)
+- **A firewall rule could lock MikroDash out of a router without warning.** The
+  self-lockout check only ever looked at IPv4 rules. It now checks both families, and
+  no longer warns about rules in the family it is not connected over.
+- **The Visible Pages presets did nothing.** Home, Standard, Advanced and Custom had no
+  click handler at all.
+- **The Add Role presets and the All read / All write buttons did nothing**, for the
+  same reason.
+- **The Devices page's site filter did nothing.** Choosing a site left every device on
+  screen.
+- **A blank Devices page now says why.** An account that can open the page but has not
+  been granted the routers looked exactly like an install with no devices. (#129)
+- Device cards centre instead of packing to the left.
+
+### Internal
+
+- Counter deltas were shared between IPv4 and IPv6 rules with the same RouterOS id,
+  which would have produced plausible but wrong packet rates on dual-stack routers.
+- Three new self-checks, two of which caught a live bug the day they were written: every
+  server option is set by the binary, every rule table reaches the firewall's change
+  detection, and every collector's emptiness key names a real field.
+
 ## [0.8.20] - Manage PPP accounts, and a fresh container is healthy before a device is added
 
 PPPoE account management arrives on the PPP page (#125). A container with no device
