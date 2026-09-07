@@ -142,3 +142,71 @@ func TestFirewallFingerprintCoversTheWholeRule(t *testing.T) {
 		return f.fingerprint(&FirewallPayload{Filter: []FirewallRule{*r.(*FirewallRule)}})
 	})
 }
+
+// The SECOND firewall fingerprint gate, and the one that had no cover at all.
+//
+// `TestFirewallFingerprintCoversTheWholeRule` above reflects over
+// **FirewallRule** and always parks its row in `Filter`. That proves every field
+// of a rule is hashed. It proves nothing whatever about the payload's OTHER
+// TABLES: `fingerprint` names them one at a time in a map literal, and a table
+// left off that literal fails no test.
+//
+// Which matters the moment there is more than one family. Forget `filter6` and
+// the collector re-reads the router, hashes an identical string and returns
+// without emitting — so an IPv6 edit never reaches an open page on a quiet
+// ruleset. Exactly the defect the comment on `fingerprint` was written about,
+// one level up: there it was a field, here it is a whole table.
+//
+// So: every slice field on the payload, discovered rather than listed, must move
+// the fingerprint on its own AND be distinguishable from every other. The second
+// half is what catches a copy-paste that hashes `p.Filter` twice under two keys.
+func TestFirewallFingerprintCoversEveryTable(t *testing.T) {
+	f := &Firewall{}
+	rt := reflect.TypeOf(FirewallPayload{})
+	row := []FirewallRule{{ID: "x", Chain: "input", Action: "drop"}}
+
+	base := f.fingerprint(&FirewallPayload{})
+	seen := map[string]string{} // fingerprint -> the field that produced it
+	tables := 0
+
+	for i := 0; i < rt.NumField(); i++ {
+		ft := rt.Field(i)
+		if ft.Type != reflect.TypeOf([]FirewallRule(nil)) {
+			continue
+		}
+		tables++
+		p := &FirewallPayload{}
+		reflect.ValueOf(p).Elem().Field(i).Set(reflect.ValueOf(row))
+		got := f.fingerprint(p)
+
+		if got == base {
+			t.Errorf("%s does not reach fingerprint(): a change to that table "+
+				"would never be emitted", ft.Name)
+			continue
+		}
+		if other, dup := seen[got]; dup {
+			t.Errorf("%s and %s fingerprint identically — fingerprint() is "+
+				"reading the same field under two keys", ft.Name, other)
+			continue
+		}
+		seen[got] = ft.Name
+	}
+
+	// A guard against the test quietly measuring nothing if the payload is ever
+	// restructured away from named slice fields.
+	if tables != 8 {
+		t.Fatalf("found %d rule tables on FirewallPayload, expected 8 "+
+			"(four IPv4, four IPv6) — update this test deliberately", tables)
+	}
+
+	// Ipv6Disabled is not a table, but it is rendered: it decides whether the
+	// page shows an IPv6 tab, so a change to it has to reach the page too.
+	yes, no := true, false
+	fpNil := f.fingerprint(&FirewallPayload{})
+	fpYes := f.fingerprint(&FirewallPayload{Ipv6Disabled: &yes})
+	fpNo := f.fingerprint(&FirewallPayload{Ipv6Disabled: &no})
+	if fpNil == fpYes || fpNil == fpNo || fpYes == fpNo {
+		t.Errorf("Ipv6Disabled's three states must be distinguishable: "+
+			"nil=%q true=%q false=%q", fpNil, fpYes, fpNo)
+	}
+}
