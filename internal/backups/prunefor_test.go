@@ -18,7 +18,7 @@ type fakeStore struct {
 func (f *fakeStore) StoredBackupsFor(string) ([]StoredPair, error) {
 	return f.rows, f.rowsErr
 }
-func (f *fakeStore) MarkPruned(id int64, ts int64) (bool, error) {
+func (f *fakeStore) ForgetRow(id int64) (bool, error) {
 	f.markCall++
 	if err := f.markErr[id]; err != nil {
 		return false, err

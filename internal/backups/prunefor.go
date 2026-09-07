@@ -25,7 +25,20 @@ import "fmt"
 // can be tested without one.
 type PruneStore interface {
 	StoredBackupsFor(routerID string) ([]StoredPair, error)
-	MarkPruned(id int64, ts int64) (bool, error)
+	// ForgetRow removes the record of a pair whose files have just been deleted.
+	//
+	// It used to MARK the row instead, leaving a tombstone behind for ever. The
+	// row was kept so the History table could "explain the disappearance", and
+	// nothing else ever read it: restore, download, raw-serving and diff each
+	// refuse a pruned row, and the scheduler's LastBackupRun cannot see one
+	// because retention always spares the newest run. So the tombstones bought a
+	// sentence of explanation and cost one row per router per day, for ever.
+	//
+	// Deleting keeps the retry property the marking had, and for the same reason
+	// stated below: a row this fails to remove still has pruned_at null, so the
+	// next sweep considers it again, and RemovePair tolerates files that are
+	// already gone.
+	ForgetRow(id int64) (bool, error)
 }
 
 // StoredPair is one row retention can act on.
@@ -83,11 +96,10 @@ func PruneFor(s PruneStore, routerID string, r Retention, now int64, log func(st
 			log(fmt.Sprintf("could not prune %s: %v", row.Stem, err))
 			continue
 		}
-		// THE ROW IS MARKED ONLY AFTER THE FILES ARE GONE. The other order would
-		// leave a row claiming its artefacts were pruned while they are still on
-		// disk, and nothing would ever try again — the sweep only considers rows
-		// whose pruned_at is null.
-		if _, err := s.MarkPruned(row.ID, now); err != nil {
+		// THE ROW GOES ONLY AFTER THE FILES ARE GONE. The other order would drop
+		// the record while the artefacts were still on disk, and nothing would
+		// ever try again — the sweep only considers rows it can still see.
+		if _, err := s.ForgetRow(row.ID); err != nil {
 			log(fmt.Sprintf("pruned %s but could not record it: %v", row.Stem, err))
 			continue
 		}

@@ -34,14 +34,14 @@ func (p *prunerSpy) StoredBackupsFor(string) ([]StoredPair, error) {
 	p.called++
 	return p.rows, nil
 }
-func (p *prunerSpy) MarkPruned(int64, int64) (bool, error) { return true, nil }
+func (p *prunerSpy) ForgetRow(int64) (bool, error) { return true, nil }
 
 type failingPruner struct{}
 
 func (failingPruner) StoredBackupsFor(string) ([]StoredPair, error) {
 	return nil, errors.New("cannot read stored pairs")
 }
-func (failingPruner) MarkPruned(int64, int64) (bool, error) { return false, nil }
+func (failingPruner) ForgetRow(int64) (bool, error) { return false, nil }
 
 const runNow = int64(1773567000000)
 

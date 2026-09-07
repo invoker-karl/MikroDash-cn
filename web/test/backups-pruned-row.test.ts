@@ -27,6 +27,20 @@
  *
  * Not the retention arithmetic — that lives in internal/backups and has its own
  * corpus. This pins the CLAIM the table makes about a row whose files are gone.
+ *
+ * ── AND THESE ROWS ARE NO LONGER PRODUCED ───────────────────────────────────
+ *
+ * Recorded so nobody reads the cases below as a normal state. Retention now
+ * DELETES the row along with the files rather than marking it, and
+ * `PurgePrunedBackups` clears the ones older builds left, so a fresh install
+ * will never show one.
+ *
+ * The rendering and this test are kept anyway, and deliberately: `pruned` is
+ * still on the wire, the guards on restore and download still read it, and a
+ * database that predates the change is a real thing an operator can arrive with
+ * — a /data copied from an older install, or one restored from their own backup
+ * of it, before the purge has run. If such a row ever reaches the page again it
+ * must not go back to claiming it is a stored 3.3MB backup.
  */
 
 import fs from 'node:fs';

@@ -7,21 +7,59 @@ package db
 // reason that file gives: a promise contradicted three functions later is worse
 // than no promise.
 //
-// ── PRUNING AND DELETING ARE DIFFERENT ACTS ─────────────────────────────────
+// ── PRUNING AND DELETING WERE DIFFERENT ACTS, AND ARE NOW ONE ───────────────
 //
-// `MarkBackupPruned` is RETENTION: MikroDash aged a pair out on its own, so the
-// artefacts go and THE ROW STAYS. The History table then explains the
-// disappearance instead of the pair simply vanishing from the list.
+// `MarkBackupPruned` was RETENTION: MikroDash aged a pair out on its own, so the
+// artefacts went and THE ROW STAYED, letting the History table explain the
+// disappearance rather than have the pair vanish from the list.
 //
-// `DeleteBackup` is an OPERATOR saying "I do not want this listed", and leaving
-// a tombstone behind answers a question they did not ask — so the row goes too.
+// One sentence of explanation, at the price of a row per router per day for
+// ever — and nothing else ever read those rows. Restore, download, raw-serving
+// and diff each refuse a pruned row, and the scheduler's `LastBackupRun` cannot
+// see one because retention always spares the newest run. Worse, the row went on
+// reporting the outcome of the day it ran: a green "Stored" badge and the size
+// of a file that had not existed for weeks.
 //
-// Neither loses the trail: `audit_events` independently records the backup.run
-// that created a pair and the backup.delete that removed it, and that table is
-// deliberately absent from PURGE_TABLES and from deleteRouterData(), which is
-// what makes it the one place hard to erase.
+// `DeleteBackup` is an OPERATOR saying "I do not want this listed", and is now
+// also what retention calls, because it is the same act: the pair is gone and
+// the record of it has nothing left to describe. `backups.PruneStore.ForgetRow`
+// is the seam, and `PurgePrunedBackups` clears what older builds marked.
+//
+// AND THE CLAIM THAT MADE THIS SAFE WAS FALSE. It read: "audit_events
+// independently records the backup.run that created a pair and the
+// backup.delete that removed it, and that table is deliberately absent from
+// PURGE_TABLES and from deleteRouterData(), which is what makes it the one place
+// hard to erase." The second half still holds. The first half was true only of
+// MANUAL runs — every `backup.run` event came from the Backups page — so on an
+// install with a schedule the trail recorded almost none of them. Measured on a
+// real install: 7 events against 19 recorded runs. `runScheduledBackup` writes
+// one now, which is what makes removing the row safe rather than merely tidy.
 
 import "errors"
+
+// PurgePrunedBackups removes the tombstones an older build left behind.
+//
+// Retention used to mark a row and keep it; it deletes now. Rows marked by a
+// previous version would otherwise sit in the History table for ever, labelled
+// "Pruned" and describing files that have long since gone — the exact state this
+// change was made to stop producing.
+//
+// ONE-OFF AND IDEMPOTENT: afterwards nothing has `pruned_at` set, and nothing
+// sets it again. Called from `cmd/mikrodash` rather than from `Open`, for the
+// reason every migration here is: `cmd/compat` opens a real /data through a
+// READ-ONLY mount, and a write in Open would fail the one tool whose job is to
+// read a production directory untouched.
+func (d *DB) PurgePrunedBackups() (int64, error) {
+	if d == nil || d.sql == nil {
+		return 0, errors.New("db not open")
+	}
+	res, err := d.sql.Exec(
+		`DELETE FROM config_backups WHERE pruned_at IS NOT NULL`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
 
 // BackupRun is one completed run, as the runner reports it.
 //

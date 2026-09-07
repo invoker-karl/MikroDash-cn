@@ -157,6 +157,20 @@ func main() {
 		} else if n > 0 {
 			log.Printf("[mikrodash] moved %d page grant(s) onto renamed pages", n)
 		}
+
+		// ── TOMBSTONES FROM AN OLDER BUILD ────────────────────────────────
+		//
+		// Retention used to MARK a pruned row and keep it for ever; it deletes
+		// now. Without this, rows an earlier version marked would sit in the
+		// History table indefinitely, labelled "Pruned" and describing files
+		// that have long since gone. One-off and idempotent: nothing sets
+		// `pruned_at` any more, so after the first start there is nothing to
+		// find. Not fatal for the same reason as the rename above.
+		if n, perr := adb.PurgePrunedBackups(); perr != nil {
+			log.Printf("[mikrodash] WARNING: could not clear pruned backup rows: %v", perr)
+		} else if n > 0 {
+			log.Printf("[mikrodash] cleared %d pruned backup row(s) an older build left behind", n)
+		}
 	}
 
 	// ── PER-ROUTER REPORTING: ANSWER ONCE FOR AN UPGRADING INSTALL ────────

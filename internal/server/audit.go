@@ -38,9 +38,11 @@ func (s auditSink) InsertAuditEvent(ev audit.DBEvent) error {
 // startup rather than per event.
 // auditSystem records an event with no operator behind it.
 //
-// The `/raw` route is the only one that needs this: a router fetching a backup
-// is not a session, so there is no username and no client IP to attribute. The
-// live side uses `audit.system()` at exactly the same call sites.
+// Two callers need it, and neither has an operator behind it: the `/raw` route,
+// where a router fetching a backup is not a session and has no username or
+// client IP to attribute, and `runScheduledBackup`, where the schedule fired and
+// nobody asked. The live side uses `audit.system()` at exactly the same call
+// sites.
 func (s *Server) auditSystem(ev audit.Event) {
 	var sink audit.Sink
 	if s.auditDB != nil {

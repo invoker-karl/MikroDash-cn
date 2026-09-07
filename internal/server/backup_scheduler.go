@@ -5,8 +5,10 @@ import (
 	"log"
 	"time"
 
+	"mikrodash/internal/audit"
 	"mikrodash/internal/backups"
 	"mikrodash/internal/routeros"
+	"mikrodash/internal/safe"
 	"mikrodash/internal/session"
 )
 
@@ -220,7 +222,7 @@ func (s *Server) runScheduledBackup(r backups.SchedRouter) error {
 	// scheduled backup runs against routers nobody is watching by definition.
 	s.syncAlertPool()
 
-	_, _, runErr := backups.RunFor(backups.RunForConfig{
+	res, _, runErr := backups.RunFor(backups.RunForConfig{
 		RouterID: r.ID, Label: r.Label, Password: rec.password,
 		DataDir: s.store.Dir, Source: "schedule",
 		Recorder: bkRecorder{db: s.auditDB, routerID: r.ID},
@@ -247,6 +249,40 @@ func (s *Server) runScheduledBackup(r backups.SchedRouter) error {
 		WritePair: backups.WritePair,
 		Now:       func() int64 { return time.Now().UnixMilli() },
 		Log:       func(m string) { log.Printf("[backup][%s] %s", r.Label, m) },
+	})
+
+	// ── A SCHEDULED RUN IS AUDITED TOO, AND WAS NOT ─────────────────────────
+	//
+	// Every `backup.run` event came from the Backups page, so the trail recorded
+	// the runs an operator started and none of the ones the schedule did — which
+	// on any install with a schedule is nearly all of them. Measured here before
+	// this was added: 7 backup.run events against 19 recorded runs.
+	//
+	// It matters more than a missing line, because `internal/db/backups_write.go`
+	// rests a decision on the opposite claim: "audit_events independently records
+	// the backup.run that created a pair … which is what makes it the one place
+	// hard to erase". That premise was true only for manual runs, and retention
+	// now DELETES the config_backups row rather than leaving a tombstone, so the
+	// audit trail is the record. A hole in it is the whole record for a
+	// scheduled backup.
+	//
+	// `auditSystem` because there is no operator: the actor is "system", the same
+	// attribution the /raw route uses for a router fetching its own backup.
+	outcome := "ok"
+	if runErr != nil || res.Outcome == backups.OutcomeFailed {
+		outcome = "error"
+	}
+	extra := []audit.KV{
+		{Key: "outcome", Value: res.Outcome},
+		{Key: "changed", Value: res.Changed},
+		{Key: "source", Value: "schedule"},
+	}
+	if runErr != nil {
+		extra = append(extra, audit.KV{Key: "error", Value: safe.Message(runErr.Error())})
+	}
+	s.auditSystem(audit.Event{
+		Action: "backup.run", TargetType: "router", Scope: "router",
+		RouterID: r.ID, TargetName: r.Label, Outcome: outcome, Extra: extra,
 	})
 	return runErr
 }

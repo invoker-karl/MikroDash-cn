@@ -274,8 +274,12 @@ func (p bkPruner) StoredBackupsFor(routerID string) ([]backups.StoredPair, error
 	return out, nil
 }
 
-func (p bkPruner) MarkPruned(id int64, ts int64) (bool, error) {
-	return p.db.MarkBackupPruned(id, ts)
+// ForgetRow deletes the row whose files retention has just removed.
+//
+// The same call the operator's own Delete button makes, because it is the same
+// act: the pair is gone and the record of it has nothing left to describe.
+func (p bkPruner) ForgetRow(id int64) (bool, error) {
+	return p.db.DeleteBackup(id)
 }
 
 // backupsRun answers `backups:run` — the manual "Back Up Now".
