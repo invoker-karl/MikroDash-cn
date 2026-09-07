@@ -410,7 +410,12 @@ func (cn *conn) backupsRun() {
 // bkWriter adapts the session to the one command shape a backup run needs.
 func (cn *conn) bkWriter() backups.Writer {
 	return func(cmd string, args ...string) ([]map[string]string, error) {
-		replies, err := cn.rsession.Exec(routeros.Cmd{Path: cmd, Args: args})
+		// Bounded for the same reason the scheduler's is — see backupCmdTimeout.
+		// This path is driven by an operator rather than a tick, so a hang here
+		// holds a request instead of the scheduler; the unbounded command is the
+		// same defect either way.
+		replies, err := cn.rsession.Exec(routeros.Cmd{
+			Path: cmd, Args: args, Timeout: backupCmdTimeout})
 		if err != nil {
 			return nil, err
 		}

@@ -143,6 +143,33 @@ func (s *Server) inRouterWriteQueue(routerID string, fn func() error) error {
 	return sess.InWriteQueue(fn)
 }
 
+// backupCmdTimeout bounds ONE command inside a backup run.
+//
+// ── WHY IT EXISTS: 2026-09-07 ───────────────────────────────────────────────
+//
+// Without it these commands carried Timeout zero, and `internal/routeros` says
+// of zero: "no bound, which is correct for a stream and wrong for everything
+// else". A backup is not a stream. One unanswered read therefore held
+// `Session.InWriteQueue` — a bare mutex — for ever, and because `Scheduler.Tick`
+// calls the queue SYNCHRONOUSLY in the ticker's own goroutine, the scheduler
+// stopped. Not slowed: stopped, until the process was restarted.
+//
+// It produced no error, no row and no log line. A daily 08:00 backup ran at
+// 10:52 that day, on the first tick after a restart, with roughly thirty silent
+// ticks in between.
+//
+// TWO MINUTES, and the number is chosen against the work rather than picked:
+// `/export` and `/system/backup/save` both RETURN BEFORE THEY FINISH WRITING
+// (see `backups.Settled`), so no single command here is long-running — the
+// waiting is done by the settle loop, which has its own 60s bound. Two minutes
+// is therefore far above any healthy command and still bounds a hang to
+// something a five-minute tick recovers from.
+//
+// It does NOT bound the whole run, deliberately. A large configuration can take
+// longer than one tick, which `claim` already handles; bounding the run would
+// break that, and the failure here was one command that never answered.
+const backupCmdTimeout = 2 * time.Minute
+
 // backupDialWait bounds the wait above. `connectLoop` retries every 5s, so this
 // allows for a first dial plus a couple of retries; a router that is genuinely
 // down should fail the run and record it, not stall the scheduler's tick.
@@ -205,7 +232,8 @@ func (s *Server) runScheduledBackup(r backups.SchedRouter) error {
 		Notify: func(kind, title, body string) { s.dispatchBackup(r.ID, kind, title, body) },
 		Connect: func() (backups.Writer, func(), error) {
 			return func(cmd string, args ...string) ([]map[string]string, error) {
-				replies, err := sess.Exec(routeros.Cmd{Path: cmd, Args: args})
+				replies, err := sess.Exec(routeros.Cmd{
+					Path: cmd, Args: args, Timeout: backupCmdTimeout})
 				if err != nil {
 					return nil, err
 				}

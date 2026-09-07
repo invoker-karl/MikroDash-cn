@@ -63,9 +63,27 @@ type Scheduler struct {
 
 	mu      sync.Mutex
 	running map[string]bool
+	// skips counts CONSECUTIVE ticks a router was passed over for still
+	// running. See skipReportAfter.
+	skips   map[string]int
 	stop    chan struct{}
 	stopped bool
 }
+
+// skipReportAfter is how many consecutive skips pass before one is reported.
+//
+// THE SKIP WAS SILENT BY DESIGN AND THAT WAS THE OTHER HALF OF THE 2026-09-07
+// INCIDENT. The reasoning for the silence was sound — "not worth a log line
+// every five minutes" — but it made the difference between a backup that is
+// taking a while and a scheduler that has stopped completely UNOBSERVABLE, and
+// the second state lasted nearly three hours without a single line anywhere.
+//
+// Three, so a run has a full fifteen minutes to be slow before anything is
+// said. That keeps the original intent — a large configuration outlasting a
+// tick is normal and stays quiet — while making a wedged one impossible to
+// miss. Reported ONCE per stretch rather than every tick, so a genuinely long
+// backup cannot fill the log either.
+const skipReportAfter = 3
 
 func NewScheduler(d SchedDeps) *Scheduler {
 	if d.Now == nil {
@@ -74,7 +92,7 @@ func NewScheduler(d SchedDeps) *Scheduler {
 	if d.Log == nil {
 		d.Log = func(string) {}
 	}
-	return &Scheduler{deps: d, running: map[string]bool{}}
+	return &Scheduler{deps: d, running: map[string]bool{}, skips: map[string]int{}}
 }
 
 // DueRouters is every router whose backup is due right now.
@@ -104,9 +122,16 @@ func (s *Scheduler) Tick() {
 	now := s.deps.Now().UnixMilli()
 	for _, r := range s.DueRouters(now) {
 		if !s.claim(r.ID) {
-			// Still running from an earlier tick. Not an error and not worth a
-			// log line every five minutes — a backup legitimately outlasts the
-			// interval on a large configuration.
+			// Still running from an earlier tick. A backup legitimately outlasts
+			// the interval on a large configuration, so this is not an error and
+			// the first few are silent — but it is also exactly what a WEDGED
+			// run looks like, and staying silent for ever is how one went
+			// unnoticed for three hours. See skipReportAfter.
+			if n := s.noteSkip(r.ID); n == skipReportAfter {
+				s.deps.Log(fmt.Sprintf(
+					"[%s] still running after %d ticks; not starting another",
+					r.Label, n))
+			}
 			continue
 		}
 		err := s.deps.Queue(r.ID, func() error {
@@ -129,7 +154,18 @@ func (s *Scheduler) claim(id string) bool {
 		return false
 	}
 	s.running[id] = true
+	// A run that STARTS ends the streak, so the next stall is reported on its
+	// own merits rather than being masked by an earlier one.
+	delete(s.skips, id)
 	return true
+}
+
+// noteSkip records one consecutive skip and returns the running count.
+func (s *Scheduler) noteSkip(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.skips[id]++
+	return s.skips[id]
 }
 
 func (s *Scheduler) release(id string) {
@@ -191,4 +227,5 @@ func (s *Scheduler) Stop() {
 	// A run still executing will call release on a map that no longer has it,
 	// which is harmless.
 	s.running = map[string]bool{}
+	s.skips = map[string]int{}
 }

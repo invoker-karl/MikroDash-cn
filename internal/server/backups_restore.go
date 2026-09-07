@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"time"
 
 	"mikrodash/internal/audit"
 	"mikrodash/internal/guard"
@@ -166,8 +167,9 @@ func (cn *conn) restoreLocked(req restoreReq) {
 
 	url := base + backupRawURL(row.ID, token)
 	if _, err := cn.rsession.Exec(routeros.Cmd{
-		Path: "/tool/fetch",
-		Args: []string{"=url=" + url, "=dst-path=" + restoreDst},
+		Path:    "/tool/fetch",
+		Args:    []string{"=url=" + url, "=dst-path=" + restoreDst},
+		Timeout: restoreFetchTimeout,
 	}); err != nil {
 		cn.bkErr("failed", map[string]any{"message": safe.Message(err.Error())})
 		return
@@ -188,13 +190,34 @@ func (cn *conn) restoreLocked(req restoreReq) {
 	// is reproduced here.
 	pw := cn.backupRecordFor(cn.routerID).password
 	_, _ = cn.rsession.Exec(routeros.Cmd{
-		Path: "/system/backup/load",
-		Args: []string{"=name=" + restoreDst, "=password=" + pw},
+		Path:    "/system/backup/load",
+		Args:    []string{"=name=" + restoreDst, "=password=" + pw},
+		Timeout: restoreLoadTimeout,
 	})
 
 	cn.srv.hub.Send(cn.c, "backups:restored",
 		map[string]any{"routerId": cn.routerID, "id": row.ID})
 }
+
+// ── EVERY COMMAND ON THIS PATH IS BOUNDED, AND THE LOAD MOST OF ALL ─────────
+//
+// The restore runs inside `InWriteQueue`, which is a bare mutex, and that is the
+// SAME per-session mutex a scheduled backup takes. So a command here that never
+// answers does not just fail a restore: it holds the queue for ever, the next
+// scheduled backup blocks in `InWriteQueue`, and because `Scheduler.Tick` calls
+// the queue synchronously in the ticker's own goroutine, the scheduler stops for
+// the whole fleet. That is the 2026-09-07 incident reached by a second route.
+//
+// It is the more certain route of the two, because `/system/backup/load` is
+// DOCUMENTED as never answering — it reboots the router, and the reply is
+// already discarded. Unbounded, it was a guaranteed permanent hold rather than a
+// possible one. Short, because no answer is coming: the sentence is on the wire
+// long before this expires, so the restore still happens and only the waiting
+// stops.
+const (
+	restoreLoadTimeout  = 30 * time.Second
+	restoreFetchTimeout = 5 * time.Minute
+)
 
 // readIdentity asks the device what it is, right now.
 //
@@ -223,14 +246,16 @@ func (cn *conn) restoreLocked(req restoreReq) {
 // something to do quietly.
 func (cn *conn) readIdentity() (serial, version string, err error) {
 	if rb, rbErr := cn.rsession.Exec(routeros.Cmd{
-		Path: "/system/routerboard/print",
-		Args: []string{"=.proplist=serial-number"},
+		Path:    "/system/routerboard/print",
+		Args:    []string{"=.proplist=serial-number"},
+		Timeout: backupCmdTimeout,
 	}); rbErr == nil && len(rb) > 0 {
 		serial = rb[0]["serial-number"]
 	}
 	res, err := cn.rsession.Exec(routeros.Cmd{
-		Path: "/system/resource/print",
-		Args: []string{"=.proplist=version"},
+		Path:    "/system/resource/print",
+		Args:    []string{"=.proplist=version"},
+		Timeout: backupCmdTimeout,
 	})
 	if err != nil {
 		return "", "", err
@@ -264,7 +289,8 @@ func (cn *conn) restoreBase() (string, bool) {
 			}
 		}
 	}
-	active, err := cn.rsession.Exec(routeros.Cmd{Path: "/user/active/print"})
+	active, err := cn.rsession.Exec(routeros.Cmd{
+		Path: "/user/active/print", Timeout: backupCmdTimeout})
 	if err != nil {
 		return "", false
 	}
