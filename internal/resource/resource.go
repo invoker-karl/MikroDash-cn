@@ -1026,6 +1026,10 @@ var byKey = map[string]*Resource{
 	FWNat.Key:               FWNat,
 	FWMangle.Key:            FWMangle,
 	FWRaw.Key:               FWRaw,
+	FWFilter6.Key:           FWFilter6,
+	FWNat6.Key:              FWNat6,
+	FWMangle6.Key:           FWMangle6,
+	FWRaw6.Key:              FWRaw6,
 }
 
 // StaticOptions are the picker lists that need no router read.
@@ -1311,6 +1315,138 @@ var FWRaw = &Resource{
 	Fields: fwFields(
 		// NO connection-state anywhere in raw: it runs before connection
 		// tracking, so there is no state to match on yet.
+		fwHead([]string{"prerouting", "output"},
+			[]string{"accept", "drop", "notrack", "log", "jump", "return",
+				"add-src-to-address-list", "add-dst-to-address-list"}),
+		fwMatch(),
+		fwTail(),
+	),
+}
+
+// ── The IPv6 firewall ───────────────────────────────────────────────────────
+//
+// Four more resources rather than a `family` flag on the four above, for the
+// same reason `Route6` is its own resource beside `Route`: the RouterOS menu is
+// what an edit actually reaches, and a resource IS a menu. The page picks one
+// per row, exactly as the Routes table already mixes v4 and v6.
+//
+// `Page: "firewall"` on all four — no new page key, so no `pages.Renamed` entry
+// and no `role_pages` migration. Whoever can edit the IPv4 firewall can edit
+// this one, which is the right answer: they are one firewall.
+//
+// ── THE VOCABULARIES WERE READ OFF A ROUTER, NOT WRITTEN FROM MEMORY ────────
+//
+// Measured on RouterOS 7.24.1 by offering each candidate to a throwaway CHR and
+// recording what it accepted. Guessing would have been wrong four times, and
+// three of those are not guessable from the IPv4 side:
+//
+//   - IPv6 filter has NO `tarpit`.
+//   - IPv6 mangle has NO `route`, NO `change-ttl` (it is `change-hop-limit`),
+//     NO `clear-df`, NO `strip-ipv4-options` and NO `fasttrack-connection`.
+//   - IPv6 NAT has NO `same`, and its translation target is `to-address`,
+//     SINGULAR, where IPv4 uses `to-addresses`. A plural here is an "unknown
+//     parameter" trap on every save.
+//   - `reject-with` shares only three values with the IPv4 list; IPv6 answers
+//     `icmp-no-route` and `icmp-address-unreachable`, which IPv4 does not have,
+//     and lacks the four `icmp-*-unreachable`/`*-prohibited` spellings IPv4 uses.
+//
+// What is NOT validation: CHAIN. RouterOS accepts any chain name on any of these
+// menus, because chains are user-definable and `jump` targets one. The lists
+// here are conventions, and `selectHtml` keeps a router value the list does not
+// name — see web/src/resource.ts, which is why a narrow list cannot silently
+// rewrite a rule the way the live app's could.
+
+var FWFilter6 = &Resource{
+	Key: "fwFilter6", Page: "firewall", Label: "IPv6 Filter Rule",
+	Title: "IPv6 Firewall Filter Rule", Menu: "/ipv6/firewall/filter",
+	Identity: fwIdentity, Ordered: true, Guard: []string{"fwGuard"},
+	ReadOnlyWhen: fwReadOnly, Actions: fwActions, Check: fwCheck,
+	Fields: fwFields(
+		// No `tarpit`: the IPv4 filter takes it, this one does not.
+		fwHead([]string{"input", "forward", "output"},
+			[]string{"accept", "drop", "reject", "log", "passthrough",
+				"fasttrack-connection", "jump", "return",
+				"add-src-to-address-list", "add-dst-to-address-list"}),
+		fwMatch(),
+		[]Field{
+			{Name: "connectionState", ROS: "connection-state", Label: "Connection State",
+				Type: TypeText, Placeholder: "established,related"},
+			// SHARES ONLY THREE VALUES WITH IPv4. `icmp-no-route` and
+			// `icmp-address-unreachable` do not exist there, and IPv4's
+			// `icmp-network-unreachable` / `icmp-host-unreachable` do not exist
+			// here.
+			{Name: "rejectWith", ROS: "reject-with", Label: "Reject With", Type: TypeText,
+				ShowIf: &ShowIf{Field: "action", In: []string{"reject"}},
+				OptionsFrom: &OptionsFrom{Values: []string{
+					"icmp-no-route", "icmp-address-unreachable",
+					"icmp-admin-prohibited", "icmp-port-unreachable", "tcp-reset"}}},
+		},
+		fwTail(),
+	),
+}
+
+var FWNat6 = &Resource{
+	Key: "fwNat6", Page: "firewall", Label: "IPv6 NAT Rule",
+	Title: "IPv6 Firewall NAT Rule", Menu: "/ipv6/firewall/nat",
+	Identity: fwIdentity, Ordered: true, Guard: []string{"fwGuard"},
+	ReadOnlyWhen: fwReadOnly, Actions: fwActions, Check: fwCheck,
+	Fields: fwFields(
+		// No `same`: IPv4 NAT takes it, this one does not.
+		fwHead([]string{"srcnat", "dstnat"},
+			[]string{"accept", "masquerade", "dst-nat", "src-nat", "redirect", "netmap",
+				"log", "passthrough", "jump", "return",
+				"add-src-to-address-list", "add-dst-to-address-list"}),
+		fwMatch(),
+		[]Field{
+			// `to-address`, SINGULAR. IPv4 NAT calls this `to-addresses`, and the
+			// plural is an "unknown parameter" trap on every IPv6 save.
+			{Name: "toAddress", ROS: "to-address", Label: "To Address", Type: TypeText,
+				ShowIf: &ShowIf{Field: "action", In: []string{"dst-nat", "src-nat", "netmap"}}},
+			{Name: "toPorts", ROS: "to-ports", Label: "To Ports", Type: TypeText,
+				ShowIf: &ShowIf{Field: "action", In: []string{"dst-nat", "redirect", "netmap"}}},
+		},
+		fwTail(),
+	),
+}
+
+var FWMangle6 = &Resource{
+	Key: "fwMangle6", Page: "firewall", Label: "IPv6 Mangle Rule",
+	Title: "IPv6 Firewall Mangle Rule", Menu: "/ipv6/firewall/mangle",
+	Identity: fwIdentity, Ordered: true, Guard: []string{"fwGuard"},
+	ReadOnlyWhen: fwReadOnly, Actions: fwActions, Check: fwCheck,
+	Fields: fwFields(
+		// `change-hop-limit` where IPv4 has `change-ttl` — same idea, different
+		// header field, different name. No `route`, which IPv4 mangle does take.
+		fwHead([]string{"prerouting", "input", "forward", "output", "postrouting"},
+			[]string{"accept", "mark-connection", "mark-packet", "mark-routing",
+				"change-mss", "change-hop-limit", "change-dscp", "log",
+				"passthrough", "jump", "return"}),
+		fwMatch(),
+		[]Field{
+			{Name: "newConnectionMark", ROS: "new-connection-mark", Label: "New Connection Mark",
+				Type: TypeText, Required: true,
+				ShowIf: &ShowIf{Field: "action", In: []string{"mark-connection"}}},
+			{Name: "newPacketMark", ROS: "new-packet-mark", Label: "New Packet Mark",
+				Type: TypeText, Required: true,
+				ShowIf: &ShowIf{Field: "action", In: []string{"mark-packet"}}},
+			{Name: "newRoutingMark", ROS: "new-routing-mark", Label: "New Routing Mark",
+				Type: TypeText, Required: true,
+				ShowIf: &ShowIf{Field: "action", In: []string{"mark-routing"}}},
+			{Name: "passthrough", ROS: "passthrough", Label: "Passthrough", Type: TypeBool,
+				Clearable: true},
+		},
+		fwTail(),
+	),
+}
+
+var FWRaw6 = &Resource{
+	Key: "fwRaw6", Page: "firewall", Label: "IPv6 Raw Rule",
+	Title: "IPv6 Firewall Raw Rule", Menu: "/ipv6/firewall/raw",
+	Identity: fwIdentity, Ordered: true, Guard: []string{"fwGuard"},
+	ReadOnlyWhen: fwReadOnly, Actions: fwActions, Check: fwCheck,
+	Fields: fwFields(
+		// The one menu whose action vocabulary is IDENTICAL to its IPv4 twin.
+		// No connection-state here either: raw runs before connection tracking.
 		fwHead([]string{"prerouting", "output"},
 			[]string{"accept", "drop", "notrack", "log", "jump", "return",
 				"add-src-to-address-list", "add-dst-to-address-list"}),
