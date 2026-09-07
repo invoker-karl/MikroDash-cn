@@ -2,12 +2,55 @@
 
 All notable changes to MikroDash will be documented in this file.
 
-## [0.8.20] - A card can no longer say a device is offline and busy at the same time
+## [0.8.20] - Manage PPP accounts, and a fresh container is healthy before a device is added
 
-A review of everything 0.8.19 changed on the Devices page. No new features; four fixes an
-operator can see, and the checks that would have caught each of them.
+PPPoE account management arrives on the PPP page (#125). A container with no device
+configured no longer reports itself broken, which was deadlocking the RouterOS App
+install (#120). A Cloud Hosted Router is handled properly throughout (#121). Plus the
+Devices page review from 0.8.19.
+
+### Added
+
+- **PPP accounts can be managed, not just watched.** The PPP page gains a Secrets tab —
+  search, add, edit, enable, disable, delete — alongside editable Profiles and read-only
+  PPPoE Servers, now three tabs on one card above the sessions table. An account's badge
+  distinguishes "disabled" from "offline": one was switched off, the other is simply not
+  dialled in. (#125)
+- **A password is never read.** The collector does not ask RouterOS for it, so no payload
+  can carry one. Setting a password sends it to the router; leaving the field blank keeps
+  the existing one.
 
 ### Fixed
+
+- **A fresh container reported itself unhealthy for ever.** `/healthz` answered 503 until a
+  device was configured, which is exactly the state a newly started container is meant to be
+  in. This deadlocked the RouterOS App install: the App withholds its UI link until the
+  container is healthy, and a device can only be added through that UI. There are three
+  states now — no device configured is healthy, a device that has not answered yet is
+  starting, and a device still silent past the grace window is unhealthy. Reported by
+  Christoph on #120.
+- **The Devices page was hidden on a one-device install.** A rule inherited from the old app
+  hid the fleet page until a second device was added. It is deleted; use the Devices switch
+  in Visible Pages if you want it hidden. Reported on #121.
+- **A Cloud Hosted Router is handled properly.** Verified against a real CHR running
+  RouterOS 7.24.2, which contradicted two assumptions in the code:
+  - restoring a backup to a CHR was refused outright, because the restore asked for a
+    RouterBOARD serial number that a virtual router does not have;
+  - its licence badge read "Lfree" instead of "free" — the "L" belongs to a RouterBOARD's
+    L4 and L6, not to a CHR's named levels;
+  - a stored backup recorded no model for it, so one device was named two different ways;
+  - it was labelled as an inferred device type on Network Topology rather than a router.
+- **Three tables still named page keys renamed on 2026-09-01**, and each failed silently
+  because an unknown page key is denied rather than reported:
+  - the WiFi Networks page drew no Add button and its rows did not open — not even for an
+    administrator;
+  - the WiFi scan permission could not be granted to any role;
+  - the Roles editor offered five pages that no longer existed and omitted five that do.
+- **The PPP card went stale on a router with nothing to report.** A router with no PPP
+  produces an identical payload for ever, so the card was marked stale for lack of news
+  rather than lack of health.
+
+### Internal
 
 - **A device card could show "Offline", with a login failure, beside a live CPU reading.** If a
   device's password had been changed or a connection timed out at the wrong moment, the card took
@@ -36,6 +79,15 @@ operator can see, and the checks that would have caught each of them.
 - Tests for each fix, every one of them failing on the unfixed code first. The documentation audit
   now re-measures `CONTRIBUTING.md` as well as `CLAUDE.md`, and both places each number is written
   — it had been checking one of two and the unchecked copy had drifted.
+- The architecture diagram is committed under `docs/archify/`, as a typed spec plus the rendered
+  page, so it can be corrected rather than left to rot. It had the write path wrong: writes now go
+  server to resource to guard, which is the path the code takes. Nothing regenerates it
+  automatically and no check compares it against the tree.
+- Two recorded corpora that had gone unread since the parity harness was retired are read again,
+  covering three shipping functions that had no test at all. Five deliberate mutations were killed
+  by boundary cases a hand-written table would not have included.
+- Two stray scratch files removed, and `tools/capture-fixtures.js` is text rather than binary — four
+  literal NUL bytes had made every content search skip it silently.
 
 ## [0.8.19] - Choose which devices are reported on, and a crash on the Devices page
 
