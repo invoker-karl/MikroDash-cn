@@ -388,6 +388,12 @@ func (cn *conn) dispatch(in inbound) {
 		cn.wanLeaseAction("release", in.Data)
 	case "firewall:tab":
 		cn.fwTab(in.Data)
+	// Registered as its own literal beside firewall:tab rather than folded into
+	// it, for the reason wan:renew and wan:release are separate: the next person
+	// greps for the event name, and these two carry DIFFERENT PERMISSION GATES
+	// that a shared handler would invite someone to collapse.
+	case "firewall:v6":
+		cn.fwWantV6(in.Data)
 	}
 }
 
@@ -409,6 +415,36 @@ func (cn *conn) fwTab(raw json.RawMessage) {
 		return
 	}
 	cn.rsession.Firewall().SetActiveTable(table)
+}
+
+// fwWantV6 turns the four IPv6 tables on or off for this router's session.
+//
+// ── READ-GATED, WHERE fwTab IS WRITE-GATED, AND THAT IS DELIBERATE ──────────
+//
+// The two look alike and are not. Changing the ACTIVE TABLE changes what every
+// other viewer of this router sees, so it is a write even though it writes
+// nothing to the router. Asking for IPv6 only ADDS four arrays to the payload:
+// nobody's view changes, nothing is removed, and every existing table keeps
+// arriving exactly as before.
+//
+// Gating it on write would mean a read-only principal could open the IPv6 tab
+// and be shown a permanently empty table with no error and no explanation —
+// worse than useless, and indistinguishable from a router with no rules.
+//
+// It does cost router channels, which is a read-side cost, paid only while
+// somebody is looking. The collector releases the want in Suspend().
+func (cn *conn) fwWantV6(raw json.RawMessage) {
+	var on bool
+	if json.Unmarshal(raw, &on) != nil {
+		return
+	}
+	if cn.routerID == "" || cn.rsession == nil {
+		return
+	}
+	if !cn.canPage("firewall", "read") {
+		return
+	}
+	cn.rsession.Firewall().SetWantV6(on)
 }
 
 func (cn *conn) selectRouter(id string) {
@@ -966,6 +1002,13 @@ func (cn *conn) resumePage(page string) {
 		}
 	case "firewall":
 		cn.rsession.ResumeCollector("firewall")
+		// BEFORE the replay, so the first payload the page receives already
+		// says whether this router does IPv6 and the tab does not flicker in.
+		// One read of /ipv6/settings, cached for the connection; ProbeV6 is a
+		// no-op on every focus after the first. NOT called from the collector's
+		// Start(), which runs for every router at session connect including the
+		// many nobody opens this page on.
+		cn.rsession.Firewall().ProbeV6()
 		if last := cn.rsession.Firewall().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
