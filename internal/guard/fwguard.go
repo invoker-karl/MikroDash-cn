@@ -58,9 +58,46 @@ var blockingActions = map[string]bool{"drop": true, "reject": true, "tarpit": tr
 // why the great majority of firewall edits raise nothing here. Tables absent
 // from this map cannot block us at all: mangle has no dropping action, and NAT
 // is not a filter.
+//
+// THE IPv6 MENUS ARE THE SAME QUESTION, not a different one. A
+// `/ipv6/firewall/filter` input drop locks this app out of a router it reaches
+// over IPv6 exactly as its IPv4 twin does, and until these two entries existed
+// `CheckRule` returned "none" for every IPv6 rule — silently, because the guard
+// fails open and a missing warning looks identical to a safe rule.
 var toRouterChain = map[string]string{
-	"/ip/firewall/filter": "input",
-	"/ip/firewall/raw":    "prerouting",
+	"/ip/firewall/filter":   "input",
+	"/ip/firewall/raw":      "prerouting",
+	"/ipv6/firewall/filter": "input",
+	"/ipv6/firewall/raw":    "prerouting",
+}
+
+// menuIsV6 reports whether a menu names the IPv6 side of the firewall.
+func menuIsV6(menu string) bool { return strings.HasPrefix(menu, "/ipv6/") }
+
+// addrIsV6 is the family of one parsed address.
+//
+// An IPv4-mapped v6 address (`::ffff:10.0.0.5`) is reachable by IPv4 rules, so
+// it counts as v4 here. `netip`'s `Is6` alone answers true for it.
+func addrIsV6(a netip.Addr) bool { return a.Is6() && !a.Is4In6() }
+
+// ctxHasFamily asks whether any address we are reachable on belongs to `v6`.
+//
+// `decided` is false when nothing in the list parsed — an empty `Addresses`, or
+// a list of junk. That case must stay UNDECIDED rather than answering "no",
+// because this guard is built to stay loud when it cannot tell; see `ctxNoAddr`
+// in the corpus, which is exactly that shape and must keep warning.
+func ctxHasFamily(addrs []string, v6 bool) (has, decided bool) {
+	for _, s := range addrs {
+		a, ok := parseAddrLenient(strings.TrimSpace(s))
+		if !ok {
+			continue
+		}
+		decided = true
+		if addrIsV6(a) == v6 {
+			return true, true
+		}
+	}
+	return false, decided
 }
 
 // inCIDRs is src/util/ip.js's isInCidrs, quirks included.
@@ -410,6 +447,26 @@ func CheckRule(ctx FWContext, menu string, values FWRule, before *FWRule, what s
 	chain, ok := toRouterChain[menu]
 	if !ok {
 		return Verdict{Level: "none"} // mangle and NAT cannot block us
+	}
+
+	// THE FAMILY GATE. A rule can only block the session it shares an address
+	// family with: an IPv6 filter rule is invisible to a MikroDash reaching this
+	// router over IPv4, and the reverse.
+	//
+	// Without this the IPv6 menus would warn on almost every input drop, because
+	// `AddressCovers("")` answers (true, true) — an empty src-address matches
+	// everything, including addresses of a family the rule cannot reach. False
+	// positives are not harmless here: they teach people to click through, which
+	// is how the real one gets clicked through too.
+	//
+	// ONLY WHEN WE POSITIVELY KNOW. `decided` is false for a context with no
+	// parseable address, and that must keep warning — undecidable stays loud.
+	//
+	// This also changes the IPv4 side, deliberately: a MikroDash connected over
+	// IPv6 no longer warns about `/ip/firewall/filter` input drops. That is the
+	// same correctness fix seen from the other end, not a side effect.
+	if has, decided := ctxHasFamily(ctx.Addresses, menuIsV6(menu)); decided && !has {
+		return Verdict{Level: "none"}
 	}
 
 	removing := what == "delete" || what == "disable"
