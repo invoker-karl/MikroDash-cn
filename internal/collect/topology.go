@@ -1289,7 +1289,8 @@ func NewTopology(ros Reader, emit Emit, rates RateSource, routerID, label string
 	// AFTER the loops: `scheduled` holds `loop` as the no-cache fallback. The
 	// ping loop is deliberately NOT handed over — it is a set B measurement on
 	// its own timer, started and stopped beside the subscription.
-	t.sched = scheduled{loop: t.loop, menu: topoNeighborCmd.Path, apply: t.apply,
+	t.sched = scheduled{loop: t.loop, // fields nil: /ip/neighbor has no proplist of its own.
+		menu: topoNeighborCmd.Path, fields: fieldsOf(topoNeighborCmd), apply: t.apply,
 		cadence: t.pollMs.duration}
 	return t
 }

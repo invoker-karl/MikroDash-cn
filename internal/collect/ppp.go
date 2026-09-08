@@ -256,7 +256,7 @@ func NewPPP(ros Reader, emit Emit, pollMs int) *PPP {
 	p.poll = newPollLoop(func() { p.Tick() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	p.sched = scheduled{loop: p.poll, menu: pppActiveCmd.Path, apply: p.apply,
+	p.sched = scheduled{loop: p.poll, menu: pppActiveCmd.Path, fields: fieldsOf(pppActiveCmd), apply: p.apply,
 		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond }}
 	return p
 }

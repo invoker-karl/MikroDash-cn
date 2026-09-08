@@ -88,3 +88,30 @@ func cacheableFields(cmd routeros.Cmd) (fields []string, ok bool) {
 	}
 	return strings.Split(pl, ","), true
 }
+
+// fieldsOf pulls a command's proplist out, for a subscription to declare.
+//
+// ── A SUBSCRIPTION MUST DECLARE ITS FIELDS, AND THIS IS WHY ─────────────────
+//
+// `roscache` reads an empty field list as "every field", and all-fields STICKS:
+// once one subscriber asks for it the menu's proplist is dropped for the rest of
+// the session and no narrower caller can shrink it back (see the widening rule
+// in roscache.claim). So a migration that leaves `fields` unset does not merely
+// fail to narrow the read -- it WIDENS it, permanently, for every collector
+// sharing that menu.
+//
+// That is exactly what the first eighteen migrations did, found on 2026-09-08
+// by reading `Demand()` rather than by any test. `/ip/firewall/connection` is
+// the one that mattered: the heaviest read in the app, asked for with seven
+// fields and served with all of them. TestSubscriptionsDeclareTheirFields keeps
+// it from happening again.
+//
+// A command with no proplist of its own returns nil, which means "every field"
+// and is the right answer for a menu the collector genuinely reads whole.
+func fieldsOf(cmd routeros.Cmd) []string {
+	fields, ok := cacheableFields(cmd)
+	if !ok {
+		return nil
+	}
+	return fields
+}

@@ -129,7 +129,7 @@ func NewDHCPLeases(ros Reader, emit Emit, pollMs int) *DHCPLeases {
 	// server/VLAN map is refreshed before each scheduled read, because a
 	// reservation on a server this process has not seen before needs it -- which
 	// is the reason RefreshNow does the whole read rather than just the leases.
-	d.sched = scheduled{loop: d.poll, menu: dhcpLeasesCmd.Path,
+	d.sched = scheduled{loop: d.poll, menu: dhcpLeasesCmd.Path, fields: fieldsOf(dhcpLeasesCmd),
 		apply: func(rows []routeros.Reply, err error) {
 			d.loadServerMap()
 			d.apply(rows, err)

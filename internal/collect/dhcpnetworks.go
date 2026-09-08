@@ -129,7 +129,7 @@ func NewDHCPNetworks(ros Reader, emit Emit, leases LeaseIPs, wanIface string, po
 	d.poll = newPollLoop(func() { d.Tick() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	d.sched = scheduled{loop: d.poll, menu: dhcpNetCmd.Path, apply: d.apply,
+	d.sched = scheduled{loop: d.poll, menu: dhcpNetCmd.Path, fields: fieldsOf(dhcpNetCmd), apply: d.apply,
 		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond }}
 	return d
 }

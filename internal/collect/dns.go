@@ -200,7 +200,8 @@ func NewDNS(ros Reader, emit Emit, pollMs int) *DNS {
 	// AFTER the loop exists: `scheduled` holds it as the no-cache fallback, and
 	// capturing a nil here would leave a pooled session with a collector that
 	// never reads.
-	d.sched = scheduled{loop: d.poll, menu: dnsSettingsCmd.Path, apply: d.apply,
+	d.sched = scheduled{loop: d.poll, // fields nil: /ip/dns has no proplist of its own and is read whole.
+		menu: dnsSettingsCmd.Path, fields: fieldsOf(dnsSettingsCmd), apply: d.apply,
 		cadence: d.pollMs.duration}
 	return d
 }

@@ -465,3 +465,103 @@ func TestScheduledWithNeitherCacheNorLoopIsInert(t *testing.T) {
 	s.begin()
 	s.end()
 }
+
+// ── MECHANISM B: A MENU CHOSEN AT RUNTIME ───────────────────────────────────
+
+// TestResubscribeMovesTheDemand. The old menu must actually go quiet, not just
+// stop being consulted: the demand set is what decides whether the scheduler
+// reads a menu at all, so a subscription left behind means the router keeps
+// being asked for a table nobody is looking at.
+func TestResubscribeMovesTheDemand(t *testing.T) {
+	c := roscache.New(&schedReader{})
+	s := scheduled{cache: c, menu: "/ip/firewall/filter/print",
+		fields:  []string{".id", "packets"},
+		cadence: func() time.Duration { return time.Second }}
+	s.begin()
+
+	s.resubscribe("/ip/firewall/nat/print", nil)
+	d := c.Demand()
+	if len(d) != 1 || d[0].Menu != "/ip/firewall/nat/print" {
+		t.Fatalf("after resubscribe the demand is %+v; want exactly the nat menu", d)
+	}
+	if len(d[0].Fields) != 2 {
+		t.Errorf("the field list was lost in the move: %v — an empty one means EVERY "+
+			"field, and all-fields sticks for the session", d[0].Fields)
+	}
+
+	s.end()
+	if got := len(c.Demand()); got != 0 {
+		t.Errorf("end after a resubscribe left %d demands; the move leaked the old one", got)
+	}
+}
+
+// TestResubscribeWhileSuspendedRecordsTheChoice. The firewall tab can be
+// switched while the page is blurred, and `wifi` latches its stack from a read
+// that Start performs before Resume. Both land here, and both must be picked up
+// by the next begin rather than silently subscribing to the old menu.
+func TestResubscribeWhileSuspendedRecordsTheChoice(t *testing.T) {
+	c := roscache.New(&schedReader{})
+	s := scheduled{cache: c, menu: "/interface/wifi/print",
+		cadence: func() time.Duration { return time.Second }}
+
+	s.resubscribe("/interface/wireless/print", nil)
+	if got := len(c.Demand()); got != 0 {
+		t.Fatalf("resubscribe while suspended declared %d demands; it must only record", got)
+	}
+	s.begin()
+	d := c.Demand()
+	if len(d) != 1 || d[0].Menu != "/interface/wireless/print" {
+		t.Fatalf("begin subscribed to %+v; it ignored the recorded menu", d)
+	}
+	s.end()
+}
+
+// TestResubscribeToTheSameMenuIsANoOp, so a caller may pass its current
+// selection unconditionally — which the firewall does, since `SetActiveTable`
+// is reached from a frame the browser sends on every page focus.
+func TestResubscribeToTheSameMenuIsANoOp(t *testing.T) {
+	c := roscache.New(&schedReader{})
+	fired := 0
+	apply := func([]routeros.Reply, error) { fired++ }
+	s := scheduled{cache: c, menu: "/ip/firewall/filter/print", apply: apply,
+		cadence: func() time.Duration { return time.Second }}
+	s.begin()
+
+	s.resubscribe("/ip/firewall/filter/print", nil)
+	if s.apply == nil {
+		t.Error("a same-menu resubscribe replaced the callback; it must change nothing")
+	}
+	if got := len(c.Demand()); got != 1 {
+		t.Errorf("a same-menu resubscribe left %d demands, want 1", got)
+	}
+	s.end()
+}
+
+// TestResubscribeBindsTheCallbackToTheNewMenu is the reason `resubscribe` takes
+// a callback at all. Rows carry no menu, so a callback that resolves the menu
+// itself can be handed the old table's rows after the field has moved — and
+// since RouterOS `.id` values repeat across menus, that merge SUCCEEDS and
+// reports the wrong numbers.
+func TestResubscribeBindsTheCallbackToTheNewMenu(t *testing.T) {
+	c := roscache.New(&schedReader{})
+	got := make(chan string, 4)
+	s := scheduled{cache: c, menu: "/a/print",
+		apply:   func([]routeros.Reply, error) { got <- "a" },
+		cadence: func() time.Duration { return time.Second }}
+	s.begin()
+	s.resubscribe("/b/print", func([]routeros.Reply, error) { got <- "b" })
+	defer s.end()
+
+	sc := roscache.NewScheduler(c, 5*time.Millisecond)
+	sc.Start()
+	defer sc.Stop()
+
+	select {
+	case which := <-got:
+		if which != "b" {
+			t.Fatalf("the scheduler delivered to the %q callback after a move to /b/print", which)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no delivery after resubscribe")
+	}
+}

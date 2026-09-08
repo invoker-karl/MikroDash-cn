@@ -167,7 +167,8 @@ func NewVPN(ros Reader, emit Emit, pollMs int) *VPN {
 	// emits. The subscription drives /ppp/active. Disjoint, which is the rule.
 	v.sched = scheduled{
 		loop: v.poll, residual: true,
-		menu: vpnPppCmd.Path, apply: v.apply, cadence: v.pollMs.duration,
+		// fields nil: this collector reads /ppp/active whole, unlike `ppp`.
+		menu: vpnPppCmd.Path, fields: fieldsOf(vpnPppCmd), apply: v.apply, cadence: v.pollMs.duration,
 	}
 	return v
 }

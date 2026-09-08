@@ -298,7 +298,7 @@ func NewPackages(ros Reader, emit Emit, pollMs int) *Packages {
 		return p.pollMs.duration()
 	})
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	p.sched = scheduled{loop: p.loop, menu: packageCmd.Path, apply: p.apply,
+	p.sched = scheduled{loop: p.loop, menu: packageCmd.Path, fields: fieldsOf(packageCmd), apply: p.apply,
 		cadence: p.pollMs.duration}
 	return p
 }

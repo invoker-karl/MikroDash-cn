@@ -531,7 +531,7 @@ func NewCapsman(ros Reader, emit Emit, pollMs int) *Capsman {
 	// and that reasoning was wrong, because Resume begins a subscription without
 	// ticking, so a page refocus left the manager row empty for good. See
 	// loadConfigIfDue.
-	c.sched = scheduled{loop: c.poll, menu: capsRegCmd.Path, apply: c.apply,
+	c.sched = scheduled{loop: c.poll, menu: capsRegCmd.Path, fields: fieldsOf(capsRegCmd), apply: c.apply,
 		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond }}
 	return c
 }

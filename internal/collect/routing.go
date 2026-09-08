@@ -397,7 +397,7 @@ func NewRouting(ros Reader, emit Emit, pollMs int) *Routing {
 		return r.pollMs.duration()
 	})
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	r.sched = scheduled{loop: r.loop, menu: "/routing/bgp/session/print", apply: r.apply,
+	r.sched = scheduled{loop: r.loop, menu: routingBgpCmd.Path, fields: fieldsOf(routingBgpCmd), apply: r.apply,
 		cadence: r.pollMs.duration}
 	return r
 }
@@ -529,12 +529,18 @@ func (r *Routing) BGPOnly() *Routing { r.bgpOnly = true; return r }
 // UNVERIFIED BY ANY FIXTURE — see the package note. None of the three routers
 // runs BGP, so what is proven here is the shape of the transform, by the unit
 // tests, not that these menus answer as expected on hardware that has them.
+// routingBgpCmd is hoisted so the SUBSCRIPTION and the read share one field
+// list. The subscription discards its rows -- it is there for cadence -- but it
+// still contributes to the menu's proplist union, so declaring it separately
+// would be two statements of the same want, drifting apart.
+var routingBgpCmd = routeros.Cmd{
+	Path: "/routing/bgp/session/print",
+	Args: []string{"=.proplist=name,remote.address,remote.as,local.role,established,uptime," +
+		"prefix-count,updates-sent,updates-received,last-notification,hold-time,keepalive-time"},
+}
+
 func (r *Routing) loadBGP() {
-	rows := r.safeRead(routeros.Cmd{
-		Path: "/routing/bgp/session/print",
-		Args: []string{"=.proplist=name,remote.address,remote.as,local.role,established,uptime," +
-			"prefix-count,updates-sent,updates-received,last-notification,hold-time,keepalive-time"},
-	})
+	rows := r.safeRead(routingBgpCmd)
 	if len(rows) == 0 {
 		rows = r.safeRead(routeros.Cmd{
 			Path: "/routing/bgp/peer/print",

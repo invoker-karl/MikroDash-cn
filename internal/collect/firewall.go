@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -162,6 +163,11 @@ type Firewall struct {
 	// we are away.
 	v6Probed     bool
 	ipv6Disabled *bool
+
+	// The counter refresh, on the scheduler when there is one. MECHANISM B:
+	// which menu it wants is `activeTable`, which the operator changes by
+	// clicking a tab, so this subscription MOVES -- see SetActiveTable.
+	sched scheduled
 }
 
 func NewFirewall(ros Reader, emit Emit, pollMs int) *Firewall {
@@ -175,10 +181,41 @@ func NewFirewall(ros Reader, emit Emit, pollMs int) *Firewall {
 		prevCounts:  map[string]fwCount{},
 		activeTable: "filter",
 	}
-	f.poll = newPollLoop(func() { f.pollCounters() },
-		func() time.Duration { return time.Duration(ms) * time.Millisecond })
+	// f.pollMs, not the captured `ms`: SetPollMs stores into the interval and
+	// then calls retime(), so a cadence closed over the constructor's value made
+	// the Firewall poll slider do nothing at all. Every other collector reads
+	// the interval; this one did not.
+	f.poll = newPollLoop(func() { f.pollCounters() }, f.pollMs.duration)
+	f.sched = scheduled{
+		loop: f.poll, menu: fwMenu("filter") + "/print",
+		fields: fwCounterFields, cadence: f.pollMs.duration,
+		apply: f.counterApplier("filter"),
+	}
 	return f
 }
+
+// fwCounterFields is the counter refresh's proplist, as a field list rather than
+// a Cmd because the menu it belongs to is chosen at runtime.
+var fwCounterFields = []string{".id", "packets", "bytes"}
+
+// counterApplier binds a delivery to the table it was read from.
+//
+// The table is captured, never re-read. See scheduled.resubscribe for why:
+// `.id` values repeat across menus, so merging one table's counters into
+// another succeeds and quietly reports the wrong numbers.
+func (f *Firewall) counterApplier(table string) func([]routeros.Reply, error) {
+	return func(rows []routeros.Reply, err error) {
+		// Retried on every delivery, and ONLY on this path, because it runs
+		// exactly when somebody is looking -- see pollCounters.
+		f.ProbeV6()
+		if err != nil {
+			return
+		}
+		f.mergeCounters(table, rows)
+	}
+}
+
+func (f *Firewall) UseCache(c *roscache.Cache) { f.sched.useCache(c) }
 
 // processRule turns one router row into a rule, and folds the packet delta in.
 //
@@ -301,12 +338,16 @@ func (f *Firewall) pollCounters() {
 	}
 	rows, err := f.ros.Do(routeros.Cmd{
 		Path: fwMenu(table) + "/print",
-		Args: []string{"=.proplist=.id,packets,bytes"},
+		Args: []string{"=.proplist=" + strings.Join(fwCounterFields, ",")},
 	})
 	if err != nil {
 		return
 	}
+	f.mergeCounters(table, rows)
+}
 
+// mergeCounters folds one counter read into the table it was read from.
+func (f *Firewall) mergeCounters(table string, rows []routeros.Reply) {
 	byID := make(map[string]routeros.Reply, len(rows))
 	for _, r := range rows {
 		if r[".id"] != "" {
@@ -425,9 +466,14 @@ func (f *Firewall) SetActiveTable(t string) {
 	changed := f.activeTable != t
 	f.activeTable = t
 	f.mu.Unlock()
-	if changed {
-		f.buildAndEmit()
+	if !changed {
+		return
 	}
+	// MECHANISM B. The polled path reads `activeTable` inside its own body and
+	// needs nothing here; the scheduled path is subscribed to a specific menu
+	// and has to be moved.
+	f.sched.resubscribe(fwMenu(t)+"/print", f.counterApplier(t))
+	f.buildAndEmit()
 }
 
 // SetWantV6 turns the four IPv6 tables on or off for this session.
@@ -539,7 +585,7 @@ func (f *Firewall) RefreshNow() { f.Tick() }
 func (f *Firewall) Start() { f.Tick() }
 
 func (f *Firewall) Reconnected() {
-	f.poll.stop()
+	f.sched.end()
 	f.mu.Lock()
 	f.lastFP = ""
 	f.prevCounts = map[string]fwCount{}
@@ -559,7 +605,7 @@ func (f *Firewall) Reconnected() {
 // `suspendIfNoRoomOccupied` — WHICH CALLS IT FROM A TIMER GOROUTINE, so the lock
 // here is not decoration.
 func (f *Firewall) Suspend() {
-	f.poll.stop()
+	f.sched.end()
 	f.mu.Lock()
 	f.wantV6 = false
 	for _, t := range fwTables6 {
@@ -568,10 +614,10 @@ func (f *Firewall) Suspend() {
 	f.mu.Unlock()
 }
 
-func (f *Firewall) Resume() { f.poll.start() }
+func (f *Firewall) Resume() { f.sched.begin() }
 
 func (f *Firewall) Stop() {
-	f.poll.stop()
+	f.sched.end()
 	f.mu.Lock()
 	f.lastFP = ""
 	f.prevCounts = map[string]fwCount{}

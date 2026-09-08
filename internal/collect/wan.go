@@ -356,7 +356,7 @@ func NewWan(ros Reader, emit Emit, rates RateSource, pollMs int) *Wan {
 		return w.pollMs.duration()
 	})
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	w.sched = scheduled{loop: w.poll, menu: wanDetectCmd.Path, apply: w.apply,
+	w.sched = scheduled{loop: w.poll, menu: wanDetectCmd.Path, fields: fieldsOf(wanDetectCmd), apply: w.apply,
 		cadence: w.pollMs.duration}
 	return w
 }

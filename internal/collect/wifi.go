@@ -140,6 +140,11 @@ type Wifi struct {
 	dirty  bool
 	lastFP string
 	last   *WifiPayload
+
+	// MECHANISM B: the menu this wants is whichever STACK the router turned out
+	// to have, which is not known until it answers. `load` latches it and then
+	// moves the subscription -- see alignSubscription.
+	sched scheduled
 }
 
 func NewWifi(ros Reader, emit Emit, pollMs int) *Wifi {
@@ -147,9 +152,55 @@ func NewWifi(ros Reader, emit Emit, pollMs int) *Wifi {
 	// (pollMs, 10000, 600000, 30000). Reordered for this side's (raw, def, lo, hi).
 	ms := clampPoll(pollMs, 10000, 30000, 600000)
 	w := &Wifi{ros: ros, emit: emit, pollMs: newPollInterval(ms), dirty: true}
-	w.poll = newPollLoop(func() { w.Tick() },
-		func() time.Duration { return time.Duration(ms) * time.Millisecond })
+	w.poll = newPollLoop(func() { w.Tick() }, w.pollMs.duration)
+	// THE SUBSCRIPTION'S CADENCE IS THE LOAD'S, NOT THE TICK'S. The polled path
+	// ticks at pollMs and only READS every wifiConfigEvery ticks; the other nine
+	// rebuild an unchanged payload and are suppressed by the fingerprint. A
+	// subscription is a read, so it wants the product -- the same effective rate,
+	// with the nine no-op ticks gone.
+	w.sched = scheduled{
+		loop: w.poll, menu: wifiIfaceCmd.Path, fields: fieldsOf(wifiIfaceCmd),
+		cadence: func() time.Duration { return w.pollMs.duration() * wifiConfigEvery },
+		apply:   w.applyLoad,
+	}
 	return w
+}
+
+// applyLoad is the scheduled path's tick: read, then emit.
+//
+// The delivered rows are not used. `load` re-reads the same menu through the
+// cache, which the scheduler has just refreshed, so it costs nothing -- and it
+// keeps ONE statement of how a stack is read instead of a second one here that
+// would have to learn the fallback rules all over again.
+func (w *Wifi) applyLoad([]routeros.Reply, error) {
+	w.load()
+	w.mu.Lock()
+	w.dirty = false
+	w.mu.Unlock()
+	w.emitPayload()
+}
+
+// alignSubscription points the subscription at the stack this router has.
+//
+// MECHANISM B. Called from `load`, which is the only thing that decides the
+// answer. Without it a legacy router would have the scheduler reading
+// `/interface/wifi/print` forever -- a menu that is not there, once per cadence.
+func (w *Wifi) alignSubscription() {
+	w.mu.Lock()
+	stack := w.stack
+	w.mu.Unlock()
+	menu := wifiIfaceCmd
+	if stack == "wireless" {
+		menu = wlIfaceCmd
+	}
+	w.sched.resubscribe(menu.Path, w.applyLoad)
+}
+
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+// Set once, before Start; nil leaves every read direct and the collector polled.
+func (w *Wifi) UseCache(c *roscache.Cache) {
+	w.cache = c
+	w.sched.useCache(c)
 }
 
 // soft reads an ENRICHMENT menu. A build without it, or an API user who cannot
@@ -231,6 +282,7 @@ func (w *Wifi) readWireless() (wifiView, error) {
 // gets refused. So an empty first answer is not latched on; it falls through and
 // the other stack is tried.
 func (w *Wifi) load() {
+	defer w.alignSubscription()
 	w.mu.Lock()
 	order := []string{"wifi", "wireless"}
 	if w.stack == "wireless" {
@@ -379,10 +431,10 @@ func (w *Wifi) RefreshNow() {
 	w.Tick()
 }
 
-func (w *Wifi) Start() { w.Tick(); w.poll.start() }
+func (w *Wifi) Start() { w.Tick(); w.sched.begin() }
 
 func (w *Wifi) Reconnected() {
-	w.poll.stop()
+	w.sched.end()
 	w.mu.Lock()
 	// The STACK is reset too, not just the fingerprint: a package can be
 	// installed and the router rebooted under us, and a latched answer would
@@ -393,14 +445,14 @@ func (w *Wifi) Reconnected() {
 	w.view = wifiView{}
 	w.mu.Unlock()
 	w.Tick()
-	w.poll.start()
+	w.sched.begin()
 }
 
-func (w *Wifi) Suspend() { w.poll.stop() }
-func (w *Wifi) Resume()  { w.poll.start() }
+func (w *Wifi) Suspend() { w.sched.end() }
+func (w *Wifi) Resume()  { w.sched.begin() }
 
 func (w *Wifi) Stop() {
-	w.poll.stop()
+	w.sched.end()
 	w.mu.Lock()
 	w.lastFP = ""
 	w.mu.Unlock()
@@ -412,7 +464,3 @@ func (w *Wifi) SetPollMs(ms int) {
 	w.pollMs.set(ms)
 	w.poll.retime()
 }
-
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (w *Wifi) UseCache(c *roscache.Cache) { w.cache = c }

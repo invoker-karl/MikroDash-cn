@@ -857,6 +857,12 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		s.netwatch, s.talkers, s.dns, s.packages, s.rosUsers, s.queues,
 		s.bridges, s.system, s.conns, s.dhcpLeases, s.dhcpNetworks,
 		s.wan, s.capsman, s.ppp, s.routing, s.ifStatus, s.topology, s.vpn,
+		// Mechanism B: the menu it wants is whichever firewall TABLE is on
+		// screen, so its subscription moves when the operator changes tab.
+		s.firewall,
+		// Also mechanism B: each latches whether this router runs the modern or
+		// the legacy wireless stack, and moves its subscription to match.
+		s.wifi, s.wireless,
 
 		// ── SHARED READS ONLY: these still poll ──────────────────────────────
 		//
@@ -864,7 +870,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// held off the scheduler by a recorded obstacle -- see
 		// `internal/verify/scheduled_test.go`, which refuses an entry with no
 		// reason and prints the count on every run.
-		s.wifi, s.wireless, s.vlans,
+		s.vlans,
 	} {
 		c.UseCache(s.roscache)
 	}

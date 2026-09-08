@@ -200,7 +200,8 @@ func NewQueues(ros Reader, emit Emit, firewall FilterRowSource, pollMs int) *Que
 	q.poll = newPollLoop(func() { q.Tick() },
 		func() time.Duration { return q.pollMs.duration() })
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	q.sched = scheduled{loop: q.poll, menu: queueSimpleCmd, apply: q.apply,
+	q.sched = scheduled{loop: q.poll, // fields nil: /queue/simple is read whole -- see the read call site.
+		menu: queueSimpleCmd, fields: nil, apply: q.apply,
 		cadence: q.pollMs.duration}
 	return q
 }

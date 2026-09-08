@@ -385,7 +385,8 @@ type Wireless struct {
 	// channels".
 	scanIfaces []wifiscan.Catalogue
 
-	loop *pollLoop
+	loop  *pollLoop
+	sched scheduled
 }
 
 const wlNoStack = "-"
@@ -399,28 +400,63 @@ func NewWireless(ros Reader, emit Emit, leases *DHCPLeases, pollMs int) *Wireles
 	w.loop = newPollLoop(func() { w.Tick() }, func() time.Duration {
 		return w.pollMs.duration()
 	})
+	// MECHANISM B. The registration table it wants depends on which stack the
+	// router runs, and that is latched by the first Tick -- see alignSubscription.
+	// The modern menu is the starting guess because it is the probe order's first
+	// for the same reason: on RouterOS 7.2x every board in this fleet answered it.
+	//
+	// fields nil: the registration table has no proplist of its own; both stacks
+	// are read whole because the field NAMES differ between them.
+	w.sched = scheduled{
+		loop: w.loop, menu: wlRegWifiCmd.Path, fields: fieldsOf(wlRegWifiCmd),
+		cadence: w.pollMs.duration, apply: w.applyTick,
+	}
 	return w
 }
 
-func (w *Wireless) Suspend() { w.loop.stop() }
+// applyTick is the scheduled path's tick.
+//
+// The delivered rows are not used: Tick re-reads the same menu through the
+// cache, which the scheduler has just refreshed, so it costs nothing and the
+// probe-and-latch rules stay in ONE place instead of being restated here.
+func (w *Wireless) applyTick([]routeros.Reply, error) { w.Tick() }
+
+// alignSubscription points the subscription at the stack this router has.
+//
+// Without it a legacy router would have the scheduler reading
+// `/interface/wifi/registration-table` forever, once per poll, and getting a
+// refusal every time.
+//
+// A latched "none" keeps the modern menu: both are absent, Tick re-probes both
+// anyway, and inventing a third answer here would only make the demand set
+// disagree with what is actually read.
+func (w *Wireless) alignSubscription(mode string) {
+	menu := wlRegWifiCmd
+	if mode == "wireless" {
+		menu = wlRegLegacyCmd
+	}
+	w.sched.resubscribe(menu.Path, w.applyTick)
+}
+
+func (w *Wireless) Suspend() { w.sched.end() }
 
 func (w *Wireless) Resume() {
 	if w.ros.Connected() {
-		w.loop.start()
+		w.sched.begin()
 	}
 }
 
 func (w *Wireless) Start() {
 	w.Tick()
-	w.loop.start()
+	w.sched.begin()
 }
 
-func (w *Wireless) Stop() { w.loop.stop() }
+func (w *Wireless) Stop() { w.sched.end() }
 
 // Reconnected drops every latch: the usual reason a connection dropped is an
 // upgrade, and the router that came back may run a different wireless stack.
 func (w *Wireless) Reconnected() {
-	w.loop.stop()
+	w.sched.end()
 	w.mu.Lock()
 	w.mode, w.ssidEndpoint, w.capsOK = "", "", false
 	w.probedCaps = false
@@ -539,6 +575,7 @@ func (w *Wireless) Tick() {
 	sort.SliceStable(clients, func(i, j int) bool { return clients[i].Signal > clients[j].Signal })
 
 	w.mu.Lock()
+	moved := w.mode != mode
 	w.mode = mode
 	w.capsOK = capsOK
 	ssids := withClientStats(w.ssids, clients)
@@ -549,6 +586,13 @@ func (w *Wireless) Tick() {
 	}
 	w.last = payload
 	w.mu.Unlock()
+
+	// OUTSIDE the lock: resubscribe takes the cache's, and taking the two in
+	// this order here and the other order in a delivery is how a deadlock gets
+	// built.
+	if moved {
+		w.alignSubscription(mode)
+	}
 
 	w.emit("page-wifi-clients,dash-card-wireless", "wireless:update", payload)
 }
@@ -656,4 +700,7 @@ func (w *Wireless) SetPollMs(ms int) {
 
 // UseCache routes this collector's shareable reads through a per-router cache.
 // Set once, before Start; nil leaves every read direct.
-func (w *Wireless) UseCache(c *roscache.Cache) { w.cache = c }
+func (w *Wireless) UseCache(c *roscache.Cache) {
+	w.cache = c
+	w.sched.useCache(c)
+}

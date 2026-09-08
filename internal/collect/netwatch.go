@@ -116,7 +116,8 @@ func NewNetwatch(ros Reader, emit Emit, pollMs int) *Netwatch {
 	n.poll = newPollLoop(func() { n.Tick() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
 	n.sched = scheduled{
-		loop: n.poll, menu: netwatchCmd.Path, apply: n.apply,
+		// fields nil: /tool/netwatch has no proplist of its own.
+		loop: n.poll, menu: netwatchCmd.Path, fields: fieldsOf(netwatchCmd), apply: n.apply,
 		// NO FIELD LIST: this collector reads whole rows, and roscache's union
 		// rule makes saying so honestly better than naming a list that would
 		// widen the moment somebody adds a column to the card.

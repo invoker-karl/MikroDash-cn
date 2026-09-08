@@ -109,7 +109,7 @@ func NewTalkers(ros Reader, emit Emit, pollMs, topN int) *Talkers {
 		return t.pollMs.duration()
 	})
 	t.sched = scheduled{
-		loop: t.loop, menu: talkersCmd.Path, apply: t.apply,
+		loop: t.loop, menu: talkersCmd.Path, fields: fieldsOf(talkersCmd), apply: t.apply,
 		cadence: t.pollMs.duration,
 	}
 	return t

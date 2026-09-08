@@ -19,11 +19,14 @@ package collect
 //
 // ── WHAT IT DELIBERATELY DOES NOT DO ────────────────────────────────────────
 //
-// One menu. A collector reading several -- and most read several -- subscribes
+// One menu AT A TIME. A collector reading several -- and most read several -- subscribes
 // to the one whose cadence drives it, and reads the rest inside its own `apply`,
 // through the cache, exactly as it did before. Modelling "derive when all of
 // these are fresh" is a real question and it belongs to phase 4.2's views, not
 // to a helper that exists to stop five lifecycle methods being copied.
+//
+// WHICH menu may change while running -- see `resubscribe` -- but there is still
+// only ever one.
 
 import (
 	"sync"
@@ -98,24 +101,107 @@ func (s *scheduled) begin() {
 	}
 	s.mu.Lock()
 	already := s.release != nil
+	// Read under the lock, because `resubscribe` may move them. Everything
+	// after this point works on THESE values and re-checks them before
+	// committing, so a menu change that lands mid-subscribe loses rather than
+	// half-applies.
+	menu, fields, apply := s.menu, s.fields, s.apply
+	cadence := s.cadence
 	s.mu.Unlock()
 	if already {
 		return
 	}
 
-	cadence := time.Duration(0)
-	if s.cadence != nil {
-		cadence = s.cadence()
+	d := time.Duration(0)
+	if cadence != nil {
+		d = cadence()
 	}
 	// NOT UNDER s.mu. Subscribe takes the cache's own lock, and the scheduler
 	// takes that lock before calling `apply`, which takes the collector's. Doing
 	// both here in the other order is how a deadlock gets built.
-	rel := s.cache.Subscribe(s.menu, s.fields, cadence, s.apply)
+	rel := s.cache.Subscribe(menu, fields, d, apply)
 
 	s.mu.Lock()
-	if s.release != nil {
-		// Two begins raced. Keep the first and give up the second rather than
-		// leaking it, so the count still reaches zero when the collector stops.
+	if s.release != nil || s.menu != menu {
+		// Two begins raced, or a resubscribe moved the menu underneath us. Keep
+		// whatever won and give this one up rather than leaking it, so the count
+		// still reaches zero when the collector stops.
+		s.mu.Unlock()
+		rel()
+		return
+	}
+	s.release = rel
+	s.mu.Unlock()
+}
+
+// resubscribe points the collector at a different menu, with the callback that
+// knows how to read it.
+//
+// ── MECHANISM B: A MENU CHOSEN AT RUNTIME ───────────────────────────────────
+//
+// `begin`/`end` assume the collector knows its menu when it is constructed.
+// Three do not. The firewall refreshes the counters of whichever TABLE the
+// operator is looking at; `wifi` and `wireless` read whichever WIRELESS STACK
+// the router turned out to have, which is not known until it answers. A
+// subscription is per-menu, so those collectors need to be able to move one.
+//
+// ── WHY IT TAKES THE CALLBACK TOO, AND WHY THAT IS THE WHOLE POINT ──────────
+//
+// The delivered rows say nothing about which menu they came from. So a callback
+// that resolves that itself -- reading the collector's "current table" field --
+// can be handed the OLD menu's rows after the field has already moved, and merge
+// nat counters into the filter table. The rows are keyed by RouterOS `.id`, and
+// `*1` exists in every menu, so that merge SUCCEEDS and produces silently wrong
+// numbers for one frame.
+//
+// Binding the callback to the menu at the moment of subscription removes the
+// question. The caller passes a closure that already knows its table; nothing
+// has to be resolved later, so nothing can be resolved late.
+//
+// ── ORDER ───────────────────────────────────────────────────────────────────
+//
+// Release first, then subscribe. The demand set counts subscribers per menu and
+// stops reading a menu that has none, so releasing first is what makes the old
+// menu actually go quiet.
+//
+// Releasing does NOT drain a delivery already under way. `Cache.deliver` copies
+// the callbacks out and drops the lock before calling them, so an old-menu
+// delivery can still land after the release returns. That is precisely why the
+// callback is bound above rather than resolved later: the ordering cannot be
+// relied on, so nothing is allowed to depend on it.
+//
+// A no-op when the menu has not changed, so a caller may pass its current
+// selection unconditionally. Safe while suspended: it records the choice and
+// `begin` picks it up.
+func (s *scheduled) resubscribe(menu string, apply func([]routeros.Reply, error)) {
+	s.mu.Lock()
+	if s.menu == menu {
+		s.mu.Unlock()
+		return
+	}
+	s.menu, s.apply = menu, apply
+	old := s.release
+	s.release = nil
+	fields, cadence := s.fields, s.cadence
+	s.mu.Unlock()
+
+	if old != nil {
+		old()
+	}
+	// Nothing to move: either this collector is polled, or it is suspended and
+	// `begin` will subscribe to the menu just recorded.
+	if s.cache == nil || old == nil {
+		return
+	}
+
+	d := time.Duration(0)
+	if cadence != nil {
+		d = cadence()
+	}
+	rel := s.cache.Subscribe(menu, fields, d, apply)
+
+	s.mu.Lock()
+	if s.release != nil || s.menu != menu {
 		s.mu.Unlock()
 		rel()
 		return

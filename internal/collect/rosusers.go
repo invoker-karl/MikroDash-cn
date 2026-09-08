@@ -244,7 +244,7 @@ func NewRosUsers(ros Reader, emit Emit, usernames []string, pollMs int) *RosUser
 	r.poll = newPollLoop(func() { r.Tick() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	r.sched = scheduled{loop: r.poll, menu: rosUserCmd.Path, apply: r.apply,
+	r.sched = scheduled{loop: r.poll, menu: rosUserCmd.Path, fields: fieldsOf(rosUserCmd), apply: r.apply,
 		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond }}
 	return r
 }

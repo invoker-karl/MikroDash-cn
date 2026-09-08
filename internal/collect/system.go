@@ -274,7 +274,7 @@ func NewSystem(ros Reader, emit Emit, pollMs int) *System {
 		return s.pollMs.duration()
 	})
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	s.sched = scheduled{loop: s.loop, menu: systemResourceCmd.Path, apply: s.apply,
+	s.sched = scheduled{loop: s.loop, menu: systemResourceCmd.Path, fields: fieldsOf(systemResourceCmd), apply: s.apply,
 		cadence: s.pollMs.duration}
 	return s
 }

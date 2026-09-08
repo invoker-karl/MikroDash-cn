@@ -58,6 +58,9 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 		"ifstatus.go":     "ifStatus",
 		"topology.go":     "topology",
 		"vpn.go":          "vpn",
+		"firewall.go":     "firewall",
+		"wifi.go":         "wifi",
+		"wireless.go":     "wireless",
 	}
 
 	// ── EVERY UNSCHEDULED COLLECTOR, AND HOW STRONG THE REASON ACTUALLY IS ──
@@ -86,12 +89,11 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 		"vlans": "NEEDS 4.2 — reads only config menus; the reason it ticks at all is rates borrowed " +
 			"from ifStatus in memory. Subscribing it to a menu would slow its rate column from 5s to 60s",
 
-		// PARTIAL — the weakest claims here, and the ones worth arguing about.
-		"firewall": "PARTIAL — pollCounters reads whichever table the operator has open, so the menu is " +
-			"chosen at runtime. Re-subscribing when activeTable changes is possible and was not tried",
-		"wifi": "PARTIAL — latches modern or legacy after probing, so its menu is not known at " +
-			"construction. Re-subscribing when the latch flips is possible and was not tried",
-		"wireless": "PARTIAL — same latch as wifi",
+		// PARTIAL. Empty since mechanism B, and kept as a heading rather than
+		// deleted: all three entries that were here -- firewall, wifi, wireless --
+		// read "possible and was not tried" underneath the grade, and all three
+		// took one mechanism between them. That is the standing argument against
+		// the two grades above, which say the same thing in longer words.
 	}
 
 	// A collector is on the scheduler when its file embeds the helper.

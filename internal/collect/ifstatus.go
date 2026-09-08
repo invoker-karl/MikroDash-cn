@@ -277,7 +277,7 @@ func NewIfStatus(ros Reader, emit Emit, routerID string, pollMs int) *IfStatus {
 	// that makes two clocks safe. See scheduled.go.
 	s.sched = scheduled{
 		loop: s.poll, residual: true,
-		menu: ifStatusIfCmd.Path, apply: s.applyMeta,
+		menu: ifStatusIfCmd.Path, fields: fieldsOf(ifStatusIfCmd), apply: s.applyMeta,
 		cadence: func() time.Duration {
 			return time.Duration(s.metaTicks()) * s.pollMs.duration()
 		},

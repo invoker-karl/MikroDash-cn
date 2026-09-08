@@ -598,7 +598,7 @@ func NewConnections(ros Reader, emit Emit, table *ConnTable, leases *DHCPLeases,
 		return c.pollMs.duration()
 	})
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	c.sched = scheduled{loop: c.loop, menu: connsCmd.Path, apply: c.apply,
+	c.sched = scheduled{loop: c.loop, menu: connsCmd.Path, fields: fieldsOf(connsCmd), apply: c.apply,
 		cadence: c.pollMs.duration}
 	return c
 }

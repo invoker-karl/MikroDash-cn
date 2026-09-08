@@ -271,7 +271,7 @@ func NewBridges(ros Reader, emit Emit, rates RateSource, pollMs int) *Bridges {
 		return b.pollMs.duration()
 	})
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
-	b.sched = scheduled{loop: b.poll, menu: bridgeHostCmd.Path, apply: b.apply,
+	b.sched = scheduled{loop: b.poll, menu: bridgeHostCmd.Path, fields: fieldsOf(bridgeHostCmd), apply: b.apply,
 		cadence: b.pollMs.duration}
 	return b
 }
