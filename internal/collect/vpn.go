@@ -165,13 +165,48 @@ func NewVPN(ros Reader, emit Emit, pollMs int) *VPN {
 	// MECHANISM A. The loop is the other half, not a fallback: it drives
 	// RefreshNow, which reads the WireGuard menu with its detail argument and
 	// emits. The subscription drives /ppp/active. Disjoint, which is the rule.
+	//
+	// ── THE SUBSCRIPTION IS ON THE SLOW LANE, AND IT WAS NOT ────────────────
+	//
+	// This collector reads four menus and only ONE of them is live: WireGuard
+	// handshake ages move every few seconds, while PPP sessions and IPsec
+	// security associations change when a tunnel comes up or goes down. That is
+	// exactly the fast/slow split phase 1.6 applied everywhere else.
+	//
+	// It was declared at `pollMs` -- five seconds on this install -- which put
+	// all three slow menus on the fast lane. THE POLLED PATH NEVER DID THAT: its
+	// loop body is `RefreshNow`, WireGuard alone, and `loadOther` ran about once
+	// a minute. So mechanism A tripled this collector's cost when it landed in
+	// 3.2a, and nothing noticed because `vpn` only ran for a router somebody was
+	// watching, where the extra reads sat inside a much larger total.
+	//
+	// MEASURED, once sessions began running it for unwatched routers: wireguard
+	// 11/min against the polled path's 13, but ppp 12 against 1 and the two IPsec
+	// menus 8 each against 1.
+	//
+	// `vpnSlowTarget` rather than `pollMs`, matching `ifStatusMetaTarget`. A
+	// tunnel state change is now seen within thirty seconds instead of five --
+	// and instead of the sixty the pool gave it, so the alert rule that watches
+	// tunnels is BETTER served than it was, at a fifth of the reads.
 	v.sched = scheduled{
 		loop: v.poll, residual: true,
 		// fields nil: this collector reads /ppp/active whole, unlike `ppp`.
-		menu: vpnPppCmd.Path, fields: fieldsOf(vpnPppCmd), apply: v.apply, cadence: v.pollMs.duration,
+		menu: vpnPppCmd.Path, fields: fieldsOf(vpnPppCmd), apply: v.apply,
+		cadence: func() time.Duration { return vpnSlowTarget },
 	}
 	return v
 }
+
+// vpnSlowTarget is how often the three non-WireGuard menus are re-read.
+//
+// The same thirty seconds `ifStatusMetaTarget` uses, and for the same reason: it
+// is the interval at which a change nobody is staring at is noticed soon enough.
+// FLAT, not a floor. A floor was written first, to honour an operator who asked
+// for a slower vpn poll -- and the branch was unreachable: this collector's own
+// `clampPoll(pollMs, 10000, 500, 30000)` caps the poll at thirty seconds, the
+// same value. Dead code carrying a comment about a case that cannot arise is
+// worse than none, so it says what actually happens.
+const vpnSlowTarget = 30 * time.Second
 
 var vpnDur = regexp.MustCompile(`(\d+)([wdhms])`)
 

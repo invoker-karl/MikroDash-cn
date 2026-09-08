@@ -565,3 +565,44 @@ func TestResubscribeBindsTheCallbackToTheNewMenu(t *testing.T) {
 		t.Fatal("no delivery after resubscribe")
 	}
 }
+
+// TestVpnSlowMenusAreOnTheSlowLane.
+//
+// ── THE REGRESSION THIS PINS ────────────────────────────────────────────────
+//
+// `vpn` reads four menus and only ONE is live: WireGuard handshake ages move
+// every few seconds, while PPP sessions and IPsec security associations change
+// when a tunnel comes up or goes down.
+//
+// Mechanism A subscribed it to `/ppp/active` at `pollMs` — five seconds on the
+// operator's install — which put all three slow menus on the fast lane. The
+// POLLED path never did: its loop body is `RefreshNow`, WireGuard alone, and
+// `loadOther` ran about once a minute.
+//
+// So 3.2a tripled this collector's cost, and nothing caught it: `vpn` only ran
+// for a router somebody was watching, where the extra reads sat inside a much
+// larger total. It surfaced when phase 4.3 began running it for UNWATCHED
+// routers and the per-minute figures could be compared with the pool's.
+func TestVpnSlowMenusAreOnTheSlowLane(t *testing.T) {
+	// A fast poll must not drag the slow menus onto the fast lane.
+	fast := NewVPN(nil, func(string, string, any) {}, 5000)
+	if got := fast.sched.cadence(); got < vpnSlowTarget {
+		t.Errorf("with a 5s poll the subscription asks for %v; the three non-WireGuard "+
+			"menus belong on the %v lane. This is the shape that tripled vpn's cost in "+
+			"3.2a.", got, vpnSlowTarget)
+	}
+	// A SLOWER POLL CANNOT ASK FOR MORE THAN THE TARGET, because this collector
+	// clamps its own poll to thirty seconds -- the same value. A floor was
+	// written here first to honour "the operator wants less", and the branch was
+	// unreachable; the test says so rather than pretending otherwise.
+	slow := NewVPN(nil, func(string, string, any) {}, 60000)
+	if got := slow.sched.cadence(); got != vpnSlowTarget {
+		t.Errorf("a 60s poll produced %v, want %v: clampPoll caps this collector at the "+
+			"slow target, so there is no slower case to honour", got, vpnSlowTarget)
+	}
+	// And the residual loop stays FAST, because WireGuard is the live half.
+	if got := fast.poll.bounded(); got > vpnSlowTarget {
+		t.Errorf("the residual loop runs at %v; WireGuard handshake ages are the one "+
+			"thing here that moves, and slowing them is the opposite of the fix", got)
+	}
+}
