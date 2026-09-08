@@ -225,6 +225,8 @@ type PPP struct {
 	emit   Emit
 	poll   *pollLoop
 	pollMs *pollInterval
+	// See scheduled.go: subscribes to /ppp/active, the live sessions.
+	sched scheduled
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
@@ -253,6 +255,9 @@ func NewPPP(ros Reader, emit Emit, pollMs int) *PPP {
 	p := &PPP{ros: ros, emit: emit, pollMs: newPollInterval(ms), prev: map[string]pppSample{}}
 	p.poll = newPollLoop(func() { p.Tick() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	p.sched = scheduled{loop: p.poll, menu: pppActiveCmd.Path, apply: p.apply,
+		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond }}
 	return p
 }
 
@@ -445,7 +450,40 @@ func (p *PPP) Tick() {
 		p.loadConfig()
 	}
 	p.ticks++
-	rows := p.read(pppActiveCmd, &p.activeAvail)
+	p.applyLocked(p.read(pppActiveCmd, &p.activeAvail))
+}
+
+// apply is what the scheduler calls with the active sessions, this collector's
+// live menu. The secrets, profiles and PPPoE servers keep their config cadence
+// here -- see scheduled.go on why a collector subscribes to ONE menu.
+func (p *PPP) apply(rows []routeros.Reply, err error) {
+	if !p.ros.Connected() {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if err != nil {
+		// The latch `read` would have set, derived from the scheduler's error.
+		if menuMissing(err) {
+			no := false
+			p.activeAvail = &no
+		}
+		return
+	}
+	if p.activeAvail == nil {
+		yes := true
+		p.activeAvail = &yes
+	}
+	if p.ticks%pppConfigEvery == 0 {
+		p.loadConfig()
+	}
+	p.ticks++
+	p.applyLocked(rows)
+}
+
+// applyLocked builds and emits. The caller holds the lock.
+func (p *PPP) applyLocked(rows []routeros.Reply) {
 	p.sessions = ParsePPPSessions(rows, p.prev, time.Now())
 
 	byService := map[string]int{}
@@ -548,20 +586,34 @@ func (p *PPP) Last() *PPPPayload {
 	return p.last
 }
 
-func (p *PPP) Start() { p.Tick(); p.poll.start() }
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+// Same cache, two uses.
+func (p *PPP) UseCache(rc *roscache.Cache) {
+	p.cache = rc
+	p.sched.useCache(rc)
+}
+
+func (p *PPP) Start() {
+	if !p.sched.scheduling() {
+		p.Tick()
+	}
+	p.sched.begin()
+}
 
 // Reconnected clears the rate baseline with everything else: a reconnect may be
 // a different router, and session byte counters restart in any case.
 func (p *PPP) Reconnected() {
-	p.poll.stop()
+	p.sched.end()
 	p.mu.Lock()
 	clear(p.prev)
 	p.lastFP = ""
 	p.ticks = 0
 	p.activeAvail, p.profileAvail, p.serverAvail, p.secretAvail = nil, nil, nil, nil
 	p.mu.Unlock()
-	p.Tick()
-	p.poll.start()
+	if !p.sched.scheduling() {
+		p.Tick()
+	}
+	p.sched.begin()
 }
 
 // RefreshNow re-reads everything at once, including the config tables.
@@ -581,10 +633,10 @@ func (p *PPP) RefreshNow() {
 	p.Tick()
 }
 
-func (p *PPP) Suspend() { p.poll.stop() }
-func (p *PPP) Resume()  { p.poll.start() }
+func (p *PPP) Suspend() { p.sched.end() }
+func (p *PPP) Resume()  { p.sched.begin() }
 func (p *PPP) Stop() {
-	p.poll.stop()
+	p.sched.end()
 	p.mu.Lock()
 	p.lastFP = ""
 	p.mu.Unlock()
@@ -596,7 +648,3 @@ func (p *PPP) SetPollMs(ms int) {
 	p.pollMs.set(ms)
 	p.poll.retime()
 }
-
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (p *PPP) UseCache(rc *roscache.Cache) { p.cache = rc }

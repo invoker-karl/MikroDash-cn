@@ -53,6 +53,8 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 		"dhcpnetworks.go": "dhcpNetworks",
 		"wan.go":          "wan",
 		"capsman.go":      "capsman",
+		"ppp.go":          "ppp",
+		"routing.go":      "routing",
 	}
 
 	// ── EVERY UNSCHEDULED COLLECTOR, AND HOW STRONG THE REASON ACTUALLY IS ──
@@ -93,10 +95,6 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 		"wifi": "PARTIAL — latches modern or legacy after probing, so its menu is not known at " +
 			"construction. Re-subscribing when the latch flips is possible and was not tried",
 		"wireless": "PARTIAL — same latch as wifi",
-
-		// NOT TRIED.
-		"ppp":     "NOT TRIED — /ppp/active is a plain read on a fixed menu; no obstacle found",
-		"routing": "NOT TRIED — the BGP menus are plain reads on fixed menus; no obstacle found",
 	}
 
 	// A collector is on the scheduler when its file embeds the helper.

@@ -351,6 +351,8 @@ type Routing struct {
 
 	// ticks paces the route tables against the BGP menus. See routeConfigEvery.
 	ticks int
+	// See scheduled.go: subscribes to the BGP session menu for its CADENCE.
+	sched scheduled
 }
 
 // routeConfigEvery is how many polls apart the route tables are re-read.
@@ -394,18 +396,28 @@ func NewRouting(ros Reader, emit Emit, pollMs int) *Routing {
 	r.loop = newPollLoop(func() { r.Tick() }, func() time.Duration {
 		return r.pollMs.duration()
 	})
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	r.sched = scheduled{loop: r.loop, menu: "/routing/bgp/session/print", apply: r.apply,
+		cadence: r.pollMs.duration}
 	return r
 }
 
-func (r *Routing) Suspend() { r.loop.stop() }
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+// Same cache, two uses.
+func (r *Routing) UseCache(rc *roscache.Cache) {
+	r.cache = rc
+	r.sched.useCache(rc)
+}
+
+func (r *Routing) Suspend() { r.sched.end() }
 
 func (r *Routing) Resume() {
 	if r.ros.Connected() {
-		r.loop.start()
+		r.sched.begin()
 	}
 }
 
-func (r *Routing) Stop() { r.loop.stop() }
+func (r *Routing) Stop() { r.sched.end() }
 
 func (r *Routing) Last() *RoutingPayload { return r.last }
 
@@ -479,6 +491,24 @@ func (r *Routing) Tick() {
 	// both tables on every alert tick for every router.
 	// The route tables are the SLOW lane; the BGP menus are the fast one. Tick 0
 	// reads both, so the first payload is never missing its routes.
+	r.applyLocked()
+}
+
+// apply is what the scheduler calls when the BGP session menu refreshes. The
+// rows are discarded deliberately: `loadBGP` below re-reads that menu through its
+// own fallback path -- session first, then the legacy peer menu -- and modelling
+// that fallback in the subscription would mean subscribing to a menu this router
+// may not have. What the subscription buys here is the CADENCE, not the rows.
+func (r *Routing) apply([]routeros.Reply, error) {
+	if !r.ros.Connected() {
+		return
+	}
+	r.applyLocked()
+}
+
+// applyLocked is the poll body: the BGP menus every time, the routes every
+// routeConfigEvery.
+func (r *Routing) applyLocked() {
 	if !r.bgpOnly && r.ticks%routeConfigEvery == 0 {
 		r.loadRoutes()
 	}
@@ -735,7 +765,3 @@ func (r *Routing) SetPollMs(ms int) {
 	r.pollMs.set(ms)
 	r.loop.retime()
 }
-
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (r *Routing) UseCache(rc *roscache.Cache) { r.cache = rc }
