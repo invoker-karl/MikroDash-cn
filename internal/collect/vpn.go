@@ -133,6 +133,9 @@ type VPN struct {
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
+	// See scheduled.go. Mechanism A: /ppp/active subscribed, WireGuard on the
+	// residual timer because its command carries a detail argument.
+	sched scheduled
 
 	mu sync.Mutex
 	// order is the peer keys in the order the router first mentioned them, and
@@ -159,6 +162,13 @@ func NewVPN(ros Reader, emit Emit, pollMs int) *VPN {
 	}
 	v.pollMs = newPollInterval(ms)
 	v.poll = newPollLoop(func() { v.RefreshNow() }, v.pollMs.duration)
+	// MECHANISM A. The loop is the other half, not a fallback: it drives
+	// RefreshNow, which reads the WireGuard menu with its detail argument and
+	// emits. The subscription drives /ppp/active. Disjoint, which is the rule.
+	v.sched = scheduled{
+		loop: v.poll, residual: true,
+		menu: vpnPppCmd.Path, apply: v.apply, cadence: v.pollMs.duration,
+	}
 	return v
 }
 
@@ -483,7 +493,79 @@ func (v *VPN) loadOther() {
 		}
 		return out
 	}
-	ppp := ParsePppSessions(read(vpnPppCmd, &v.pppAvail))
+	v.storeOther(ParsePppSessions(read(vpnPppCmd, &v.pppAvail)), read)
+}
+
+// apply is what the scheduler calls with the PPP sessions.
+//
+// ── WHY THIS COLLECTOR IS SPLIT THIS WAY ────────────────────────────────────
+//
+// Its WireGuard menu carries a detail argument, and a subscription keyed by menu
+// and fields cannot express one: the scheduler would issue that menu WITHOUT the
+// argument and hand back different rows. Nothing would fail -- the VPN page would
+// simply lose columns. So WireGuard stays on the RESIDUAL timer, where
+// `RefreshNow` reads it and emits.
+//
+// What is scheduled is /ppp/active, which is plain. THE DELIVERED ROWS ARE USED
+// AS DELIVERED and not re-read: re-reading them here would put the same menu on
+// two clocks, which is the shape that produced a real bug in 3.2 and which
+// `TestResidualLoopsDoNotReadSubscribedMenus` now refuses. The two ipsec menus
+// are read alongside, and neither half touches the other's.
+func (v *VPN) apply(rows []routeros.Reply, err error) {
+	if !v.ros.Connected() {
+		return
+	}
+	if err != nil {
+		// The latch `loadOther`'s reader would have set.
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no such") || strings.Contains(msg, "unknown command") {
+			no := false
+			v.pppAvail = &no
+		}
+		return
+	}
+	if v.pppAvail == nil {
+		yes := true
+		v.pppAvail = &yes
+	}
+	v.storeOther(ParsePppSessions(nonEmpty(rows)), v.softRead)
+}
+
+// nonEmpty drops the blank replies RouterOS pads a result set with, which is what
+// `loadOther`'s own reader does before parsing.
+func nonEmpty(rows []routeros.Reply) []routeros.Reply {
+	out := make([]routeros.Reply, 0, len(rows))
+	for _, r := range rows {
+		if len(r) > 0 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// softRead is `loadOther`'s reader as a method, so `apply` can reach the ipsec
+// menus without rebuilding the closure.
+func (v *VPN) softRead(cmd routeros.Cmd, flag **bool) []routeros.Reply {
+	if *flag != nil && !**flag {
+		return nil
+	}
+	rows, err := readVia(v.cache, v.ros, cmd, v.pollMs.duration())
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no such") || strings.Contains(msg, "unknown command") {
+			no := false
+			*flag = &no
+		}
+		return nil
+	}
+	yes := true
+	*flag = &yes
+	return nonEmpty(rows)
+}
+
+// storeOther holds the half that is the same on both paths: the ipsec menus, and
+// the store.
+func (v *VPN) storeOther(ppp []PppTunnel, read func(routeros.Cmd, **bool) []routeros.Reply) {
 	peers := read(vpnPeerCmd, &v.ipsecAvail)
 	sas := read(vpnSaCmd, &v.ipsecAvail)
 
@@ -503,10 +585,15 @@ func (v *VPN) Tick() {
 	v.RefreshNow()
 }
 
-func (v *VPN) Start() { v.Tick(); v.poll.start() }
+func (v *VPN) Start() {
+	if !v.sched.scheduling() {
+		v.Tick()
+	}
+	v.sched.begin()
+}
 
 func (v *VPN) Reconnected() {
-	v.poll.stop()
+	v.sched.end()
 	v.mu.Lock()
 	clear(v.prev)
 	v.lastFP = ""
@@ -516,9 +603,9 @@ func (v *VPN) Reconnected() {
 	v.poll.start()
 }
 
-func (v *VPN) Suspend() { v.poll.stop() }
-func (v *VPN) Resume()  { v.poll.start() }
-func (v *VPN) Stop()    { v.poll.stop() }
+func (v *VPN) Suspend() { v.sched.end() }
+func (v *VPN) Resume()  { v.sched.begin() }
+func (v *VPN) Stop()    { v.sched.end() }
 
 // SetPollMs applies a new poll period to a running collector.
 // See `System.SetPollMs` for why both halves are needed.
@@ -527,6 +614,8 @@ func (v *VPN) SetPollMs(ms int) {
 	v.poll.retime()
 }
 
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (v *VPN) UseCache(rc *roscache.Cache) { v.cache = rc }
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+func (v *VPN) UseCache(rc *roscache.Cache) {
+	v.cache = rc
+	v.sched.useCache(rc)
+}

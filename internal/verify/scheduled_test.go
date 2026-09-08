@@ -56,6 +56,8 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 		"ppp.go":          "ppp",
 		"routing.go":      "routing",
 		"ifstatus.go":     "ifStatus",
+		"topology.go":     "topology",
+		"vpn.go":          "vpn",
 	}
 
 	// ── EVERY UNSCHEDULED COLLECTOR, AND HOW STRONG THE REASON ACTUALLY IS ──
@@ -85,10 +87,6 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 			"from ifStatus in memory. Subscribing it to a menu would slow its rate column from 5s to 60s",
 
 		// PARTIAL — the weakest claims here, and the ones worth arguing about.
-		"topology": "PARTIAL — its cadence is the ping cursor, which is set B, but its neighbour, host, " +
-			"vlan and wifi menus are plain reads. Not attempted",
-		"vpn": "PARTIAL — its main menu carries a detail argument the demand key cannot express, but " +
-			"/ppp/active and the two ipsec menus are plain. Not attempted",
 		"firewall": "PARTIAL — pollCounters reads whichever table the operator has open, so the menu is " +
 			"chosen at runtime. Re-subscribing when activeTable changes is possible and was not tried",
 		"wifi": "PARTIAL — latches modern or legacy after probing, so its menu is not known at " +

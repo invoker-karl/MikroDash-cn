@@ -1256,6 +1256,9 @@ type Topology struct {
 
 	loop     *pollLoop
 	pingLoop *pollLoop
+	// See scheduled.go: subscribes to the NEIGHBOUR menu. No `residual` flag --
+	// the ping cursor was already on its own loop.
+	sched scheduled
 }
 
 // topoPingStep is the gap between one device's probe and the next. Twenty-four
@@ -1283,6 +1286,11 @@ func NewTopology(ros Reader, emit Emit, rates RateSource, routerID, label string
 	t.pingLoop = newPollLoop(func() { t.pingNext() }, func() time.Duration {
 		return topoPingStep
 	})
+	// AFTER the loops: `scheduled` holds `loop` as the no-cache fallback. The
+	// ping loop is deliberately NOT handed over — it is a set B measurement on
+	// its own timer, started and stopped beside the subscription.
+	t.sched = scheduled{loop: t.loop, menu: topoNeighborCmd.Path, apply: t.apply,
+		cadence: t.pollMs.duration}
 	return t
 }
 
@@ -1438,7 +1446,7 @@ func (t *Topology) recordPing(key string, replied bool, rtt *float64) {
 }
 
 func (t *Topology) Suspend() {
-	t.loop.stop()
+	t.sched.end()
 	t.pingLoop.stop()
 }
 
@@ -1446,7 +1454,7 @@ func (t *Topology) Resume() {
 	if !t.ros.Connected() {
 		return
 	}
-	t.loop.start()
+	t.sched.begin()
 	t.mu.Lock()
 	denied := t.pingDenied
 	t.mu.Unlock()
@@ -1455,19 +1463,28 @@ func (t *Topology) Resume() {
 	}
 }
 
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+// Same cache, two uses.
+func (t *Topology) UseCache(c *roscache.Cache) {
+	t.cache = c
+	t.sched.useCache(c)
+}
+
 func (t *Topology) Start() {
-	t.Tick()
-	t.loop.start()
+	if !t.sched.scheduling() {
+		t.Tick()
+	}
+	t.sched.begin()
 	t.pingLoop.start()
 }
 
 func (t *Topology) Stop() {
-	t.loop.stop()
+	t.sched.end()
 	t.pingLoop.stop()
 }
 
 func (t *Topology) Reconnected() {
-	t.loop.stop()
+	t.sched.end()
 	t.pingLoop.stop()
 	t.mu.Lock()
 	t.discovery = nil
@@ -1478,8 +1495,10 @@ func (t *Topology) Reconnected() {
 	t.ping = map[string]*TopoPing{}
 	t.pingDenied = false
 	t.mu.Unlock()
-	t.Tick()
-	t.loop.start()
+	if !t.sched.scheduling() {
+		t.Tick()
+	}
+	t.sched.begin()
 	t.pingLoop.start()
 }
 
@@ -1522,7 +1541,22 @@ func (t *Topology) Tick() {
 		return
 	}
 
-	rows, err := t.ros.Do(topoNeighborCmd)
+	t.apply(t.ros.Do(topoNeighborCmd))
+}
+
+// apply is what the scheduler calls with the neighbour rows -- this collector's
+// entry menu, and the one whose denial means there is no topology at all.
+//
+// ── THE PING CURSOR IS NOT PART OF THIS ─────────────────────────────────────
+//
+// `pingLoop` is a separate timer and stays one. Its reads are set B measurements
+// with a target, so they cannot be scheduled, and they are on their own loop
+// ALREADY -- which is why this collector needed no `residual` flag: its two
+// halves were split before the scheduler existed.
+func (t *Topology) apply(rows []routeros.Reply, err error) {
+	if !t.ros.Connected() {
+		return
+	}
 	if err != nil {
 		// A user without the policy for /ip/neighbor cannot have a topology at
 		// all. Reported on the payload rather than logged and forgotten.
@@ -1826,7 +1860,3 @@ func (t *Topology) SetPollMs(ms int) {
 	t.pollMs.set(ms)
 	t.loop.retime()
 }
-
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (t *Topology) UseCache(c *roscache.Cache) { t.cache = c }

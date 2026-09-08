@@ -856,7 +856,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// measurement, which is set B and can never be scheduled.
 		s.netwatch, s.talkers, s.dns, s.packages, s.rosUsers, s.queues,
 		s.bridges, s.system, s.conns, s.dhcpLeases, s.dhcpNetworks,
-		s.wan, s.capsman, s.ppp, s.routing, s.ifStatus,
+		s.wan, s.capsman, s.ppp, s.routing, s.ifStatus, s.topology, s.vpn,
 
 		// ── SHARED READS ONLY: these still poll ──────────────────────────────
 		//
@@ -864,7 +864,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// held off the scheduler by a recorded obstacle -- see
 		// `internal/verify/scheduled_test.go`, which refuses an entry with no
 		// reason and prints the count on every run.
-		s.wifi, s.wireless, s.topology, s.vlans, s.vpn,
+		s.wifi, s.wireless, s.vlans,
 	} {
 		c.UseCache(s.roscache)
 	}

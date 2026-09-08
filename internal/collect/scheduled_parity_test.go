@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -180,53 +181,117 @@ var _ = time.Second
 // MEASUREMENT from /interface/monitor-traffic, and the subscription plus its
 // apply read /interface, /ip/address and /interface/ethernet. Disjoint.
 func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
-	// The loop half: Tick with a cache present reads only what the subscription
-	// does not.
+	cases := []struct {
+		name string
+		// subscribed is the menu the scheduler fetches for this collector.
+		subscribed string
+		// loopSide drives the residual timer; subSide drives the subscription's
+		// callback. Each is given its own recorder.
+		loopSide func(Reader, *roscache.Cache)
+		subSide  func(Reader, *roscache.Cache)
+	}{
+		{
+			name: "ifStatus", subscribed: ifStatusIfCmd.Path,
+			loopSide: func(r Reader, c *roscache.Cache) {
+				x := NewIfStatus(r, func(string, string, any) {}, "r1", 1000)
+				x.UseCache(c)
+				// PRIMED FIRST, and the priming is part of the behaviour: with no
+				// metadata there is nothing to attach a rate to, so Tick correctly
+				// does nothing. The recorder is cleared after, so what remains is
+				// the loop's own reads.
+				x.applyMeta([]routeros.Reply{{"name": "ether1", "disabled": "false"}}, nil)
+				if rec, ok := r.(*menuRecorder); ok {
+					rec.reset()
+				}
+				x.Tick()
+			},
+			subSide: func(r Reader, c *roscache.Cache) {
+				x := NewIfStatus(r, func(string, string, any) {}, "r1", 1000)
+				x.UseCache(c)
+				x.applyMeta([]routeros.Reply{{"name": "ether1"}}, nil)
+			},
+		},
+		{
+			name: "vpn", subscribed: vpnPppCmd.Path,
+			loopSide: func(r Reader, c *roscache.Cache) {
+				x := NewVPN(r, func(string, string, any) {}, 10000)
+				x.UseCache(c)
+				x.RefreshNow()
+			},
+			subSide: func(r Reader, c *roscache.Cache) {
+				x := NewVPN(r, func(string, string, any) {}, 10000)
+				x.UseCache(c)
+				x.apply([]routeros.Reply{{"name": "peer1"}}, nil)
+			},
+		},
+	}
+
+	// ── THE TABLE MUST COVER EVERY RESIDUAL COLLECTOR ───────────────────────
 	//
-	// PRIMED FIRST, and the priming is itself part of the behaviour: with no
-	// metadata there is nothing to attach a rate to, so Tick correctly does
-	// nothing. The recorder is cleared after priming so what remains is the
-	// loop's own reads and only those.
-	loopSide := &menuRecorder{}
-	is := NewIfStatus(loopSide, func(string, string, any) {}, "r1", 1000)
-	is.UseCache(roscache.New(loopSide))
-	is.applyMeta([]routeros.Reply{{"name": "ether1", "disabled": "false"}}, nil)
-	loopSide.reset()
-	is.Tick()
-
-	// The subscription half: applyMeta, given rows, reads the rest itself.
-	subSide := &menuRecorder{}
-	is2 := NewIfStatus(subSide, func(string, string, any) {}, "r1", 1000)
-	is2.UseCache(roscache.New(subSide))
-	is2.applyMeta([]routeros.Reply{{"name": "ether1"}}, nil)
-
-	// Plus the menu the scheduler fetches on its behalf.
-	subSide.mu.Lock()
-	if subSide.seen == nil {
-		subSide.seen = map[string]bool{}
+	// Finding them by source rather than trusting the table: a collector that
+	// gains `residual: true` without an entry here would run two clocks with
+	// nothing checking they stay apart, which is the failure this test exists
+	// for. `vpn` was exactly that for one commit.
+	covered := map[string]bool{}
+	for _, tc := range cases {
+		covered[strings.ToLower(tc.name)] = true
 	}
-	subSide.seen[ifStatusIfCmd.Path] = true
-	subSide.mu.Unlock()
-
-	loopSide.mu.Lock()
-	overlap := []string{}
-	for menu := range loopSide.seen {
-		subSide.mu.Lock()
-		if subSide.seen[menu] {
-			overlap = append(overlap, menu)
+	ents, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading internal/collect: %v", err)
+	}
+	for _, e := range ents {
+		n := e.Name()
+		if !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
 		}
-		subSide.mu.Unlock()
+		b, err := os.ReadFile(n)
+		if err != nil || !strings.Contains(string(b), "residual: true") {
+			continue
+		}
+		if !covered[strings.TrimSuffix(n, ".go")] {
+			t.Errorf("%s sets residual:true and has no case here. It runs two clocks with "+
+				"nothing checking they read different menus.", n)
+		}
 	}
-	loopSide.mu.Unlock()
-	sort.Strings(overlap)
 
-	if len(overlap) > 0 {
-		t.Errorf("ifStatus's residual loop and its subscription both read %v. Two clocks on one "+
-			"menu is the 3.2 bug: one decides it is due, the other decides it is fresh, and it "+
-			"refreshes at half its cadence while every read looks ordinary.", overlap)
-	}
-	if len(loopSide.seen) == 0 {
-		t.Error("the residual loop read nothing at all — with a cache present it must still " +
-			"drive the rates measurement, which is the whole of mechanism A")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			loop := &menuRecorder{}
+			tc.loopSide(loop, roscache.New(loop))
+
+			sub := &menuRecorder{}
+			tc.subSide(sub, roscache.New(sub))
+			// Plus the menu the scheduler fetches on its behalf.
+			sub.mu.Lock()
+			if sub.seen == nil {
+				sub.seen = map[string]bool{}
+			}
+			sub.seen[tc.subscribed] = true
+			sub.mu.Unlock()
+
+			overlap := loop.minus(&menuRecorder{})
+			var shared []string
+			for _, m := range overlap {
+				sub.mu.Lock()
+				if sub.seen[m] {
+					shared = append(shared, m)
+				}
+				sub.mu.Unlock()
+			}
+			sort.Strings(shared)
+
+			if len(shared) > 0 {
+				t.Errorf("%s's residual loop and its subscription both read %v. Two clocks on "+
+					"one menu is the 3.2 bug: one decides it is due, the other decides it is "+
+					"fresh, and it refreshes at half its cadence while every read looks "+
+					"ordinary.", tc.name, shared)
+			}
+			if len(overlap) == 0 {
+				t.Errorf("%s's residual loop read nothing — with a cache present it must still "+
+					"drive the half that cannot be scheduled, which is the whole of mechanism A",
+					tc.name)
+			}
+		})
 	}
 }
