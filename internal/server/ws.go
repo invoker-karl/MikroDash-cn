@@ -1317,14 +1317,32 @@ func (cn *conn) dropTraffic() {
 	cn.trafficIf = ""
 }
 
-// suspendConnsIfIdle stops the connection-table read only when NEITHER page that
-// depends on it has a viewer.
+// suspendConnsIfIdle stops the connection-table read only when NOTHING that
+// depends on it has a viewer: either page, or the dashboard's card.
 //
-// Two consumers, one read: suspending it because one page closed would blank the
-// other. The hub's room occupancy is the authority on who is still looking.
+// Two pages, one read: suspending it because one closed would blank the other.
+// The hub's room occupancy is the authority on who is still looking.
+//
+// ── THE CARD ROOM WAS MISSING, AND IT WAS THE REPORTED BUG ──────────────────
+//
+// This listed the two PAGE rooms and not `dash-card-connections`, which
+// `connections.go` emits to on every payload. So: open Connections or Bandwidth,
+// go back to the dashboard, and one idle grace later the timer re-read two empty
+// page rooms and suspended the collector with a viewer watching the card. The
+// emits stopped and the card went stale about twenty seconds after that. It
+// healed on the next visit to the dashboard, which is why it looked intermittent.
+//
+// Latent since the cutover: the emit string and this room list were written in
+// the same commit and never agreed. Two things let it survive that long. The
+// header on `suspendIfNoRoomOccupied` NAMED this collector's card as a reason
+// the helper exists, so the code read as if it were covered. And the audit
+// written for exactly this defect class only ever inspected DIRECT suspends, so
+// wrapping the call in this helper put it out of reach. Both are fixed;
+// `TestGuardedSuspendCoversEveryDashboardRoom` is the half that was missing.
 func (s *Server) suspendConnsIfIdle(rs *session.Session, routerID string) {
 	s.suspendIfNoRoomOccupied(rs, routerID,
-		[]string{"page-connections", "page-bandwidth"}, rs.Conns().Suspend)
+		[]string{"page-connections", "page-bandwidth", "dash-card-connections"},
+		rs.Conns().Suspend)
 }
 
 // suspendIfNoRoomOccupied stops a collector only when EVERY room it emits to is
@@ -1333,9 +1351,15 @@ func (s *Server) suspendConnsIfIdle(rs *session.Session, routerID string) {
 // ── THE DEFECT THIS GENERALISES ─────────────────────────────────────────────
 //
 // A collector that feeds more than one room must not be suspended because ONE of
-// them emptied. `conns` had this guard from the start — it feeds the Connections
-// page and the dashboard's connections card — and two collectors that need it
-// just as much did not:
+// them emptied. `conns` was wired through this helper from the start and two
+// collectors that need it just as much were not:
+//
+// THIS PARAGRAPH USED TO SAY `conns` FED "the Connections page and the
+// dashboard's connections card", offered as the example the helper was built
+// for. It was wrong in the one way that mattered: the call passed the two PAGE
+// rooms and never the card. A comment naming the case it does not implement is
+// worse than no comment, because it is what a reader checks INSTEAD of the code.
+// See suspendConnsIfIdle for what that cost.
 //
 //	dhcpNetworks  page-dhcp, dash-card-network, AND the router-wide room
 //	              (`lan:wan`, the WAN chip on every page)

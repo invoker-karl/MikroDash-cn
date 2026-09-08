@@ -218,3 +218,124 @@ func sorted(m map[string]bool) []string {
 	}
 	return out
 }
+
+// TestGuardedSuspendCoversEveryDashboardRoom is the half of the blur-suspend
+// audit that was missing, and it was missing in the shape that let a real bug
+// through for the whole life of this port.
+//
+// ── WHAT TestBlurSuspendGuards CANNOT SEE ───────────────────────────────────
+//
+// That test matches `cn.rsession.X().Suspend()` inside pageBlur and objects when
+// a multi-room collector is suspended DIRECTLY. It says nothing at all about the
+// guarded form: once a call is written as `suspendIfNoRoomOccupied(...)` it is
+// accepted without anybody checking WHICH rooms were passed. So the audit
+// written for this defect class approved a guard that omitted the very room the
+// guard exists to protect.
+//
+// `suspendConnsIfIdle` passed `page-connections` and `page-bandwidth` and not
+// `dash-card-connections`, while `connections.go` emits to
+// `page-connections,dash-card-connections`. Return to the dashboard from either
+// of those pages and, one idle grace later, the collector was suspended with a
+// viewer still watching the card — which is exactly what the operator saw.
+//
+// ── THE PROPERTY ────────────────────────────────────────────────────────────
+//
+// Every `dash-card-*` room a collector emits to must appear in the room list of
+// every guarded suspend of that collector. That is the rule `suspendIfNoRoomOccupied`'s
+// own header states — "a `dash-card-*` room emptying is not [what triggers a
+// blur], so it must be TESTED rather than assumed" — asserted rather than
+// described.
+//
+// TWO KINDS OF ROOM ARE DELIBERATELY NOT REQUIRED, and both are judgements
+// recorded at their call sites rather than omissions:
+//
+//	the router-wide room  every viewer of the router occupies it, so testing it
+//	                      would mean never suspending at all (see the `dhcp` case)
+//	page rooms            the blur case IS the page room, so it is already known
+//	                      empty by the time the guard is called
+//
+// The whole of ws.go is scanned rather than just pageBlur's body, because the
+// conns guard lives in a helper — which is precisely how it escaped the first
+// audit.
+func TestGuardedSuspendCoversEveryDashboardRoom(t *testing.T) {
+	root := repoRoot(t)
+	wsSrc := mustRead(t, filepath.Join(root, "internal", "server", "ws.go"))
+
+	roomsByFile := collectorRooms(t, filepath.Join(root, "internal", "collect"))
+	fileOfType := suspendReceivers(t, filepath.Join(root, "internal", "collect"), roomsByFile)
+	typeOfAccessor := sessionAccessors(t, mustRead(t, filepath.Join(root, "internal", "session", "session.go")))
+
+	// Both spellings of the receiver: `cn.rsession` in a pageBlur case, `rs` in a
+	// helper on Server. A third spelling would go unchecked, so the count guard
+	// at the bottom is what keeps that from being silent.
+	guarded := regexp.MustCompile(
+		`(?s)suspendIfNoRoomOccupied\(.*?\[\]string\{(.*?)\},\s*(?:cn\.rsession|rs)\.(\w+)\(\)\.Suspend\)`)
+	quoted := regexp.MustCompile(`"([^"]*)"`)
+
+	resolved, withCards := 0, 0
+	for _, m := range guarded.FindAllStringSubmatch(wsSrc, -1) {
+		listed := map[string]bool{}
+		for _, q := range quoted.FindAllStringSubmatch(m[1], -1) {
+			listed[q[1]] = true
+		}
+		acc := m[2]
+		typ, ok := typeOfAccessor[acc]
+		if !ok {
+			continue
+		}
+		file, ok := fileOfType[typ]
+		if !ok {
+			continue
+		}
+		resolved++
+
+		var missing []string
+		cards := 0
+		for room := range roomsByFile[file] {
+			if !strings.HasPrefix(room, "dash-card-") {
+				continue
+			}
+			cards++
+			if !listed[room] {
+				missing = append(missing, room)
+			}
+		}
+		if cards > 0 {
+			withCards++
+		}
+		if len(missing) > 0 {
+			t.Errorf("the guarded suspend of %s() passes %v, which does not cover %v — "+
+				"%s emits there and a page blur says nothing about whether the CARD is still "+
+				"watching. One idle grace later the collector stops with a viewer on the "+
+				"dashboard.", acc, sorted(listed), sorted(setOf(missing)), file)
+		}
+	}
+
+	// ── THE TEST MUST PROVE ITS OWN DATA IS REAL ────────────────────────────
+	//
+	// Covering every card room is the PASSING state, so on a clean run the
+	// failure branch never fires and a broken scan would look identical to a
+	// clean repository. These two make a pass mean something: the call shape
+	// still matches, and at least some of what was matched actually had a card
+	// room to cover.
+	if resolved < 5 {
+		t.Fatalf("only %d guarded suspends resolved to a collector; ws.go has at least six, so "+
+			"the call-shape match or the accessor chain has broken and this test checks nothing",
+			resolved)
+	}
+	if withCards < 4 {
+		t.Fatalf("only %d of the guarded suspends were read as protecting a dash-card room; "+
+			"there are at least five, so the emit-reading has stopped matching", withCards)
+	}
+	t.Logf("%d guarded suspends resolved, %d protecting a dashboard card", resolved, withCards)
+}
+
+// setOf is the inverse of the room maps this file reads: a slice back to a set,
+// so the failure message can reuse `sorted`.
+func setOf(v []string) map[string]bool {
+	out := make(map[string]bool, len(v))
+	for _, s := range v {
+		out[s] = true
+	}
+	return out
+}
