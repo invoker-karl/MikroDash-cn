@@ -42,6 +42,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"mikrodash/internal/routeros"
 )
 
 // Demand is one menu's live demand.
@@ -62,6 +64,11 @@ type subscription struct {
 	fields   []string
 	allField bool
 	cadence  time.Duration
+	// onRows is fired by the scheduler after it refreshes this menu. Nil for a
+	// subscriber that only wants to keep the menu in the active set -- declaring
+	// demand and consuming a result are separate things, and a view that renders
+	// from another view's output needs the first without the second.
+	onRows func([]routeros.Reply, error)
 }
 
 // Subscribe registers demand for a menu and returns the release for it.
@@ -74,7 +81,8 @@ type subscription struct {
 // of my own": it never shortens the menu's cadence, so a consumer that just wants
 // whatever others keep fresh can say so. That mirrors the zero TTL rule at
 // `dhcpLeases`' call site in internal/collect.
-func (c *Cache) Subscribe(menu string, fields []string, cadence time.Duration) (release func()) {
+func (c *Cache) Subscribe(menu string, fields []string, cadence time.Duration,
+	onRows func([]routeros.Reply, error)) (release func()) {
 	c.demandMu.Lock()
 	defer c.demandMu.Unlock()
 
@@ -90,6 +98,7 @@ func (c *Cache) Subscribe(menu string, fields []string, cadence time.Duration) (
 		fields:   append([]string(nil), fields...),
 		allField: len(fields) == 0,
 		cadence:  cadence,
+		onRows:   onRows,
 	}
 
 	var once sync.Once
