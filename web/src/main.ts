@@ -20,7 +20,9 @@ import { initNav, navAutoExpand } from './nav';
 import { initKeyboard } from './keyboard';
 import { initCaps, applyPageVisibility, settingsAllowed, refreshCaps, mayManagePrincipals } from './caps';
 import { wireAccount } from './account';
-import { setRosBanner, onSocketConnect, onSocketDisconnect, initClock } from './banners';
+import {
+  setRosBanner, onSocketConnect, onSocketDisconnect, initClock, initDiagramVisibility,
+} from './banners';
 import { wireModals } from './modals';
 import {
   clearDashboardData, resetStaleTimers, notePayload, startStaleSweep, cardsForEvent,
@@ -265,6 +267,11 @@ function wireNav(socket: Socket): void {
  * permanently and left a live-looking UI over dead data.
  */
 function wireBanners(socket: Socket): void {
+  // The flow diagram's third trigger. The two socket handlers below can only
+  // resume it while the tab is visible, so the return from a background tab has
+  // to be a trigger of its own or an outage that ended while hidden leaves the
+  // SVG paused for good. See banners.ts.
+  initDiagramVisibility();
   socket.on('connect', onSocketConnect);
   socket.on('disconnect', onSocketDisconnect);
   // A REFUSED HANDSHAKE, which is a different event from a dropped connection:

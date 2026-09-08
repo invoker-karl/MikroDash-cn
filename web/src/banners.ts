@@ -39,6 +39,7 @@ import { el } from './dom.js';
 import { getDisplayTimezone } from './caps.js';
 
 let rosDisconnected = false;
+let socketDown = false;
 
 interface SvgAnimations extends HTMLElement {
   pauseAnimations?: () => void;
@@ -50,12 +51,47 @@ interface SvgAnimations extends HTMLElement {
 function pauseDiagram(): void {
   (el('netDiagram') as SvgAnimations | null)?.pauseAnimations?.();
 }
-/** Only when BOTH the socket and the router are back, and the tab is visible —
- *  resuming an animation nobody is looking at is work for nothing. */
+/**
+ * Only when BOTH the socket and the router are back, and the tab is visible —
+ * resuming an animation nobody is looking at is work for nothing.
+ *
+ * `socketDown` IS PART OF THE CONDITION, not decoration. This comment claimed
+ * "both" while the test was `rosDisconnected` alone, so a resume driven by the
+ * tab coming back (below) would have unpaused a diagram whose socket was still
+ * down. The CSS hides the dots then, so nothing would have been visible — which
+ * is exactly the kind of accidental cover that turns into a bug the moment the
+ * rule changes.
+ */
 function resumeDiagram(): void {
-  if (rosDisconnected || document.hidden) return;
+  if (rosDisconnected || socketDown || document.hidden) return;
   (el('netDiagram') as SvgAnimations | null)?.unpauseAnimations?.();
 }
+
+/**
+ * The tab going away and coming back — the THIRD thing that moves the diagram,
+ * and leaving it out is what made the card stop for good.
+ *
+ * Every resume above is refused while `document.hidden`, and until this existed
+ * nothing retried one. So a router or socket outage that ENDED while the tab was
+ * in the background left the SVG timeline paused with no remaining trigger: the
+ * banners came down, the body classes came off, the dots became visible again —
+ * and stood still, on a dashboard reporting a healthy router. The operator's
+ * report ("sometimes the animation stops") is that state, and a background tab
+ * is where it is reached, because `socket.ts` reconnects on a backoff timer that
+ * keeps firing while hidden.
+ *
+ * The live app paired the `document.hidden` guard with exactly this handler
+ * (`public/app.js:2349` at v0.7.40); this port kept the guard and dropped the
+ * handler. Pausing on hide is the other half and is kept for the same reason it
+ * was written: a hidden tab should not be animating.
+ */
+export function initDiagramVisibility(): void {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) pauseDiagram();
+    else resumeDiagram();
+  });
+}
+
 /** The live rates are the most obviously wrong thing to leave standing: a number
  *  that stopped updating looks exactly like a number that stopped changing. */
 function blankRates(): void {
@@ -98,6 +134,7 @@ export function setRosBanner(connected: boolean, reason?: string | null): void {
 }
 
 export function onSocketDisconnect(): void {
+  socketDown = true;
   el('reconnectBanner')?.classList.add('show');
   // The amber one comes DOWN: the red one outranks it, and two banners stacked
   // is worse than either alone.
@@ -108,6 +145,7 @@ export function onSocketDisconnect(): void {
 }
 
 export function onSocketConnect(): void {
+  socketDown = false;
   el('reconnectBanner')?.classList.remove('show');
   document.body.classList.remove('is-disconnected');
   // The router may still be down. Restore the amber banner from the remembered
