@@ -145,13 +145,13 @@ func (n *Netwatch) Tick() {
 	}
 
 	n.mu.Lock()
+	hosts := BuildNetwatch(rows)
+	// The by-id map and its order are kept because `Hosts()` serves them to the
+	// alert wiring; the derivation above no longer depends on them.
 	clear(n.hosts)
 	n.order = n.order[:0]
 	for _, r := range rows {
-		id := r[".id"]
-		if id == "" {
-			id = r["id"]
-		}
+		id := netwatchID(r)
 		if id == "" {
 			continue
 		}
@@ -159,13 +159,6 @@ func (n *Netwatch) Tick() {
 			n.order = append(n.order, id)
 		}
 		n.hosts[id] = r
-	}
-
-	hosts := make([]NetwatchHost, 0, len(n.order))
-	for _, id := range n.order {
-		if r, ok := n.hosts[id]; ok {
-			hosts = append(hosts, normaliseNetwatch(r))
-		}
 	}
 
 	// ONLY id AND status. See the package note: a rename is invisible here on
@@ -213,4 +206,38 @@ func (n *Netwatch) Stop() {
 	n.mu.Lock()
 	n.lastFP = ""
 	n.mu.Unlock()
+}
+
+// netwatchID is the row's identity. RouterOS answers `.id` on the API and `id`
+// through some paths, and a row with neither cannot be tracked at all.
+func netwatchID(r routeros.Reply) string {
+	if id := r[".id"]; id != "" {
+		return id
+	}
+	return r["id"]
+}
+
+// BuildNetwatch turns the netwatch rows into the host list.
+//
+// Phase 4.1: no receiver, no I/O. ORDER-PRESERVING DEDUPLICATION BY ID, matching
+// what the collector did inline: a repeated id keeps the last row's values and
+// the first row's position.
+func BuildNetwatch(rows []routeros.Reply) []NetwatchHost {
+	order := make([]string, 0, len(rows))
+	byID := make(map[string]routeros.Reply, len(rows))
+	for _, r := range rows {
+		id := netwatchID(r)
+		if id == "" {
+			continue
+		}
+		if _, seen := byID[id]; !seen {
+			order = append(order, id)
+		}
+		byID[id] = r
+	}
+	hosts := make([]NetwatchHost, 0, len(order))
+	for _, id := range order {
+		hosts = append(hosts, normaliseNetwatch(byID[id]))
+	}
+	return hosts
 }

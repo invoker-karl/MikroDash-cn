@@ -249,6 +249,16 @@ func (d *DHCPLeases) forget(ip, mac string) {
 // first seen in. An unstable sort would reshuffle the filter between ticks for
 // no reason the operator could see.
 func (d *DHCPLeases) serverSummary(leases []Lease) []LeaseServer {
+	return buildLeaseServers(leases, d.server)
+}
+
+// buildLeaseServers groups the leases by DHCP server, in first-seen order,
+// annotated from the server map.
+//
+// Phase 4.1: no receiver, no I/O. The server map arrives as an argument for the
+// same reason prior state does elsewhere -- everything the result depends on is
+// passed in, so this can be checked by handing it two maps.
+func buildLeaseServers(leases []Lease, servers map[string]serverMeta) []LeaseServer {
 	counts := map[string]int{}
 	var names []string // first-seen order, which the counts map cannot keep
 	for _, l := range leases {
@@ -262,7 +272,7 @@ func (d *DHCPLeases) serverSummary(leases []Lease) []LeaseServer {
 	}
 	out := make([]LeaseServer, 0, len(names))
 	for _, n := range names {
-		meta := d.server[n]
+		meta := servers[n]
 		out = append(out, LeaseServer{
 			Name: n, Iface: meta.iface, VlanID: meta.vlanID, Count: counts[n]})
 	}
@@ -272,16 +282,33 @@ func (d *DHCPLeases) serverSummary(leases []Lease) []LeaseServer {
 
 // build assembles the payload. The caller holds the lock.
 func (d *DHCPLeases) build() *LeasesPayload {
-	leases := make([]Lease, 0, len(d.order))
-	for _, ip := range d.order {
-		if l, ok := d.byIP[ip]; ok {
+	return BuildLeases(d.order, d.byIP, d.server, time.Now())
+}
+
+// BuildLeases assembles the leases payload from the table the collector keeps.
+//
+// Phase 4.1, and this one is shaped by what the collector actually is. The other
+// derivations take rows and return a payload; this table is built INCREMENTALLY,
+// because the listen stream applies one lease at a time, so the accumulated state
+// IS the input. Passing it in rather than reaching for a receiver is the same
+// rule as everywhere else -- everything the result depends on arrives as an
+// argument, including the clock.
+//
+// `order` and `byIP` are read and never written, so a caller cannot have its
+// table quietly rearranged by rendering it.
+func BuildLeases(order []string, byIP map[string]Lease,
+	servers map[string]serverMeta, now time.Time) *LeasesPayload {
+
+	leases := make([]Lease, 0, len(order))
+	for _, ip := range order {
+		if l, ok := byIP[ip]; ok {
 			leases = append(leases, l)
 		}
 	}
 	return &LeasesPayload{
-		TS:      time.Now().UnixMilli(),
+		TS:      now.UnixMilli(),
 		Leases:  leases,
-		Servers: d.serverSummary(leases),
+		Servers: buildLeaseServers(leases, servers),
 	}
 }
 

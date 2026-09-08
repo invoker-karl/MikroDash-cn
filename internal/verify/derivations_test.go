@@ -51,6 +51,8 @@ func TestEveryCollectorDeclaresItsDerivation(t *testing.T) {
 		"ifstatus.go":    "BuildIfStatus",
 		"queues.go":      "BuildQueueRows",
 		"rosusers.go":    "BuildUsersView",
+		"ppp.go":         "ParsePPPSessions",
+		"system.go":      "buildSystem",
 		"talkers.go":     "BuildTalkers",
 		"topology.go":    "BuildTopology",
 		"vlans.go":       "BuildVlanRows",
@@ -71,19 +73,21 @@ func TestEveryCollectorDeclaresItsDerivation(t *testing.T) {
 		"ping.go":    "",
 		"traffic.go": "",
 
-		// ── still to do ──
-		"dhcpleases.go":   "",
-		"dhcpnetworks.go": "",
-		"firewall.go":     "",
-		"netwatch.go":     "",
-		"ppp.go":          "",
-		"system.go":       "",
+		"dhcpleases.go":   "BuildLeases,buildLeaseServers",
+		"dhcpnetworks.go": "BuildLanOverview",
+		"firewall.go":     "BuildFirewallRule",
+		"netwatch.go":     "BuildNetwatch",
 	}
 
 	// A collector is a file declaring Start(). Derived rather than listed, so a
 	// new one joins by existing.
 	start := regexp.MustCompile(`(?m)^func \([a-z]+ \*[A-Z]\w*\) Start\(\)`)
-	fn := regexp.MustCompile(`(?m)^func ([A-Z]\w*)\(`)
+	// EXPORTED OR NOT. A derivation being package-level is what makes it callable
+	// from a test without a collector; being exported is a separate question
+	// about who outside this package needs it. Requiring a capital was a third
+	// mis-measurement in the same afternoon -- it hid `buildSystem`, which is
+	// exactly the shape this phase is asking for.
+	fn := regexp.MustCompile(`(?m)^func ([a-zA-Z]\w*)\(`)
 
 	files := collectGoFiles(t, dir)
 
@@ -140,7 +144,7 @@ func TestEveryCollectorDeclaresItsDerivation(t *testing.T) {
 		t.Fatalf("counted %d extracted and %d pending against %d collectors; the scan and the "+
 			"ledger disagree", extracted, pending, len(collectors))
 	}
-	if extracted < 10 {
+	if extracted < 20 {
 		t.Fatalf("only %d derivations resolved; the function scan has stopped matching and "+
 			"this ledger checks nothing", extracted)
 	}

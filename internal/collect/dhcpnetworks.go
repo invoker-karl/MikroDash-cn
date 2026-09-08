@@ -270,38 +270,6 @@ func (d *DHCPNetworks) Tick() {
 	poolRows := d.read(dhcpPoolCmd)
 	detectRows := d.read(dhcpDetectCmd)
 
-	// An interface reaches the internet if detect-internet says so; its address
-	// is the first ENABLED one on that interface, or none.
-	internet := make([]InternetIface, 0, len(detectRows))
-	for _, r := range detectRows {
-		if r["state"] != "internet" {
-			continue
-		}
-		name := r["name"]
-		if name == "" {
-			name = r["interface"]
-		}
-		ip := ""
-		for _, a := range addrRows {
-			if a["interface"] == name && a["disabled"] != "true" {
-				ip = a["address"]
-				break
-			}
-		}
-		internet = append(internet, InternetIface{Name: name, IP: ip})
-	}
-
-	// The WAN address is the first one on the named interface, enabled or not —
-	// the original does not filter here, and a disabled WAN address still tells
-	// the connections map where it is.
-	wanIP := ""
-	for _, a := range addrRows {
-		if a["interface"] == d.wanIface && a["address"] != "" {
-			wanIP = a["address"]
-			break
-		}
-	}
-
 	var leaseIPs []string
 	if d.leases != nil {
 		// USED addresses, not every row. A `waiting` lease is a static
@@ -310,64 +278,11 @@ func (d *DHCPNetworks) Tick() {
 		leaseIPs = d.leases.UsedLeaseIPs()
 	}
 
-	var cidrs []string
-	networks := make([]Network, 0, len(netRows))
-	for _, n := range netRows {
-		if n["address"] == "" {
-			continue
-		}
-		// THE NETWORK IS ALWAYS DISPLAYED; only `cidrs` is filtered. A catch-all
-		// entry is real configuration and belongs on the DHCP page.
-		if isLanCidr(n["address"]) {
-			cidrs = append(cidrs, n["address"])
-		}
-
-		leaseCount := 0
-		for _, ip := range leaseIPs {
-			if ipInCIDR(ip, n["address"]) {
-				leaseCount++
-			}
-		}
-		size := 0
-		for _, p := range poolRows {
-			if p["ranges"] == "" {
-				continue
-			}
-			if first := firstIPOfRange(p["ranges"]); first != "" && ipInCIDR(first, n["address"]) {
-				size += poolRangeSize(p["ranges"])
-			}
-		}
-		dns := n["dns-server"]
-		if dns == "" {
-			dns = n["dns"]
-		}
-		networks = append(networks, Network{
-			CIDR: n["address"], Gateway: n["gateway"], DNS: dns,
-			LeaseCount: leaseCount, PoolSize: size,
-		})
-	}
-
-	// Unique, in first-seen order — `Array.from(new Set(...))`.
-	seen := make(map[string]bool, len(cidrs))
-	lanCidrs := make([]string, 0, len(cidrs))
-	for _, c := range cidrs {
-		if !seen[c] {
-			seen[c] = true
-			lanCidrs = append(lanCidrs, c)
-		}
-	}
-
-	totalPool, totalLeases := 0, 0
-	for _, n := range networks {
-		totalPool += n.PoolSize
-		totalLeases += n.LeaseCount
-	}
-
-	payload := &LanPayload{
-		TS: time.Now().UnixMilli(), LanCidrs: lanCidrs, Networks: networks,
-		WanIP: wanIP, TotalPoolSize: totalPool, TotalLeases: totalLeases,
-		PollMs: d.pollMs.ms(), InternetIface: internet,
-	}
+	payload := BuildLanOverview(LanInput{
+		Nets: netRows, Addrs: addrRows, Pools: poolRows, Detect: detectRows,
+		LeaseIPs: leaseIPs, WanIface: d.wanIface, PollMs: d.pollMs.ms(), Now: time.Now(),
+	})
+	lanCidrs, wanIP, networks, internet := payload.LanCidrs, payload.WanIP, payload.Networks, payload.InternetIface
 
 	// The fingerprint covers the same subset the original hashes — the CIDRs, the
 	// WAN address, the internet interfaces, and each network's counts — so a
@@ -470,3 +385,119 @@ func (d *DHCPNetworks) SetPollMs(ms int) {
 // UseCache routes this collector's shareable reads through a per-router cache.
 // Set once, before Start; nil leaves every read direct.
 func (d *DHCPNetworks) UseCache(rc *roscache.Cache) { d.cache = rc }
+
+// LanInput is everything BuildLanOverview reads.
+type LanInput struct {
+	Nets   []routeros.Reply // /ip/dhcp-server/network
+	Addrs  []routeros.Reply // /ip/address
+	Pools  []routeros.Reply // /ip/pool
+	Detect []routeros.Reply // /interface/detect-internet/state
+	// LeaseIPs is the USED lease addresses, resolved by the caller. Passed in
+	// rather than fetched, because it comes from another collector and this
+	// function must not know that.
+	LeaseIPs []string
+	WanIface string
+	PollMs   int
+	Now      time.Time
+}
+
+// BuildLanOverview joins four menus and the lease list into the DHCP page's
+// subnet table and the dashboard's Network card.
+//
+// Phase 4.1: no receiver, no I/O. This is the largest derivation extracted so
+// far and it is entirely a function of its inputs -- no prior state, because
+// nothing here is a difference.
+func BuildLanOverview(in LanInput) *LanPayload {
+	// An interface reaches the internet if detect-internet says so; its address
+	// is the first ENABLED one on that interface, or none.
+	internet := make([]InternetIface, 0, len(in.Detect))
+	for _, r := range in.Detect {
+		if r["state"] != "internet" {
+			continue
+		}
+		name := r["name"]
+		if name == "" {
+			name = r["interface"]
+		}
+		ip := ""
+		for _, a := range in.Addrs {
+			if a["interface"] == name && a["disabled"] != "true" {
+				ip = a["address"]
+				break
+			}
+		}
+		internet = append(internet, InternetIface{Name: name, IP: ip})
+	}
+
+	// The WAN address is the first one on the named interface, enabled or not —
+	// the original does not filter here, and a disabled WAN address still tells
+	// the connections map where it is.
+	wanIP := ""
+	for _, a := range in.Addrs {
+		if a["interface"] == in.WanIface && a["address"] != "" {
+			wanIP = a["address"]
+			break
+		}
+	}
+
+	var cidrs []string
+	networks := make([]Network, 0, len(in.Nets))
+	for _, n := range in.Nets {
+		if n["address"] == "" {
+			continue
+		}
+		// THE NETWORK IS ALWAYS DISPLAYED; only `cidrs` is filtered. A catch-all
+		// entry is real configuration and belongs on the DHCP page.
+		if isLanCidr(n["address"]) {
+			cidrs = append(cidrs, n["address"])
+		}
+
+		leaseCount := 0
+		for _, ip := range in.LeaseIPs {
+			if ipInCIDR(ip, n["address"]) {
+				leaseCount++
+			}
+		}
+		size := 0
+		for _, p := range in.Pools {
+			if p["ranges"] == "" {
+				continue
+			}
+			if first := firstIPOfRange(p["ranges"]); first != "" && ipInCIDR(first, n["address"]) {
+				size += poolRangeSize(p["ranges"])
+			}
+		}
+		dns := n["dns-server"]
+		if dns == "" {
+			dns = n["dns"]
+		}
+		networks = append(networks, Network{
+			CIDR: n["address"], Gateway: n["gateway"], DNS: dns,
+			LeaseCount: leaseCount, PoolSize: size,
+		})
+	}
+
+	// Unique, in first-seen order — `Array.from(new Set(...))`.
+	seen := make(map[string]bool, len(cidrs))
+	lanCidrs := make([]string, 0, len(cidrs))
+	for _, c := range cidrs {
+		if !seen[c] {
+			seen[c] = true
+			lanCidrs = append(lanCidrs, c)
+		}
+	}
+
+	totalPool, totalLeases := 0, 0
+	for _, n := range networks {
+		totalPool += n.PoolSize
+		totalLeases += n.LeaseCount
+	}
+
+	payload := &LanPayload{
+		TS: in.Now.UnixMilli(), LanCidrs: lanCidrs, Networks: networks,
+		WanIP: wanIP, TotalPoolSize: totalPool, TotalLeases: totalLeases,
+		PollMs: in.PollMs, InternetIface: internet,
+	}
+
+	return payload
+}

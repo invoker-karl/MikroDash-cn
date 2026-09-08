@@ -183,18 +183,32 @@ func NewFirewall(ros Reader, emit Emit, pollMs int) *Firewall {
 // processRule turns one router row into a rule, and folds the packet delta in.
 //
 // `prev` is read and then WRITTEN, so the delta always spans one refresh.
+// processRule is the collector's half: derive, then store the new baseline.
 func (f *Firewall) processRule(table string, r routeros.Reply) FirewallRule {
+	rule, count := BuildFirewallRule(f.prevCounts, table, r)
+	if rule.ID != "" {
+		f.prevCounts[countKey(table, rule.ID)] = count
+	}
+	return rule
+}
+
+// BuildFirewallRule turns one row into a rule, and returns the counter baseline
+// the caller should remember for the next reading.
+//
+// Phase 4.1: no receiver, no I/O. PRIOR STATE IN, NEW STATE OUT -- the same shape
+// as BuildIfStatus and BuildBandwidth -- because `deltaPackets` is a difference
+// and a difference needs the previous reading. This function READS `prev` and
+// never writes it, so storing is the caller's decision and a derivation cannot
+// quietly advance a baseline the caller then discards.
+func BuildFirewallRule(prev map[string]fwCount, table string, r routeros.Reply) (FirewallRule, fwCount) {
 	id := r[".id"]
 	packets := pppInt(r["packets"])
 	bytes := pppInt(r["bytes"])
 	delta := 0
-	if prev, ok := f.prevCounts[countKey(table, id)]; ok {
-		if d := packets - prev.packets; d > 0 {
+	if p, ok := prev[countKey(table, id)]; ok {
+		if d := packets - p.packets; d > 0 {
 			delta = d
 		}
-	}
-	if id != "" {
-		f.prevCounts[countKey(table, id)] = fwCount{packets: packets, bytes: bytes}
 	}
 	action := r["action"]
 	if action == "" {
@@ -209,7 +223,7 @@ func (f *Firewall) processRule(table string, r routeros.Reply) FirewallRule {
 		Protocol: r["protocol"], DstPort: r["dst-port"], InInterface: r["in-interface"],
 		Packets: packets, Bytes: bytes, DeltaPackets: delta,
 		Disabled: boolOf(r["disabled"]), Dynamic: boolOf(r["dynamic"]),
-	}
+	}, fwCount{packets: packets, bytes: bytes}
 }
 
 // safeGet reads one table. A table the API user cannot see costs its rows, never

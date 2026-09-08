@@ -313,3 +313,67 @@ func TestBuildIfStatusRefusesToBuildFromNothing(t *testing.T) {
 		t.Errorf("no rows produced a payload: %v %v %v", base, snap, delta)
 	}
 }
+
+// TestBuildFirewallRuleReadsPriorAndReturnsNext pins the discipline that makes
+// the stateful derivations safe to extract: the function READS the prior
+// counters and never writes them, returning the new baseline for the caller to
+// store. A derivation that advanced the baseline itself would move it even when
+// the caller discarded the result.
+func TestBuildFirewallRuleReadsPriorAndReturnsNext(t *testing.T) {
+	prev := map[string]fwCount{}
+	row := routeros.Reply{".id": "*1", "chain": "input", "action": "accept", "packets": "100", "bytes": "9000"}
+
+	first, count := BuildFirewallRule(prev, "filter", row)
+	if first.DeltaPackets != 0 {
+		t.Errorf("first reading invented a delta: %d", first.DeltaPackets)
+	}
+	if len(prev) != 0 {
+		t.Errorf("the derivation wrote to the prior state it was handed: %v", prev)
+	}
+	if count.packets != 100 {
+		t.Errorf("returned baseline = %d packets, want 100", count.packets)
+	}
+
+	prev[countKey("filter", "*1")] = count
+	row["packets"] = "140"
+	second, _ := BuildFirewallRule(prev, "filter", row)
+	if second.DeltaPackets != 40 {
+		t.Errorf("delta = %d, want 40 (140 minus 100)", second.DeltaPackets)
+	}
+
+	// A COUNTER THAT WENT BACKWARDS is a rule recreated on the same id, not
+	// forty negative packets. The clamp is what stops the page showing one.
+	row["packets"] = "5"
+	third, _ := BuildFirewallRule(prev, "filter", row)
+	if third.DeltaPackets != 0 {
+		t.Errorf("a reset counter produced delta %d, want 0", third.DeltaPackets)
+	}
+}
+
+// TestBuildLanOverviewIsAFunctionOfItsInputs: the largest derivation extracted,
+// and it carries no state at all. Two identical calls must agree, and the lease
+// list it is handed must not be modified.
+func TestBuildLanOverviewIsAFunctionOfItsInputs(t *testing.T) {
+	in := LanInput{
+		Nets:     []routeros.Reply{{"address": "192.168.88.0/24", "gateway": "192.168.88.1"}},
+		Addrs:    []routeros.Reply{{"interface": "ether1", "address": "198.51.100.2/24"}},
+		LeaseIPs: []string{"192.168.88.10", "192.168.88.11"},
+		WanIface: "ether1",
+		Now:      time.Now(),
+	}
+	a := BuildLanOverview(in)
+	b := BuildLanOverview(in)
+
+	if len(in.LeaseIPs) != 2 {
+		t.Errorf("the lease list handed in was modified: %v", in.LeaseIPs)
+	}
+	if a.WanIP != "198.51.100.2/24" {
+		t.Errorf("WAN address = %q, want the address on the named interface", a.WanIP)
+	}
+	if len(a.Networks) != 1 || a.Networks[0].LeaseCount != 2 {
+		t.Errorf("lease count did not land on the subnet: %+v", a.Networks)
+	}
+	if len(a.Networks) != len(b.Networks) || a.WanIP != b.WanIP {
+		t.Errorf("two identical calls disagreed")
+	}
+}
