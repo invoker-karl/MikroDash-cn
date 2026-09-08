@@ -101,6 +101,14 @@ docker run --rm --network host -v "$PWD":/src -w /src -v /path/to/data:/data:ro 
 docker run --rm -v mikrodash_data:/data:ro -v "$PWD":/src -w /src \
   golang:1.25-alpine go run ./cmd/compat -data /data
 
+# A MEASUREMENT, not a gate, and READ-ONLY. What it would cost to stream every
+# interface instead of measuring rates per poll — Track B's B.0. It holds one
+# monitor channel open at each width and counts rows, bytes and router CPU, with
+# a no-channel control first. Run it TWICE: the CPU delta is noise, and one run
+# reads as a number.
+docker run --rm --network host -v "$PWD":/src -w /src -v mikrodash_data:/data:ro \
+  golang:1.25-alpine go run ./cmd/streamcost -data /data -router "<label>"
+
 # Corpora. Each `tools/*-cases.js` RAN or LIFTED the Node implementation to build
 # its corpus. That source is gone, so all 105 `--check` runs now SKIP and say so —
 # the corpora are frozen artefacts. NEVER retype what one of these generated: a
