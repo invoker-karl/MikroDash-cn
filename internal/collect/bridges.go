@@ -237,6 +237,9 @@ type Bridges struct {
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
+	// sched subscribes to the HOST table, this collector's live menu. See
+	// scheduled.go.
+	sched scheduled
 
 	poll *pollLoop
 
@@ -267,6 +270,9 @@ func NewBridges(ros Reader, emit Emit, rates RateSource, pollMs int) *Bridges {
 	b.poll = newPollLoop(func() { b.Tick() }, func() time.Duration {
 		return b.pollMs.duration()
 	})
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	b.sched = scheduled{loop: b.poll, menu: bridgeHostCmd.Path, apply: b.apply,
+		cadence: b.pollMs.duration}
 	return b
 }
 
@@ -320,8 +326,42 @@ func (b *Bridges) Tick() {
 		b.dirty = false
 	}
 	b.ticks++
-	hostRows := b.read(bridgeHostCmd, &b.hostAvailable)
+	b.applyLocked(b.read(bridgeHostCmd, &b.hostAvailable))
+}
 
+// apply is what the scheduler calls with the host table, which is this
+// collector's live menu: a MAC is learned or ages out with no configuration
+// change behind it. The bridge and port config keep their slow cadence here, as
+// before -- see scheduled.go on why a collector subscribes to ONE menu.
+func (b *Bridges) apply(rows []routeros.Reply, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err != nil {
+		// The latch `read` would have set. The host table is the one menu a
+		// read-only API user can be denied while the rest still answers, so this
+		// must keep latching on the scheduled path too.
+		if menuMissing(err) {
+			no := false
+			b.hostAvailable = &no
+		}
+		return
+	}
+	if b.hostAvailable == nil {
+		yes := true
+		b.hostAvailable = &yes
+	}
+	if b.dirty || b.ticks%bridgeConfigEvery == 0 {
+		b.cfgB = b.read(bridgeCmd, &b.bridgeAvailable)
+		b.cfgP = b.read(bridgePortCmd, &b.portAvailable)
+		b.dirty = false
+	}
+	b.ticks++
+	b.applyLocked(rows)
+}
+
+// applyLocked builds and emits. The caller holds the lock.
+func (b *Bridges) applyLocked(hostRows []routeros.Reply) {
 	built := BuildBridgeRows(b.cfgB, b.cfgP, hostRows, b.rates)
 	payload := &BridgesPayload{
 		TS: time.Now().UnixMilli(), PollMs: b.pollMs.ms(),
@@ -375,37 +415,46 @@ func (b *Bridges) RefreshNow() {
 	b.Tick()
 }
 
+// UseCache feeds BOTH halves: the shared-read cache from 1.4, and the
+// subscription. Same cache, two uses.
+func (b *Bridges) UseCache(rc *roscache.Cache) {
+	b.cache = rc
+	b.sched.useCache(rc)
+}
+
 func (b *Bridges) Start() {
-	if b.ros.Connected() {
+	if b.ros.Connected() && !b.sched.scheduling() {
 		b.Tick()
 	}
-	b.poll.start()
+	b.sched.begin()
 }
 
 // Reconnected drops every latch: a reconnect may be a different build, so an
 // "absent menu" decision taken against the old one must not persist.
 func (b *Bridges) Reconnected() {
-	b.poll.stop()
+	b.sched.end()
 	b.mu.Lock()
 	b.lastFp = ""
 	b.dirty = true
 	b.ticks = 0
 	b.bridgeAvailable, b.portAvailable, b.hostAvailable = nil, nil, nil
 	b.mu.Unlock()
-	b.Tick()
-	b.poll.start()
+	if !b.sched.scheduling() {
+		b.Tick()
+	}
+	b.sched.begin()
 }
 
-func (b *Bridges) Suspend() { b.poll.stop() }
+func (b *Bridges) Suspend() { b.sched.end() }
 
 func (b *Bridges) Resume() {
 	if b.ros.Connected() {
-		b.poll.start()
+		b.sched.begin()
 	}
 }
 
 func (b *Bridges) Stop() {
-	b.poll.stop()
+	b.sched.end()
 	b.mu.Lock()
 	b.lastFp = ""
 	b.mu.Unlock()
@@ -417,7 +466,3 @@ func (b *Bridges) SetPollMs(ms int) {
 	b.pollMs.set(ms)
 	b.poll.retime()
 }
-
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (b *Bridges) UseCache(rc *roscache.Cache) { b.cache = rc }
