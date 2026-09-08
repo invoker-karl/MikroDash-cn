@@ -296,6 +296,10 @@ func (p *Ping) startStream() {
 		return
 	}
 
+	// ── SET B: A STREAM ─────────────────────────────────────────────────────
+	// See acquisition.go. Parameterised by ADDRESS, so even the collector below
+	// that pings the same menu is not asking this question -- it asks about a
+	// different host. The menu alone was never the key.
 	sec := pingIntervalSec(p.pollMs.ms())
 	cmd := routeros.Cmd{Path: "/tool/ping", Args: []string{
 		"=address=" + p.target,

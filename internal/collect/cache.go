@@ -29,13 +29,18 @@ import (
 
 // readVia reads a command through the cache, or directly when there is none.
 //
-// ── ONLY PLAIN PROPLIST READS ARE CACHEABLE ─────────────────────────────────
+// ── ONLY TABLE READS ARE CACHEABLE ──────────────────────────────────────────
 //
 // A command carrying any argument other than a plain field list is passed
-// straight through. That is not caution for its own sake: an interval argument
-// makes it a STREAM, a once argument is a measurement taken now, and a query
-// argument asks a different question about the same menu. Caching any of them by
-// menu alone would hand one collector another's answer.
+// straight through. That is not caution for its own sake, and it is not really a
+// caching rule at all: an interval argument makes it a STREAM, a once argument a
+// MEASUREMENT taken at an instant, and a filter argument a narrower question
+// about the same menu. Caching any of them by menu alone would hand one
+// collector another's answer, to a question it did not ask, about a moment it
+// did not choose.
+//
+// `acquisition.go` is where that distinction is named and where its consequences
+// are set out. This helper is one of its two consumers.
 //
 // (The field-list prefix is deliberately not written out in this comment. The
 // credential gate in internal/verify scans source text for it and cannot tell
@@ -50,12 +55,27 @@ func readVia(c *roscache.Cache, ros Reader, cmd routeros.Cmd, ttl time.Duration)
 	return c.Get(cmd.Path, fields, ttl)
 }
 
-// cacheableFields returns the proplist fields, and whether this command may be
-// served from a by-menu cache at all.
+// cacheableFields returns the field list, and whether this command may be served
+// from a by-menu cache at all.
+//
+// TWO CONDITIONS, AND THEY ARE DIFFERENT QUESTIONS. The first is the SHAPE OF
+// THE DATA: only a Query is a table read, and only a table read has an answer
+// two consumers can share. See acquisition.go for why that is not a caching
+// detail but the thing being modelled. The second is narrower and merely
+// practical: even among queries, this cache keys by menu alone, so a command
+// carrying anything beyond a field list is asking a narrower question than its
+// menu name and must not be served a broader answer.
+//
+// `/interface/wireguard/peers` is the one live example of the second: a Query
+// that asks for full detail, so it is cacheable in principle and not by THIS
+// cache. It has one consumer, so nothing is lost.
 //
 // No args means "every field", which IS cacheable — as the widest possible
 // union. See roscache.Get.
 func cacheableFields(cmd routeros.Cmd) (fields []string, ok bool) {
+	if KindOf(cmd) != Query {
+		return nil, false
+	}
 	if len(cmd.Args) == 0 {
 		return nil, true
 	}

@@ -29,7 +29,9 @@ import (
 // Declared as a Cmd so the proplist drift gate can compare it against what
 // logs.js asks for. /log/listen carries no proplist — it pushes whole rows.
 var (
-	logPrintCmd  = routeros.Cmd{Path: "/log/print", Args: []string{"=.proplist=time,topics,message"}}
+	logPrintCmd = routeros.Cmd{Path: "/log/print", Args: []string{"=.proplist=time,topics,message"}}
+	// SET B: A STREAM, and the only one identified by its path rather than by an
+	// argument. See acquisition.go.
 	logListenCmd = routeros.Cmd{Path: "/log/listen"}
 )
 

@@ -1367,6 +1367,13 @@ func (t *Topology) pingNext() {
 	t.pingCursor = (t.pingCursor + 1) % len(targets)
 	t.mu.Unlock()
 
+	// ── SET B: A MEASUREMENT, AND THE ONE THAT SHOWS WHY THE COUNT MATTERS ──
+	//
+	// See acquisition.go. This carries an interval AND a count, and the count is
+	// what makes it a reading that ends rather than a channel that does not.
+	// `KindOf` reads the bound first for exactly this command: taking the
+	// interval as decisive would leave the app believing it holds an open stream
+	// it never opened.
 	rows, err := t.ros.Do(routeros.Cmd{Path: "/tool/ping", Args: []string{
 		"=address=" + tgt.ip, "=count=1", "=interval=1"}})
 	if err != nil {

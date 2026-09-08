@@ -465,6 +465,10 @@ func (t *Traffic) syncStream() {
 		return
 	}
 
+	// ── SET B: A STREAM ─────────────────────────────────────────────────────
+	// See acquisition.go. Same menu as ifStatus's measurement above, and a
+	// different question: an open channel the router pushes down, with no result
+	// to hold and no end to hold it until.
 	stop, err := s.Stream(routeros.Cmd{Path: "/interface/monitor-traffic", Args: []string{
 		"=interface=" + key, "=interval=1",
 		"=.proplist=name,rx-bits-per-second,tx-bits-per-second,running,disabled",

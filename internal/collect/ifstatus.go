@@ -306,6 +306,13 @@ func (s *IfStatus) rates(ifaces []routeros.Reply) map[string]Rate {
 	if len(names) == 0 {
 		return out
 	}
+	// ── SET B: A MEASUREMENT, NOT A QUERY ───────────────────────────────────
+	//
+	// See acquisition.go. The once argument makes this a reading taken at an
+	// instant, on a named set of interfaces -- so it has no cacheable answer,
+	// and none of phase 1 applies to it. It is also the most expensive single
+	// thing this app asks a router, at roughly 52 commands a minute, which is
+	// why the second track exists.
 	rows, err := s.ros.Do(routeros.Cmd{Path: "/interface/monitor-traffic", Args: []string{
 		"=interface=" + strings.Join(names, ","),
 		"=once=",
