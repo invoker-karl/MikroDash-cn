@@ -42,6 +42,26 @@ type scheduled struct {
 	// rather than panicking on a nil dereference in a timer goroutine.
 	loop *pollLoop
 
+	// residual makes the loop the OTHER HALF rather than the fallback.
+	//
+	// Set it when part of a collector cannot be scheduled: `begin` then
+	// subscribes AND starts the loop, and the loop drives only what the
+	// subscription does not. `ifStatus` is the case it exists for -- three
+	// metadata menus that schedule cleanly and a rates measurement that never
+	// can.
+	//
+	// ── THE RULE THAT MAKES IT SAFE ─────────────────────────────────────────
+	//
+	// THE LOOP MUST NOT READ A MENU THE SUBSCRIPTION READS. Two clocks driving
+	// different reads is fine; two clocks driving the SAME read is the shape that
+	// produced a real bug in 3.2, where the scheduler and Get each judged
+	// freshness and a menu refreshed at half its cadence.
+	//
+	// It is not enforceable from here -- this type cannot see what the loop's
+	// body does -- so it is enforced from outside, by
+	// TestResidualLoopsDoNotReadSubscribedMenus.
+	residual bool
+
 	menu    string
 	fields  []string
 	cadence func() time.Duration
@@ -70,6 +90,11 @@ func (s *scheduled) begin() {
 			s.loop.start()
 		}
 		return
+	}
+	// The other half, when there is one. Started before the subscription so a
+	// collector is never briefly scheduled-but-not-ticking.
+	if s.residual && s.loop != nil {
+		s.loop.start()
 	}
 	s.mu.Lock()
 	already := s.release != nil
@@ -110,6 +135,9 @@ func (s *scheduled) end() {
 			s.loop.stop()
 		}
 		return
+	}
+	if s.residual && s.loop != nil {
+		s.loop.stop()
 	}
 	s.mu.Lock()
 	rel := s.release

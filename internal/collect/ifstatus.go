@@ -227,6 +227,9 @@ type IfStatus struct {
 	// cache coalesces reads shared with another collector. Nil outside a live
 	// session, which is every test — see collect/cache.go.
 	cache *roscache.Cache
+	// sched subscribes the METADATA menus and keeps the loop as the residual half
+	// for the rates measurement. Mechanism A; see scheduled.go.
+	sched scheduled
 
 	poll *pollLoop
 
@@ -267,6 +270,18 @@ func NewIfStatus(ros Reader, emit Emit, routerID string, pollMs int) *IfStatus {
 	s.poll = newPollLoop(func() { s.Tick() }, func() time.Duration {
 		return s.pollMs.duration()
 	})
+	// MECHANISM A. The loop is not a fallback here, it is the other half: it
+	// drives the rates measurement, which is set B, while the subscription drives
+	// the three metadata menus. The two never read the same menu -- monitor-traffic
+	// against /interface, /ip/address and /interface/ethernet -- which is the rule
+	// that makes two clocks safe. See scheduled.go.
+	s.sched = scheduled{
+		loop: s.poll, residual: true,
+		menu: ifStatusIfCmd.Path, apply: s.applyMeta,
+		cadence: func() time.Duration {
+			return time.Duration(s.metaTicks()) * s.pollMs.duration()
+		},
+	}
 	return s
 }
 
@@ -385,11 +400,21 @@ func (s *IfStatus) Tick() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.base == nil || s.metaIn <= 0 {
-		s.refreshMeta()
-		s.metaIn = s.metaTicks()
+	// ── THE METADATA HALF IS THE SCHEDULER'S WHEN THERE IS ONE ──────────────
+	//
+	// Scheduled, this loop drives ONLY the rates measurement -- which is set B and
+	// can never be scheduled -- and the three metadata menus arrive through the
+	// subscription. Unscheduled, the countdown below is what paces them, exactly
+	// as before. See `residual` in scheduled.go, and the rule that the two halves
+	// must not read the same menu: they do not, monitor-traffic against the other
+	// three.
+	if !s.sched.scheduling() {
+		if s.base == nil || s.metaIn <= 0 {
+			s.refreshMeta()
+			s.metaIn = s.metaTicks()
+		}
+		s.metaIn--
 	}
-	s.metaIn--
 
 	if len(s.base) == 0 {
 		return // nothing to build from; do not publish an empty interface list
@@ -462,6 +487,18 @@ func (s *IfStatus) Tick() {
 // now keep flowing over one interval of slightly older metadata instead of the
 // page freezing entirely. The first read is the exception — there is nothing to
 // keep, and `base` staying nil is what makes Tick decline to publish.
+// applyMeta is what the scheduler calls with the interface rows. The addresses
+// and the ethernet counters are read here, as before -- see scheduled.go on why a
+// collector subscribes to ONE menu and reads the rest itself.
+func (s *IfStatus) applyMeta(ifRows []routeros.Reply, err error) {
+	if err != nil || len(ifRows) == 0 {
+		return // keep the previous metadata rather than blanking the page
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buildMeta(ifRows, s.read(ifStatusAddrCmd), s.read(ifStatusEthCmd))
+}
+
 func (s *IfStatus) refreshMeta() {
 	// THROUGH THE CACHE: `wan` reads this same menu with a proplist that is a
 	// strict subset of ours, so once either has fetched, the other costs nothing.
@@ -469,8 +506,11 @@ func (s *IfStatus) refreshMeta() {
 	// cache keeps the shortest any consumer asks for, so offering the poll here
 	// would pin the entry to a freshness this half no longer needs.
 	ifRows, _ := readVia(s.cache, s.ros, ifStatusIfCmd, time.Duration(s.metaTicks())*s.pollMs.duration())
-	addrRows := s.read(ifStatusAddrCmd)
-	ethRows := s.read(ifStatusEthCmd)
+	s.buildMeta(ifRows, s.read(ifStatusAddrCmd), s.read(ifStatusEthCmd))
+}
+
+// buildMeta derives and stores the metadata half. The caller holds the lock.
+func (s *IfStatus) buildMeta(ifRows, addrRows, ethRows []routeros.Reply) {
 	base, snap, delta := BuildIfStatus(s.prev, IfStatusInput{
 		Ifaces: ifRows, Addrs: addrRows, Eth: ethRows, Now: time.Now(),
 	})
@@ -665,14 +705,14 @@ func (s *IfStatus) Last() *IfStatusPayload {
 }
 
 func (s *IfStatus) Start() {
-	if s.ros.Connected() {
+	if s.ros.Connected() && !s.sched.scheduling() {
 		s.Tick()
 	}
-	s.poll.start()
+	s.sched.begin()
 }
 
 func (s *IfStatus) Reconnected() {
-	s.poll.stop()
+	s.sched.end()
 	s.mu.Lock()
 	s.lastFp, s.lastEmitAt = "", time.Time{}
 	// A reconnect may be a different router, and differencing a counter across
@@ -683,8 +723,10 @@ func (s *IfStatus) Reconnected() {
 	// connection that is gone. Nil is what makes the next tick re-read.
 	s.base, s.ifRows, s.metaIn = nil, nil, 0
 	s.mu.Unlock()
-	s.Tick()
-	s.poll.start()
+	if !s.sched.scheduling() {
+		s.Tick()
+	}
+	s.sched.begin()
 }
 
 // Suspend stops the poll, and ARMS the next metadata read.
@@ -695,7 +737,7 @@ func (s *IfStatus) Reconnected() {
 // worth keeping — they are the right shape and mostly still true — so this
 // re-reads them on the first tick back rather than blanking the page.
 func (s *IfStatus) Suspend() {
-	s.poll.stop()
+	s.sched.end()
 	s.mu.Lock()
 	s.metaIn = 0
 	s.mu.Unlock()
@@ -703,12 +745,12 @@ func (s *IfStatus) Suspend() {
 
 func (s *IfStatus) Resume() {
 	if s.ros.Connected() {
-		s.poll.start()
+		s.sched.begin()
 	}
 }
 
 func (s *IfStatus) Stop() {
-	s.poll.stop()
+	s.sched.end()
 	s.mu.Lock()
 	s.lastFp, s.lastEmitAt = "", time.Time{}
 	s.mu.Unlock()
@@ -741,6 +783,9 @@ func (i *IfStatus) SetPollMs(ms int) {
 	i.poll.retime()
 }
 
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (s *IfStatus) UseCache(c *roscache.Cache) { s.cache = c }
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+// Same cache, two uses.
+func (s *IfStatus) UseCache(c *roscache.Cache) {
+	s.cache = c
+	s.sched.useCache(c)
+}

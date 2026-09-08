@@ -136,6 +136,14 @@ func (m *menuRecorder) Stream(routeros.Cmd, func(routeros.Reply)) (func(), error
 	return func() {}, nil
 }
 
+// reset forgets what has been seen, so a test can prime a collector and then
+// observe only what it does next.
+func (m *menuRecorder) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.seen = map[string]bool{}
+}
+
 // minus returns the menus this recorder saw that the other did not.
 func (m *menuRecorder) minus(other *menuRecorder) []string {
 	m.mu.Lock()
@@ -155,3 +163,70 @@ func (m *menuRecorder) minus(other *menuRecorder) []string {
 
 var _ = strings.TrimSpace
 var _ = time.Second
+
+// TestResidualLoopsDoNotReadSubscribedMenus enforces the rule Mechanism A rests
+// on, which `scheduled` cannot enforce itself.
+//
+// ── WHY THE RULE EXISTS ─────────────────────────────────────────────────────
+//
+// A residual collector reads on TWO schedules: the subscription drives what can
+// be scheduled, the loop drives what cannot. That is safe only while they read
+// different menus. Two clocks driving the SAME read is exactly the shape that
+// produced a real bug in 3.2 -- the scheduler decided a menu was due and `Get`
+// decided it was still fresh, so it refreshed at half its cadence, and every read
+// looked ordinary in a log.
+//
+// `ifStatus` is the only residual collector today: the loop takes a rates
+// MEASUREMENT from /interface/monitor-traffic, and the subscription plus its
+// apply read /interface, /ip/address and /interface/ethernet. Disjoint.
+func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
+	// The loop half: Tick with a cache present reads only what the subscription
+	// does not.
+	//
+	// PRIMED FIRST, and the priming is itself part of the behaviour: with no
+	// metadata there is nothing to attach a rate to, so Tick correctly does
+	// nothing. The recorder is cleared after priming so what remains is the
+	// loop's own reads and only those.
+	loopSide := &menuRecorder{}
+	is := NewIfStatus(loopSide, func(string, string, any) {}, "r1", 1000)
+	is.UseCache(roscache.New(loopSide))
+	is.applyMeta([]routeros.Reply{{"name": "ether1", "disabled": "false"}}, nil)
+	loopSide.reset()
+	is.Tick()
+
+	// The subscription half: applyMeta, given rows, reads the rest itself.
+	subSide := &menuRecorder{}
+	is2 := NewIfStatus(subSide, func(string, string, any) {}, "r1", 1000)
+	is2.UseCache(roscache.New(subSide))
+	is2.applyMeta([]routeros.Reply{{"name": "ether1"}}, nil)
+
+	// Plus the menu the scheduler fetches on its behalf.
+	subSide.mu.Lock()
+	if subSide.seen == nil {
+		subSide.seen = map[string]bool{}
+	}
+	subSide.seen[ifStatusIfCmd.Path] = true
+	subSide.mu.Unlock()
+
+	loopSide.mu.Lock()
+	overlap := []string{}
+	for menu := range loopSide.seen {
+		subSide.mu.Lock()
+		if subSide.seen[menu] {
+			overlap = append(overlap, menu)
+		}
+		subSide.mu.Unlock()
+	}
+	loopSide.mu.Unlock()
+	sort.Strings(overlap)
+
+	if len(overlap) > 0 {
+		t.Errorf("ifStatus's residual loop and its subscription both read %v. Two clocks on one "+
+			"menu is the 3.2 bug: one decides it is due, the other decides it is fresh, and it "+
+			"refreshes at half its cadence while every read looks ordinary.", overlap)
+	}
+	if len(loopSide.seen) == 0 {
+		t.Error("the residual loop read nothing at all — with a cache present it must still " +
+			"drive the rates measurement, which is the whole of mechanism A")
+	}
+}

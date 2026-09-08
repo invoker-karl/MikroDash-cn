@@ -849,24 +849,22 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// A collector NOT on this list reads directly and is unaffected. That is the
 	// safe default and the reason this can be extended one menu at a time.
 	for _, c := range []interface{ UseCache(*roscache.Cache) }{
-		s.ifStatus,                     // /interface/print, with wan
-		s.wifi, s.wireless, s.topology, // the wifi family, 4 menus
-		s.vlans,        // /interface/vlan, with topology
-		s.dhcpNetworks, // /ip/address with ifStatus+wan, detect-internet with wan
-		s.bridges,      // /interface/bridge/port with vlans, /host with topology
-		s.system,       // /system/routerboard and /system/package/update, with packages
-		s.ppp, s.vpn,   // /ppp/active
-		// Phase 3.2: these SUBSCRIBE to a menu and the scheduler decides when to
-		// read it, instead of each owning a timer. The entries above are here for
-		// 1.4's shared reads only and still poll.
+		// ── SUBSCRIBED: the scheduler decides when these read ────────────────
 		//
-		// `packages` is on this line and not the one above because it does both:
-		// its UseCache feeds the shared-read cache AND the subscription, and
-		// listing it twice would read as an oversight rather than as the two
-		// distinct uses it is.
-		s.netwatch, s.talkers, s.dns, s.packages, s.rosUsers, s.queues, s.bridges,
-		s.system, s.conns, s.dhcpLeases, s.dhcpNetworks, s.wan, s.capsman,
-		s.routing, // /ip/route, with wan
+		// Phase 3.2. Each declares a menu and a cadence and stops owning a timer;
+		// `ifStatus` is mechanism A, keeping a residual timer for its rates
+		// measurement, which is set B and can never be scheduled.
+		s.netwatch, s.talkers, s.dns, s.packages, s.rosUsers, s.queues,
+		s.bridges, s.system, s.conns, s.dhcpLeases, s.dhcpNetworks,
+		s.wan, s.capsman, s.ppp, s.routing, s.ifStatus,
+
+		// ── SHARED READS ONLY: these still poll ──────────────────────────────
+		//
+		// Here for 1.4, so a menu two of them read costs one command. Each is
+		// held off the scheduler by a recorded obstacle -- see
+		// `internal/verify/scheduled_test.go`, which refuses an entry with no
+		// reason and prints the count on every run.
+		s.wifi, s.wireless, s.topology, s.vlans, s.vpn,
 	} {
 		c.UseCache(s.roscache)
 	}

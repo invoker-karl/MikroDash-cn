@@ -55,6 +55,7 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 		"capsman.go":      "capsman",
 		"ppp.go":          "ppp",
 		"routing.go":      "routing",
+		"ifstatus.go":     "ifStatus",
 	}
 
 	// ── EVERY UNSCHEDULED COLLECTOR, AND HOW STRONG THE REASON ACTUALLY IS ──
@@ -84,8 +85,6 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 			"from ifStatus in memory. Subscribing it to a menu would slow its rate column from 5s to 60s",
 
 		// PARTIAL — the weakest claims here, and the ones worth arguing about.
-		"ifStatus": "PARTIAL — its RATES read is a measurement and cannot be scheduled, but its three " +
-			"METADATA menus are plain reads on a 30s lane and could be. Not attempted",
 		"topology": "PARTIAL — its cadence is the ping cursor, which is set B, but its neighbour, host, " +
 			"vlan and wifi menus are plain reads. Not attempted",
 		"vpn": "PARTIAL — its main menu carries a detail argument the demand key cannot express, but " +
