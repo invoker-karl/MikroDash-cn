@@ -783,27 +783,41 @@ func (c *Connections) Tick() {
 		c.emit("page-connections,dash-card-connections", "conn:update", connsLight{&light})
 	}
 	if detailChanged {
-		// ── THE CARD ROOM TOO, AND IT COSTS SOMETHING ───────────────────────
+		// ── THE PAGE ONLY, WHICH IS WHERE THE LEDGER ALWAYS HAD THEM ────────
 		//
-		// The dashboard's Connection Flow card (the Sankey) needs both of these
-		// and received neither, so it sat on "Waiting for connection data…"
-		// forever. The Node app did the same -- the recorded ledger has both
-		// events at `page-connections` alone -- so this is a deliberate change,
-		// not a repair.
+		// These two carry the four heavy indexes `connsLight` strips from the
+		// broadcast above precisely BECAUSE they are heavy, so who receives them
+		// is worth being exact about.
 		//
-		// BE CLEAR ABOUT THE TRADE. These are the four heavy indexes
-		// `connsLight` strips from the card broadcast precisely BECAUSE they are
-		// heavy, so sending them here gives back weight that was deliberately
-		// saved. It is justified only because the card is useless without them:
-		// the alternative is not a lighter card, it is a blank one.
+		// THEY WERE WIDENED TO `dash-card-connections` ON A PREMISE THAT WAS NOT
+		// TRUE, and the comment that stood here recorded it as fact: that the
+		// dashboard's Connection Flow sankey "needs both of these and received
+		// neither, so it sat on Waiting for connection data… forever". Three
+		// things say otherwise, and the last one is the one that settles it.
 		//
-		// `conn:update` is deliberately NOT changed. It still goes out light, so
-		// the cost lands only on the two events that carry these indexes anyway
-		// and only when `detailChanged`.
-		c.emit("page-connections,dash-card-connections", "conn:country-data", map[string]any{
+		//	the card draws from `topSources` and `topDestinations`, which
+		//	  `BuildConns` fills in unconditionally -- they are outside the
+		//	  `in.Detailed` branch -- and which `connsLight` does not strip
+		//	NOTHING LISTENS. The only subscribers to either event are in
+		//	  `web/src/pages/connections.ts`; no dashboard module has a handler
+		//	measured 2026-09-08: a browser session that went straight to the
+		//	  dashboard and never opened the Connections page rendered the sankey
+		//	  with ten nodes and its empty state hidden, on a tick where neither
+		//	  of these had fired at all
+		//
+		// So the widening bought the card nothing and sent two heavy frames to
+		// every dashboard viewer to be discarded. It was also mostly inert, which
+		// is why nobody noticed: `detailChanged` requires `detailed`, and that is
+		// false unless somebody is on the Connections page -- the exact case the
+		// widening was meant to serve is the one case it never fired in.
+		//
+		// The Node app sends both at `page-connections` alone. This is now the
+		// same, and matching it here is agreement about who needs the data rather
+		// than fidelity for its own sake.
+		c.emit("page-connections", "conn:country-data", map[string]any{
 			"ts": payload.TS, "countryDests": payload.CountryDests, "countryPorts": payload.CountryPorts,
 		})
-		c.emit("page-connections,dash-card-connections", "conn:source-data", map[string]any{
+		c.emit("page-connections", "conn:source-data", map[string]any{
 			"ts": payload.TS, "sourceDests": payload.SourceDests, "sourcePorts": payload.SourcePorts,
 		})
 	}
