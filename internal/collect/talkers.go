@@ -87,12 +87,9 @@ type Talkers struct {
 	loop        *pollLoop
 	now         func() time.Time
 
-	// Phase 3.2: with a cache this collector subscribes instead of polling, and
-	// the router's one scheduler decides when. The loop stays for the pools,
-	// which build collectors with no cache — see netwatch.go for the same note
-	// at length.
-	cache   *roscache.Cache
-	release func()
+	// See scheduled.go: one menu, subscribed at a cadence, with the loop above
+	// as the no-cache fallback.
+	sched scheduled
 }
 
 // NewTalkers builds the collector. `topN` of 0 takes the original's default of
@@ -111,6 +108,10 @@ func NewTalkers(ros Reader, emit Emit, pollMs, topN int) *Talkers {
 	t.loop = newPollLoop(func() { t.Tick() }, func() time.Duration {
 		return t.pollMs.duration()
 	})
+	t.sched = scheduled{
+		loop: t.loop, menu: talkersCmd.Path, apply: t.apply,
+		cadence: t.pollMs.duration,
+	}
 	return t
 }
 
@@ -118,46 +119,24 @@ func NewTalkers(ros Reader, emit Emit, pollMs, topN int) *Talkers {
 // is what stops the card sitting empty for a whole interval after a connect.
 // UseCache moves this collector onto the router's scheduler. Set once, before
 // Start; nil leaves it on its own poll loop.
-func (t *Talkers) UseCache(c *roscache.Cache) { t.cache = c }
-
-func (t *Talkers) subscribe() {
-	if t.cache == nil {
-		t.loop.start()
-		return
-	}
-	if t.release != nil {
-		return
-	}
-	t.release = t.cache.Subscribe(talkersCmd.Path, nil, t.pollMs.duration(), t.apply)
-}
-
-func (t *Talkers) unsubscribe() {
-	if t.cache == nil {
-		t.loop.stop()
-		return
-	}
-	if t.release != nil {
-		t.release()
-		t.release = nil
-	}
-}
+func (t *Talkers) UseCache(c *roscache.Cache) { t.sched.useCache(c) }
 
 func (t *Talkers) Start() {
-	if t.cache == nil {
+	if !t.sched.scheduling() {
 		t.Tick()
 	}
-	t.subscribe()
+	t.sched.begin()
 }
 
-func (t *Talkers) Suspend() { t.unsubscribe() }
+func (t *Talkers) Suspend() { t.sched.end() }
 
 func (t *Talkers) Resume() {
 	if t.ros.Connected() {
-		t.subscribe()
+		t.sched.begin()
 	}
 }
 
-func (t *Talkers) Stop() { t.unsubscribe() }
+func (t *Talkers) Stop() { t.sched.end() }
 
 // Reconnected CLEARS the latch, and that is the opposite of what an earlier
 // version of this comment claimed.
@@ -178,13 +157,13 @@ func (t *Talkers) Stop() { t.unsubscribe() }
 // always sent — a browser that reconnected has nothing on screen to compare it
 // against.
 func (t *Talkers) Reconnected() {
-	t.unsubscribe()
+	t.sched.end()
 	t.unavailable = false
 	t.lastFp = ""
-	if t.cache == nil {
+	if !t.sched.scheduling() {
 		t.Tick()
 	}
-	t.subscribe()
+	t.sched.begin()
 }
 
 func (t *Talkers) Last() *TalkersPayload { return t.last }

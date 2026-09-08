@@ -2,8 +2,11 @@ package collect
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"mikrodash/internal/roscache"
 
 	"mikrodash/internal/routeros"
 )
@@ -376,4 +379,89 @@ func TestBuildLanOverviewIsAFunctionOfItsInputs(t *testing.T) {
 	if len(a.Networks) != len(b.Networks) || a.WanIP != b.WanIP {
 		t.Errorf("two identical calls disagreed")
 	}
+}
+
+// ── PHASE 3.2: THE SHARED SUBSCRIPTION HELPER ───────────────────────────────
+
+type schedReader struct{ n int32 }
+
+func (s *schedReader) Connected() bool { return true }
+func (s *schedReader) Do(routeros.Cmd) ([]routeros.Reply, error) {
+	atomic.AddInt32(&s.n, 1)
+	return []routeros.Reply{{"a": "b"}}, nil
+}
+
+// TestScheduledFallsBackToTheLoopWithNoCache is the property that keeps the two
+// background pools working: they build every collector without a cache, and a
+// router nobody is watching still needs its alerts.
+func TestScheduledFallsBackToTheLoopWithNoCache(t *testing.T) {
+	var ticks int32
+	loop := newPollLoop(func() { atomic.AddInt32(&ticks, 1) },
+		func() time.Duration { return 5 * time.Millisecond })
+	s := scheduled{loop: loop}
+
+	if s.scheduling() {
+		t.Fatal("a collector with no cache reported itself as scheduled")
+	}
+	s.begin()
+	time.Sleep(40 * time.Millisecond)
+	s.end()
+	if atomic.LoadInt32(&ticks) == 0 {
+		t.Error("begin did not start the fallback loop")
+	}
+
+	after := atomic.LoadInt32(&ticks)
+	time.Sleep(30 * time.Millisecond)
+	if atomic.LoadInt32(&ticks) != after {
+		t.Error("end did not stop the fallback loop")
+	}
+}
+
+// TestScheduledBeginIsIdempotent. Resume on a running collector must not add a
+// second subscription: the demand set counts subscribers, so a duplicate would
+// keep the menu alive after the real one released it — the collector would go on
+// reading a router nobody is watching.
+func TestScheduledBeginIsIdempotent(t *testing.T) {
+	c := roscache.New(&schedReader{})
+	s := scheduled{cache: c, menu: "/ip/dns/print",
+		cadence: func() time.Duration { return time.Second }}
+
+	s.begin()
+	s.begin()
+	s.begin()
+	if got := len(c.Demand()); got != 1 {
+		t.Fatalf("three begins produced %d demands, want 1", got)
+	}
+	s.end()
+	if got := len(c.Demand()); got != 0 {
+		t.Errorf("one end left %d demands; the extra begins leaked a subscription", got)
+	}
+}
+
+// TestScheduledEndIsIdempotent: Stop after Suspend is an ordinary sequence in
+// this app, and a second release must not disturb anything.
+func TestScheduledEndIsIdempotent(t *testing.T) {
+	c := roscache.New(&schedReader{})
+	other := c.Subscribe("/ip/dns/print", nil, time.Second, nil)
+	defer other()
+
+	s := scheduled{cache: c, menu: "/ip/dns/print",
+		cadence: func() time.Duration { return time.Second }}
+	s.begin()
+	s.end()
+	s.end()
+	s.end()
+
+	if got := len(c.Demand()); got != 1 {
+		t.Errorf("repeated end removed another subscriber's demand: %d left, want 1", got)
+	}
+}
+
+// TestScheduledWithNeitherCacheNorLoopIsInert. A misconfigured collector should
+// read nothing, not panic on a nil dereference inside a timer goroutine where
+// the stack says nothing useful.
+func TestScheduledWithNeitherCacheNorLoopIsInert(t *testing.T) {
+	s := scheduled{}
+	s.begin()
+	s.end()
 }

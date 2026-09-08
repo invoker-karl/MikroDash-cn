@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -166,6 +167,10 @@ type DNS struct {
 	pollMs *pollInterval
 
 	poll *pollLoop
+	// See scheduled.go. This collector subscribes to the SETTINGS menu, which is
+	// the live one; the static entries keep their own config cadence inside
+	// `apply`.
+	sched scheduled
 
 	mu       sync.Mutex
 	settings DNSSettings
@@ -192,6 +197,11 @@ func NewDNS(ros Reader, emit Emit, pollMs int) *DNS {
 	d.poll = newPollLoop(func() { d.Tick() }, func() time.Duration {
 		return d.pollMs.duration()
 	})
+	// AFTER the loop exists: `scheduled` holds it as the no-cache fallback, and
+	// capturing a nil here would leave a pooled session with a collector that
+	// never reads.
+	d.sched = scheduled{loop: d.poll, menu: dnsSettingsCmd.Path, apply: d.apply,
+		cadence: d.pollMs.duration}
 	return d
 }
 
@@ -235,7 +245,43 @@ func (d *DNS) Tick() {
 
 	// The settings row carries cache-used, which is live, so it is read every
 	// tick rather than on the config cadence — it is what drives the gauge.
-	rows := d.read(dnsSettingsCmd, &d.settingsAvailable)
+	d.applyLocked(d.read(dnsSettingsCmd, &d.settingsAvailable), nil)
+}
+
+// apply is what the scheduler calls with the settings rows. The static entries
+// stay on their own config cadence and are read here, through the same helper as
+// before -- see scheduled.go on why a collector subscribes to ONE menu and reads
+// the rest itself.
+func (d *DNS) apply(rows []routeros.Reply, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// The availability latch the polled path gets from `read`, derived from the
+	// error the scheduler hands over. Without this a router with no DNS menu
+	// would be asked for ever on the scheduled path and never on the polled one.
+	if err != nil {
+		if menuMissing(err) {
+			no := false
+			d.settingsAvailable = &no
+		} else {
+			d.lastErr = err.Error()
+		}
+		return
+	}
+	if d.settingsAvailable == nil {
+		yes := true
+		d.settingsAvailable = &yes
+	}
+
+	if d.ticks%dnsConfigEvery == 0 {
+		d.static = ParseStaticEntries(d.read(dnsStaticCmd, &d.staticAvailable))
+	}
+	d.ticks++
+	d.applyLocked(rows, err)
+}
+
+// applyLocked builds and emits. The caller holds the lock.
+func (d *DNS) applyLocked(rows []routeros.Reply, _ error) {
 	var first routeros.Reply
 	if len(rows) > 0 {
 		first = rows[0]
@@ -299,37 +345,43 @@ func (d *DNS) RefreshNow() {
 }
 
 // Start does one tick straight away and then polls.
+// UseCache moves this collector onto the router's scheduler. Set once, before
+// Start; nil leaves it on its own poll loop.
+func (d *DNS) UseCache(c *roscache.Cache) { d.sched.useCache(c) }
+
 func (d *DNS) Start() {
-	if d.ros.Connected() {
+	if d.ros.Connected() && !d.sched.scheduling() {
 		d.Tick()
 	}
-	d.poll.start()
+	d.sched.begin()
 }
 
 // Reconnected drops every latch. A router that has just come back may be a
 // different build — an upgrade is the usual reason a connection dropped — so an
 // "this menu is absent" decision taken against the old one must not persist.
 func (d *DNS) Reconnected() {
-	d.poll.stop()
+	d.sched.end()
 	d.mu.Lock()
 	d.lastFp = ""
 	d.ticks = 0
 	d.settingsAvailable, d.staticAvailable = nil, nil
 	d.mu.Unlock()
-	d.Tick()
-	d.poll.start()
+	if !d.sched.scheduling() {
+		d.Tick()
+	}
+	d.sched.begin()
 }
 
-func (d *DNS) Suspend() { d.poll.stop() }
+func (d *DNS) Suspend() { d.sched.end() }
 
 func (d *DNS) Resume() {
 	if d.ros.Connected() {
-		d.poll.start()
+		d.sched.begin()
 	}
 }
 
 func (d *DNS) Stop() {
-	d.poll.stop()
+	d.sched.end()
 	d.mu.Lock()
 	d.lastFp = ""
 	d.mu.Unlock()

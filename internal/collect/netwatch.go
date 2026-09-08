@@ -84,12 +84,9 @@ type Netwatch struct {
 	// nobody is watching still needs netwatch for its alerts -- so `cache == nil`
 	// has to keep working exactly as before. Same rule as `readVia`: nil falls
 	// through to the old path and nothing else changes.
-	cache   *roscache.Cache
-	cadence time.Duration
-	// release is the live subscription, held so Suspend can give it up. Nil when
-	// not subscribed, which is also what Suspend means now: not "stop my timer"
-	// but "stop wanting this menu".
-	release func()
+	// See scheduled.go: one menu, subscribed at a cadence, with the poll loop
+	// above as the no-cache fallback.
+	sched scheduled
 
 	mu sync.Mutex
 	// order is the ids in the order the router first mentioned them, and hosts
@@ -115,10 +112,16 @@ func NewNetwatch(ros Reader, emit Emit, pollMs int) *Netwatch {
 	_ = clampPoll(pollMs, 30000, 500, 600000)
 	const ms = 60000
 
-	n := &Netwatch{ros: ros, emit: emit, hosts: map[string]routeros.Reply{},
-		cadence: time.Duration(ms) * time.Millisecond}
+	n := &Netwatch{ros: ros, emit: emit, hosts: map[string]routeros.Reply{}}
 	n.poll = newPollLoop(func() { n.Tick() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
+	n.sched = scheduled{
+		loop: n.poll, menu: netwatchCmd.Path, apply: n.apply,
+		// NO FIELD LIST: this collector reads whole rows, and roscache's union
+		// rule makes saying so honestly better than naming a list that would
+		// widen the moment somebody adds a column to the card.
+		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond },
+	}
 	return n
 }
 
@@ -213,75 +216,36 @@ func (n *Netwatch) Last() *NetwatchPayload {
 
 // UseCache moves this collector onto the router's scheduler. Set once, before
 // Start; nil leaves it on its own poll loop.
-func (n *Netwatch) UseCache(c *roscache.Cache) { n.cache = c }
-
-// subscribe declares demand for the menu. Idempotent: a second call while
-// already subscribed does nothing, so Resume on a running collector is safe.
-func (n *Netwatch) subscribe() {
-	if n.cache == nil {
-		n.poll.start()
-		return
-	}
-	n.mu.Lock()
-	already := n.release != nil
-	n.mu.Unlock()
-	if already {
-		return
-	}
-	// NO FIELD LIST: this collector reads whole rows, and the union rule in
-	// roscache means saying so honestly is better than naming a list that would
-	// widen the moment somebody adds a column to the card.
-	rel := n.cache.Subscribe(netwatchCmd.Path, nil, n.cadence, n.apply)
-	n.mu.Lock()
-	n.release = rel
-	n.mu.Unlock()
-}
-
-// unsubscribe gives up the demand. The scheduler stops reading the menu when the
-// last subscriber goes, which is the whole mechanism: there is no separate
-// "should this run" to consult.
-func (n *Netwatch) unsubscribe() {
-	if n.cache == nil {
-		n.poll.stop()
-		return
-	}
-	n.mu.Lock()
-	rel := n.release
-	n.release = nil
-	n.mu.Unlock()
-	if rel != nil {
-		rel()
-	}
-}
+func (n *Netwatch) UseCache(c *roscache.Cache) { n.sched.useCache(c) }
 
 func (n *Netwatch) Start() {
 	// The immediate read stays on the polled path only. Under the scheduler the
 	// first pass fetches a menu it has never seen, so the first payload arrives
 	// one scheduler tick later rather than synchronously.
-	if n.cache == nil {
+	if !n.sched.scheduling() {
 		n.Tick()
 	}
-	n.subscribe()
+	n.sched.begin()
 }
 
 // Reconnected clears the fingerprint so the first read after a reconnect always
 // reaches the browser, even if the table came back identical.
 func (n *Netwatch) Reconnected() {
-	n.unsubscribe()
+	n.sched.end()
 	n.mu.Lock()
 	n.lastFP = ""
 	n.mu.Unlock()
-	if n.cache == nil {
+	if !n.sched.scheduling() {
 		n.Tick()
 	}
-	n.subscribe()
+	n.sched.begin()
 }
 
-func (n *Netwatch) Suspend() { n.unsubscribe() }
-func (n *Netwatch) Resume()  { n.subscribe() }
+func (n *Netwatch) Suspend() { n.sched.end() }
+func (n *Netwatch) Resume()  { n.sched.begin() }
 
 func (n *Netwatch) Stop() {
-	n.unsubscribe()
+	n.sched.end()
 	n.mu.Lock()
 	n.lastFP = ""
 	n.mu.Unlock()
