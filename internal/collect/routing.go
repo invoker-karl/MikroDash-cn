@@ -413,8 +413,11 @@ func (r *Routing) Last() *RoutingPayload { return r.last }
 // menu here is optional — /ipv6/route is absent on a build without IPv6 and the
 // BGP menus are absent on most routers — and a routing page that refused to
 // render because one of them is missing would be wrong on the majority of them.
+// safeRead is routed THROUGH THE CACHE: `wan` reads /ip/route with a proplist
+// that is a strict subset of this collector's all-fields read, so whichever
+// asks first pays. The three BGP menus have this collector alone.
 func (r *Routing) safeRead(cmd routeros.Cmd) []routeros.Reply {
-	rows, err := r.ros.Do(cmd)
+	rows, err := readVia(r.cache, r.ros, cmd, r.pollMs.duration())
 	if err != nil {
 		return nil
 	}

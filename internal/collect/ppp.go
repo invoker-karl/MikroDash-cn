@@ -299,7 +299,10 @@ func (p *PPP) read(cmd routeros.Cmd, flag **bool) []routeros.Reply {
 	if *flag != nil && !**flag {
 		return nil
 	}
-	rows, err := p.ros.Do(cmd)
+	// THROUGH THE CACHE: `vpn` reads /ppp/active too, and reads it with no
+	// proplist, so the union on that menu widens to the whole row. The other
+	// three menus here have this collector alone and are unaffected.
+	rows, err := readVia(p.cache, p.ros, cmd, p.pollMs.duration())
 	if err != nil {
 		msg := strings.ToLower(err.Error())
 		if strings.Contains(msg, "no such") || strings.Contains(msg, "unknown command") {

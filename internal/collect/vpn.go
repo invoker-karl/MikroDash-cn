@@ -465,7 +465,8 @@ func (v *VPN) loadOther() {
 		if *flag != nil && !**flag {
 			return nil
 		}
-		rows, err := v.ros.Do(cmd)
+		// THROUGH THE CACHE: `ppp` reads /ppp/active too.
+		rows, err := readVia(v.cache, v.ros, cmd, v.pollMs.duration())
 		if err != nil {
 			msg := strings.ToLower(err.Error())
 			if strings.Contains(msg, "no such") || strings.Contains(msg, "unknown command") {

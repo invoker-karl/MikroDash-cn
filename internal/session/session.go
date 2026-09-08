@@ -823,6 +823,8 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		s.dhcpNetworks,       // /ip/address with ifStatus+wan, detect-internet with wan
 		s.bridges,            // /interface/bridge/port with vlans, /host with topology
 		s.packages, s.system, // /system/routerboard and /system/package/update
+		s.ppp, s.vpn, // /ppp/active
+		s.routing, // /ip/route, with wan
 	} {
 		c.UseCache(s.roscache)
 	}
