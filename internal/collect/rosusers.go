@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"mikrodash/internal/guard"
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -218,6 +219,9 @@ type RosUsers struct {
 	poll      *pollLoop
 	pollMs    *pollInterval
 	usernames []string
+	// See scheduled.go. Subscribes to the USER list; groups, sessions and
+	// settings are read inside `apply`.
+	sched scheduled
 
 	mu       sync.Mutex
 	settings routeros.Reply
@@ -239,6 +243,9 @@ func NewRosUsers(ros Reader, emit Emit, usernames []string, pollMs int) *RosUser
 	r := &RosUsers{ros: ros, emit: emit, pollMs: newPollInterval(ms), usernames: usernames}
 	r.poll = newPollLoop(func() { r.Tick() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	r.sched = scheduled{loop: r.poll, menu: rosUserCmd.Path, apply: r.apply,
+		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond }}
 	return r
 }
 
@@ -390,7 +397,45 @@ func (r *RosUsers) Tick() {
 	}
 	r.ticks++
 
-	userRows := r.read(rosUserCmd, &r.userAvail)
+	r.applyLocked(r.read(rosUserCmd, &r.userAvail))
+}
+
+// apply is what the scheduler calls with the user list. The groups, sessions and
+// settings keep their own reads here -- see scheduled.go on why a collector
+// subscribes to ONE menu and reads the rest itself.
+func (r *RosUsers) apply(rows []routeros.Reply, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// The availability latch the polled path gets from `read`, derived from what
+	// the scheduler hands over, so a router that cannot answer this menu is not
+	// asked for ever on one path and never on the other.
+	if err != nil {
+		if menuMissing(err) {
+			no := false
+			r.userAvail = &no
+		}
+		return
+	}
+	if r.userAvail == nil {
+		yes := true
+		r.userAvail = &yes
+	}
+
+	if r.ticks%rosConfigEvery == 0 {
+		srows := r.read(rosSettingsCmd, &r.settingsAvail)
+		if len(srows) > 0 {
+			r.settings = srows[0]
+		} else {
+			r.settings = nil
+		}
+	}
+	r.ticks++
+	r.applyLocked(rows)
+}
+
+// applyLocked builds and emits. The caller holds the lock.
+func (r *RosUsers) applyLocked(userRows []routeros.Reply) {
 	groupRows := r.read(rosGroupCmd, &r.groupAvail)
 	activeRows := r.read(rosActiveCmd, &r.activeAvail)
 
@@ -442,25 +487,36 @@ func (r *RosUsers) RefreshNow() {
 	r.Tick()
 }
 
-func (r *RosUsers) Start() { r.Tick(); r.poll.start() }
+// UseCache moves this collector onto the router's scheduler. Set once, before
+// Start; nil leaves it on its own poll loop.
+func (r *RosUsers) UseCache(c *roscache.Cache) { r.sched.useCache(c) }
+
+func (r *RosUsers) Start() {
+	if !r.sched.scheduling() {
+		r.Tick()
+	}
+	r.sched.begin()
+}
 
 func (r *RosUsers) Reconnected() {
-	r.poll.stop()
+	r.sched.end()
 	r.mu.Lock()
 	r.lastFP = ""
 	r.ticks = 0
 	r.denied = false
 	r.userAvail, r.groupAvail, r.activeAvail, r.settingsAvail = nil, nil, nil, nil
 	r.mu.Unlock()
-	r.Tick()
-	r.poll.start()
+	if !r.sched.scheduling() {
+		r.Tick()
+	}
+	r.sched.begin()
 }
 
-func (r *RosUsers) Suspend() { r.poll.stop() }
-func (r *RosUsers) Resume()  { r.poll.start() }
+func (r *RosUsers) Suspend() { r.sched.end() }
+func (r *RosUsers) Resume()  { r.sched.begin() }
 
 func (r *RosUsers) Stop() {
-	r.poll.stop()
+	r.sched.end()
 	r.mu.Lock()
 	r.lastFP = ""
 	r.mu.Unlock()

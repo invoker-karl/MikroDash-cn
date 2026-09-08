@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"mikrodash/internal/guard"
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -174,6 +175,9 @@ type Queues struct {
 	poll     *pollLoop
 	pollMs   *pollInterval
 	firewall FilterRowSource
+	// See scheduled.go. Subscribes to the SIMPLE queue menu; the tree is read
+	// inside `apply`.
+	sched scheduled
 
 	mu     sync.Mutex
 	prev   map[string]queueSample
@@ -195,6 +199,9 @@ func NewQueues(ros Reader, emit Emit, firewall FilterRowSource, pollMs int) *Que
 	}
 	q.poll = newPollLoop(func() { q.Tick() },
 		func() time.Duration { return q.pollMs.duration() })
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	q.sched = scheduled{loop: q.poll, menu: queueSimpleCmd, apply: q.apply,
+		cadence: q.pollMs.duration}
 	return q
 }
 
@@ -532,7 +539,27 @@ func (q *Queues) fasttrack() Fasttrack {
 }
 
 func (q *Queues) Tick() {
-	simpleRows := q.read(routeros.Cmd{Path: queueSimpleCmd}, &q.simpleAvail)
+	q.apply(q.read(routeros.Cmd{Path: queueSimpleCmd}, &q.simpleAvail), nil)
+}
+
+// apply is what the scheduler calls with the simple-queue rows. The tree is read
+// here, as before -- see scheduled.go on why a collector subscribes to ONE menu.
+//
+// SIMPLE IS THE ONE SUBSCRIBED, and the choice matters: `Available` on the
+// payload is derived from `simpleAvail`, so it is the menu whose absence the page
+// actually reports.
+func (q *Queues) apply(simpleRows []routeros.Reply, err error) {
+	if err != nil {
+		if menuMissing(err) {
+			no := false
+			q.simpleAvail = &no
+		}
+		return
+	}
+	if q.simpleAvail == nil {
+		yes := true
+		q.simpleAvail = &yes
+	}
 	treeRows := q.read(routeros.Cmd{Path: queueTreeCmd}, &q.treeAvail)
 
 	now := time.Now()
@@ -616,25 +643,36 @@ func (q *Queues) ForgetRates() {
 	q.prev = map[string]queueSample{}
 }
 
-func (q *Queues) Start() { q.Tick(); q.poll.start() }
+// UseCache moves this collector onto the router's scheduler. Set once, before
+// Start; nil leaves it on its own poll loop.
+func (q *Queues) UseCache(c *roscache.Cache) { q.sched.useCache(c) }
+
+func (q *Queues) Start() {
+	if !q.sched.scheduling() {
+		q.Tick()
+	}
+	q.sched.begin()
+}
 
 func (q *Queues) Reconnected() {
-	q.poll.stop()
+	q.sched.end()
 	q.mu.Lock()
 	q.lastFP = ""
 	q.denied = false
 	q.prev = map[string]queueSample{}
 	q.simpleAvail, q.treeAvail = nil, nil
 	q.mu.Unlock()
-	q.Tick()
-	q.poll.start()
+	if !q.sched.scheduling() {
+		q.Tick()
+	}
+	q.sched.begin()
 }
 
-func (q *Queues) Suspend() { q.poll.stop() }
-func (q *Queues) Resume()  { q.poll.start() }
+func (q *Queues) Suspend() { q.sched.end() }
+func (q *Queues) Resume()  { q.sched.begin() }
 
 func (q *Queues) Stop() {
-	q.poll.stop()
+	q.sched.end()
 	q.mu.Lock()
 	q.lastFP = ""
 	q.prev = map[string]queueSample{}
