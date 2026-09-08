@@ -87,6 +87,13 @@ type Cache struct {
 
 	mu      sync.Mutex
 	entries map[string]*entry
+
+	// The demand set, on its own lock. SEPARATE FROM `mu` deliberately: `Get`
+	// holds `mu` and must never wait on a page opening or closing, and a
+	// subscription change must never wait on a router read. See demand.go.
+	demandMu sync.Mutex
+	subs     map[string]map[uint64]subscription
+	nextSub  uint64
 }
 
 func New(ros Reader) *Cache {
