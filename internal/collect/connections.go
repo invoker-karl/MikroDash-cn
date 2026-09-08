@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"mikrodash/internal/guard"
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -552,6 +553,9 @@ type Connections struct {
 	emit   Emit
 	pollMs *pollInterval
 	topN   int
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	table  *ConnTable
 	leases *DHCPLeases
@@ -848,3 +852,7 @@ func (c *Connections) SetPollMs(ms int) {
 	c.pollMs.set(ms)
 	c.loop.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (c *Connections) UseCache(rc *roscache.Cache) { c.cache = rc }

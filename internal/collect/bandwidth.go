@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"mikrodash/internal/guard"
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -359,6 +360,9 @@ type Bandwidth struct {
 	ros    Reader
 	emit   Emit
 	pollMs *pollInterval
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	rates  RateSource
 	leases *DHCPLeases
@@ -589,3 +593,7 @@ func (b *Bandwidth) SetPollMs(ms int) {
 	b.pollMs.set(ms)
 	b.loop.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (b *Bandwidth) UseCache(rc *roscache.Cache) { b.cache = rc }

@@ -43,6 +43,7 @@ import (
 	"strings"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -257,6 +258,9 @@ type Packages struct {
 	ros    Reader
 	emit   Emit
 	pollMs *pollInterval
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	packages []Package
 	firmware Firmware
@@ -435,3 +439,7 @@ func (p *Packages) SetPollMs(ms int) {
 	p.pollMs.set(ms)
 	p.loop.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (p *Packages) UseCache(rc *roscache.Cache) { p.cache = rc }

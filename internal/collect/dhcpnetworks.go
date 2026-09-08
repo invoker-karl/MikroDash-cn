@@ -39,6 +39,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -100,6 +101,9 @@ type DHCPNetworks struct {
 	leases   LeaseIPs
 	wanIface string
 	pollMs   *pollInterval
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	mu       sync.Mutex
 	lanCidrs []string
@@ -458,3 +462,7 @@ func (d *DHCPNetworks) SetPollMs(ms int) {
 	d.pollMs.set(ms)
 	d.poll.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (d *DHCPNetworks) UseCache(rc *roscache.Cache) { d.cache = rc }

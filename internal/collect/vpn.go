@@ -44,6 +44,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -129,6 +130,9 @@ type VPN struct {
 	emit   Emit
 	poll   *pollLoop
 	pollMs *pollInterval
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	mu sync.Mutex
 	// order is the peer keys in the order the router first mentioned them, and
@@ -521,3 +525,7 @@ func (v *VPN) SetPollMs(ms int) {
 	v.pollMs.set(ms)
 	v.poll.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (v *VPN) UseCache(rc *roscache.Cache) { v.cache = rc }

@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -233,6 +234,9 @@ type Bridges struct {
 	emit   Emit
 	rates  RateSource
 	pollMs *pollInterval
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	poll *pollLoop
 
@@ -407,3 +411,7 @@ func (b *Bridges) SetPollMs(ms int) {
 	b.pollMs.set(ms)
 	b.poll.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (b *Bridges) UseCache(rc *roscache.Cache) { b.cache = rc }

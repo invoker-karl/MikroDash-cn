@@ -74,6 +74,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -224,6 +225,9 @@ type PPP struct {
 	emit   Emit
 	poll   *pollLoop
 	pollMs *pollInterval
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	mu       sync.Mutex
 	prev     map[string]pppSample
@@ -589,3 +593,7 @@ func (p *PPP) SetPollMs(ms int) {
 	p.pollMs.set(ms)
 	p.poll.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (p *PPP) UseCache(rc *roscache.Cache) { p.cache = rc }

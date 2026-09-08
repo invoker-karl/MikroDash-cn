@@ -43,6 +43,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -97,6 +98,9 @@ type DHCPLeases struct {
 	ros  Reader
 	emit Emit
 	poll *pollLoop
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	mu sync.Mutex
 	// order is the IPs in the order first seen; byIP is the lease behind each.
@@ -398,3 +402,7 @@ func (d *DHCPLeases) Reconnected() {
 func (d *DHCPLeases) Suspend() { d.poll.stop() }
 func (d *DHCPLeases) Resume()  { d.poll.start() }
 func (d *DHCPLeases) Stop()    { d.poll.stop() }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (d *DHCPLeases) UseCache(rc *roscache.Cache) { d.cache = rc }

@@ -38,6 +38,7 @@ import (
 	"strings"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -328,6 +329,9 @@ type Routing struct {
 	ros    Reader
 	emit   Emit
 	pollMs *pollInterval
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	routes map[string]Route
 	order  []string // insertion order, so the payload is stable across ticks
@@ -728,3 +732,7 @@ func (r *Routing) SetPollMs(ms int) {
 	r.pollMs.set(ms)
 	r.loop.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (r *Routing) UseCache(rc *roscache.Cache) { r.cache = rc }

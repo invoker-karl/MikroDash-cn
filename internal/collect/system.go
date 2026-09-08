@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -227,6 +228,9 @@ type System struct {
 	ros    Reader
 	emit   Emit
 	pollMs *pollInterval
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
 
 	// mu guards everything the update goroutine touches. It is the only
 	// concurrency in this collector, and it exists because the update check can
@@ -679,3 +683,7 @@ func cloneReply(r routeros.Reply) routeros.Reply {
 // PollMs is the collector's current poll period. Exported for callers that
 // re-tune it and then need to confirm what took effect.
 func (s *System) PollMs() int { return s.pollMs.ms() }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (s *System) UseCache(rc *roscache.Cache) { s.cache = rc }
