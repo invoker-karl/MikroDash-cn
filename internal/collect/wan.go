@@ -363,7 +363,13 @@ func (w *Wan) read(cmd routeros.Cmd, avail **bool) []routeros.Reply {
 	if avail != nil && *avail != nil && !**avail {
 		return nil
 	}
-	rows, err := w.ros.Do(cmd)
+	// THROUGH THE CACHE. Every menu this collector reads is shared:
+	// /interface/detect-internet/state with dhcpNetworks, /ip/route with
+	// routing, /ip/address with ifStatus and dhcpNetworks, and
+	// /ip/dhcp-client, which is this collector's alone and therefore
+	// unaffected. The routing is in the helper because the availability latch
+	// below has to keep working whichever collector paid for the read.
+	rows, err := readVia(w.cache, w.ros, cmd, w.pollMs.duration())
 	if err != nil {
 		switch {
 		case menuAbsent(err):
