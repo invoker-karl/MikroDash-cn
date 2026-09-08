@@ -1739,7 +1739,10 @@ func (t *Topology) readWifi() (map[string]string, map[string]string, map[string]
 	}
 
 	if !legacy {
-		caps, err := t.ros.Do(topoCapsCmd)
+		// THROUGH THE CACHE: capsman reads this menu too, with no proplist, so
+		// the union widens to the whole row here as it does on the wifi menus.
+		// Same trade, same reason, same decision.
+		caps, err := readVia(t.cache, t.ros, topoCapsCmd, t.pollMs.duration())
 		if err == nil {
 			// A managed AP's radios are not its base MAC but a small offset from
 			// it (base+1, +2 …), so the match is on the first five octets.
