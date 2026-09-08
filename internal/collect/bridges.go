@@ -274,7 +274,13 @@ func (b *Bridges) read(cmd routeros.Cmd, avail **bool) []routeros.Reply {
 	if *avail != nil && !**avail {
 		return nil
 	}
-	rows, err := b.ros.Do(cmd)
+	// THROUGH THE CACHE. Both of this collector's shared menus arrive here:
+	// /interface/bridge/port, which vlans also reads, and /interface/bridge/host,
+	// which topology reads. The routing is in the helper because the denial latch
+	// below is what stops a denied menu being asked for every tick, and that must
+	// keep working whether the rows came from the router or from another
+	// collector's read.
+	rows, err := readVia(b.cache, b.ros, cmd, b.pollMs.duration())
 	if err != nil {
 		// The host table is the one menu a read-only API user can be denied
 		// while the rest still answers, so a denial latches rather than being

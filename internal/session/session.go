@@ -821,6 +821,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		s.capsman, s.wifi, s.wireless, s.topology, // the wifi family, 4 menus
 		s.vlans, s.dhcpLeases, // /interface/vlan, with topology
 		s.dhcpNetworks, // /ip/address with ifStatus+wan, detect-internet with wan
+		s.bridges,      // /interface/bridge/port with vlans, /host with topology
 	} {
 		c.UseCache(s.roscache)
 	}
