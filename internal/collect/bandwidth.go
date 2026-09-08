@@ -382,7 +382,8 @@ type Bandwidth struct {
 	// unchanged one, and this is what stops that suppression being permanent.
 	lastEmit time.Time
 
-	loop *pollLoop
+	loop  *pollLoop
+	sched scheduled
 }
 
 // bandwidthHeartbeat is how long an unchanged payload may be suppressed. The
@@ -400,7 +401,35 @@ func NewBandwidth(ros Reader, emit Emit, rates RateSource, leases *DHCPLeases,
 	b.loop = newPollLoop(func() { b.Tick() }, func() time.Duration {
 		return b.pollMs.duration()
 	})
+	// ── STANDING ON ITS OWN ─────────────────────────────────────────────────
+	//
+	// This collector was held off the scheduler on the reasoning that it takes
+	// the PARSED snapshot from `ConnTable`, so subscribing it to the connection
+	// menu would duplicate the heaviest read in the app. THAT REASONING WAS
+	// WRONG IN ITS PREMISE: `ConnTable.Latest` hands back RAW rows, not a parsed
+	// anything, and the demand set coalesces by menu -- so `connections` and this
+	// one asking for the same menu is ONE read with two deliveries, not two
+	// reads. The proplists are identical (see bandwidthConnCmd), so the union is
+	// not widened either.
+	//
+	// It is strictly better than the snapshot, and not only in coupling. Every
+	// delivery is a fresh read, which removes the "same snapshot twice" hazard
+	// Tick has to guard against below, and it removes the separate fallback read
+	// for a session with no connections collector: this one now drives the menu
+	// itself when it is the only subscriber.
+	b.sched = scheduled{
+		loop: b.loop, menu: bandwidthConnCmd.Path, fields: fieldsOf(bandwidthConnCmd),
+		cadence: b.pollMs.duration, apply: b.apply,
+	}
 	return b
+}
+
+// apply builds from rows the scheduler read, rather than from a snapshot.
+func (b *Bandwidth) apply(rows []routeros.Reply, err error) {
+	if err != nil {
+		return
+	}
+	b.build(rows, time.Now().UnixMilli())
 }
 
 // WithTable points this collector at the shared connection-table snapshot. With
@@ -424,30 +453,30 @@ func (b *Bandwidth) WithOrg(fn OrgLookup) *Bandwidth {
 	return b
 }
 
-func (b *Bandwidth) Suspend() { b.loop.stop() }
+func (b *Bandwidth) Suspend() { b.sched.end() }
 
 func (b *Bandwidth) Resume() {
 	if b.ros.Connected() {
-		b.loop.start()
+		b.sched.begin()
 	}
 }
 
-func (b *Bandwidth) Start() { b.loop.start() }
+func (b *Bandwidth) Start() { b.sched.begin() }
 
-func (b *Bandwidth) Stop() { b.loop.stop() }
+func (b *Bandwidth) Stop() { b.sched.end() }
 
 // Reconnected clears the counters. A reconnect usually means the router
 // rebooted, in which case every connection id is new and every counter starts
 // again — differencing across that boundary would report the whole table as one
 // enormous burst.
 func (b *Bandwidth) Reconnected() {
-	b.loop.stop()
+	b.sched.end()
 	b.mu.Lock()
 	b.prev = map[string]bwPrev{}
 	b.lastFp = ""
 	b.lastSnapshot = 0
 	b.mu.Unlock()
-	b.loop.start()
+	b.sched.begin()
 }
 
 func (b *Bandwidth) Last() *BandwidthPayload {
@@ -552,6 +581,15 @@ func (b *Bandwidth) Tick() {
 		}
 		now = time.Now().UnixMilli()
 	}
+	b.build(rows, now)
+}
+
+// build turns one reading into a payload and emits when it says something new.
+//
+// Split out so the POLLED path and the SCHEDULED one differ only in where the
+// rows came from. Everything below here -- the differencing, the fingerprint,
+// the heartbeat -- is the same code on both.
+func (b *Bandwidth) build(rows []routeros.Reply, now int64) {
 	b.mu.Lock()
 	payload := BuildBandwidth(b.prev, BandwidthInput{
 		Rows: rows, Now: now, LanCidrs: b.lanCidrs(),
@@ -596,4 +634,7 @@ func (b *Bandwidth) SetPollMs(ms int) {
 
 // UseCache routes this collector's shareable reads through a per-router cache.
 // Set once, before Start; nil leaves every read direct.
-func (b *Bandwidth) UseCache(rc *roscache.Cache) { b.cache = rc }
+func (b *Bandwidth) UseCache(rc *roscache.Cache) {
+	b.cache = rc
+	b.sched.useCache(rc)
+}

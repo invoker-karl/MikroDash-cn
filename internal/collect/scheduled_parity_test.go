@@ -177,9 +177,17 @@ var _ = time.Second
 // decided it was still fresh, so it refreshed at half its cadence, and every read
 // looked ordinary in a log.
 //
-// `ifStatus` is the only residual collector today: the loop takes a rates
-// MEASUREMENT from /interface/monitor-traffic, and the subscription plus its
-// apply read /interface, /ip/address and /interface/ethernet. Disjoint.
+// Three collectors are residual, and they satisfy the rule three different ways:
+//
+//	ifStatus  the loop takes a rates MEASUREMENT from /interface/monitor-traffic;
+//	          the subscription and its apply read /interface, /ip/address and
+//	          /interface/ethernet. Disjoint menus.
+//	vpn       the loop reads WireGuard with =detail=; the subscription reads
+//	          /ppp/active. Disjoint menus.
+//	vlans     the loop reads NOTHING AT ALL -- it re-rolls interface rates that
+//	          `ifStatus` already holds in memory. The cheapest way to satisfy the
+//	          rule, and the reason this collector could be scheduled without
+//	          slowing its rate column from five seconds to sixty.
 func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
 	cases := []struct {
 		name string
@@ -189,6 +197,17 @@ func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
 		// callback. Each is given its own recorder.
 		loopSide func(Reader, *roscache.Cache)
 		subSide  func(Reader, *roscache.Cache)
+		// readsNothing declares that this collector's residual half performs no
+		// router I/O at all, and is then ASSERTED rather than merely tolerated.
+		//
+		// It exists because `vlans` is the case that says the rule out loud: the
+		// residual half is "what the subscription cannot drive", and for a
+		// collector deriving from another's in-memory output that is a rebuild
+		// with no read. Without this flag the check below -- "a residual loop
+		// that reads nothing is a mechanism A that was never wired" -- would be
+		// right about every other collector and wrong about this one, so the
+		// honest fix is to make the claim explicit and check BOTH directions.
+		readsNothing bool
 	}{
 		{
 			name: "ifStatus", subscribed: ifStatusIfCmd.Path,
@@ -209,6 +228,22 @@ func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
 				x := NewIfStatus(r, func(string, string, any) {}, "r1", 1000)
 				x.UseCache(c)
 				x.applyMeta([]routeros.Reply{{"name": "ether1"}}, nil)
+			},
+		},
+		{
+			name: "vlans", subscribed: vlanCmd.Path, readsNothing: true,
+			loopSide: func(r Reader, c *roscache.Cache) {
+				x := NewVlans(r, func(string, string, any) {}, nil, nil, 5000)
+				x.UseCache(c)
+				// The residual half, exactly as the loop calls it. It must read
+				// NOTHING: its whole job is re-rolling rates `ifStatus` already
+				// holds in memory, which is why this half costs no router I/O.
+				x.rebuild()
+			},
+			subSide: func(r Reader, c *roscache.Cache) {
+				x := NewVlans(r, func(string, string, any) {}, nil, nil, 5000)
+				x.UseCache(c)
+				x.applyConfig([]routeros.Reply{{"name": "vlan10", "vlan-id": "10"}}, nil)
 			},
 		},
 		{
@@ -287,10 +322,15 @@ func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
 					"fresh, and it refreshes at half its cadence while every read looks "+
 					"ordinary.", tc.name, shared)
 			}
-			if len(overlap) == 0 {
+			switch {
+			case tc.readsNothing && len(overlap) > 0:
+				t.Errorf("%s's residual loop is recorded as performing no router I/O and it "+
+					"read %v. A residual half that has started reading needs the disjointness "+
+					"argument written out, not a stale flag.", tc.name, overlap)
+			case !tc.readsNothing && len(overlap) == 0:
 				t.Errorf("%s's residual loop read nothing — with a cache present it must still "+
-					"drive the half that cannot be scheduled, which is the whole of mechanism A",
-					tc.name)
+					"drive the half that cannot be scheduled, which is the whole of mechanism A. "+
+					"If reading nothing is correct here, say so with readsNothing.", tc.name)
 			}
 		})
 	}

@@ -14,16 +14,18 @@ import (
 //
 // ── WHY THIS IS A GATE AND NOT A PARAGRAPH ──────────────────────────────────
 //
-// Phase 3.3 of Collectors-Rewrite.md proposes replacing the dormancy supervisor
-// with per-query backoff. It is BLOCKED, and blocked on a number: only 8 of the
-// 18 dormancy-eligible collectors are scheduled. Per-query backoff would cover
-// those eight while the supervisor kept ticking for the other ten, leaving two
-// dormancy mechanisms with different semantics running side by side.
+// Phase 3.3 proposes replacing the dormancy supervisor with per-query backoff,
+// and it was BLOCKED on a number: only 8 of the 18 dormancy-eligible collectors
+// were scheduled, so backoff would have covered eight while the supervisor kept
+// ticking for ten -- two mechanisms with different semantics, side by side.
 //
-// That number is the whole argument, and a number in a document is exactly the
-// kind of thing this repository has watched go stale. Here it re-measures itself.
-// **When `unscheduled` empties, 3.3 becomes worth revisiting** — and the test
-// says so rather than leaving somebody to notice.
+// That number was the whole argument, and a number in a document is exactly what
+// this repository has watched go stale. So it re-measured itself here, and on
+// 2026-09-08 it reached 18 of 18 and said so.
+//
+// IT WAS TURNED ROUND RATHER THAN DELETED. The property is still worth holding:
+// a collector that falls off the scheduler stops being covered by backoff, and
+// nothing else would notice.
 //
 // It fails in both directions: a collector that starts subscribing without being
 // listed fails, and a listed one that stops fails too.
@@ -61,6 +63,8 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 		"firewall.go":     "firewall",
 		"wifi.go":         "wifi",
 		"wireless.go":     "wireless",
+		"bandwidth.go":    "bandwidth",
+		"vlans.go":        "vlans",
 	}
 
 	// ── EVERY UNSCHEDULED COLLECTOR, AND HOW STRONG THE REASON ACTUALLY IS ──
@@ -83,17 +87,27 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 		"ping":    "IMPOSSIBLE — a stream parameterised by address; two consumers are asking about different hosts",
 		"traffic": "IMPOSSIBLE — a monitor stream; same menu as ifStatus's measurement, a different question",
 
-		// NEEDS 4.2.
-		"bandwidth": "NEEDS 4.2 — takes the PARSED snapshot from connTable. Scheduling it on the " +
-			"connection menu would duplicate the heaviest read in the app, which connTable exists to avoid",
-		"vlans": "NEEDS 4.2 — reads only config menus; the reason it ticks at all is rates borrowed " +
-			"from ifStatus in memory. Subscribing it to a menu would slow its rate column from 5s to 60s",
+		// NEEDS 4.2. Empty. BOTH entries here were WRONG, not merely untried,
+		// and both were wrong in the same way: they described a dependency on
+		// another collector's output as if it forced a duplicate read.
+		//
+		//	bandwidth  "takes the PARSED snapshot from connTable, so scheduling it
+		//	           on the connection menu would duplicate the heaviest read in
+		//	           the app". `ConnTable.Latest` returns RAW rows, and the
+		//	           demand set coalesces by menu -- so two collectors wanting
+		//	           the same menu is one read with two deliveries.
+		//	vlans      "subscribing it to a menu would slow its rate column from 5s
+		//	           to 60s". True of a plain subscription; mechanism A is the
+		//	           shape for a collector whose two halves run at different
+		//	           rates, and its residual half reads nothing at all.
+		//
+		// Kept as a heading because the lesson is the list's, not either entry's:
+		// a grade written from the collector's CURRENT wiring reads like a
+		// property of the problem.
 
-		// PARTIAL. Empty since mechanism B, and kept as a heading rather than
-		// deleted: all three entries that were here -- firewall, wifi, wireless --
+		// PARTIAL. Empty since mechanism B: firewall, wifi and wireless all
 		// read "possible and was not tried" underneath the grade, and all three
-		// took one mechanism between them. That is the standing argument against
-		// the two grades above, which say the same thing in longer words.
+		// took one mechanism between them.
 	}
 
 	// A collector is on the scheduler when its file embeds the helper.
@@ -156,12 +170,23 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 	}
 
 	sort.Strings(missing)
-	if len(missing) == 0 {
-		t.Errorf("every dormancy-eligible collector is scheduled. That is not a failure in the "+
-			"code — it means PHASE 3.3 IS UNBLOCKED and this assertion has done its job. "+
-			"Revisit per-query backoff, then delete this check. (%d eligible, all covered)",
-			len(eligible))
+	// ── THE DIRECTION THIS NOW FAILS IN ─────────────────────────────────────
+	//
+	// It used to fail when the list EMPTIED, because an empty list was the news:
+	// 3.3 was blocked on the count and nothing else re-measured it. That happened
+	// on 2026-09-08 and the check has been turned round rather than deleted --
+	// deleting it would leave nothing at all watching the property, and a check
+	// removed reads exactly like one that never existed.
+	//
+	// So the assertion is now the opposite one, and it is the durable half: a
+	// dormancy-eligible collector that FALLS OFF the scheduler is a regression,
+	// and per-query backoff (3.3) would silently stop covering it.
+	if len(missing) > 0 {
+		t.Errorf("%d of %d dormancy-eligible collectors are no longer scheduled: %v. "+
+			"Per-query backoff covers only scheduled collectors, so this leaves the "+
+			"dormancy supervisor as the only thing watching them — two mechanisms with "+
+			"different semantics, which is what 3.3 exists to remove.",
+			len(missing), len(eligible), missing)
 	}
-	t.Logf("%d dormancy-eligible collectors, %d scheduled, %d not: %v",
-		len(eligible), len(covered), len(missing), missing)
+	t.Logf("%d dormancy-eligible collectors, all %d scheduled", len(eligible), len(covered))
 }

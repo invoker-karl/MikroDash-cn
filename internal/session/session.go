@@ -863,14 +863,12 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// Also mechanism B: each latches whether this router runs the modern or
 		// the legacy wireless stack, and moves its subscription to match.
 		s.wifi, s.wireless,
-
-		// ── SHARED READS ONLY: these still poll ──────────────────────────────
-		//
-		// Here for 1.4, so a menu two of them read costs one command. Each is
-		// held off the scheduler by a recorded obstacle -- see
-		// `internal/verify/scheduled_test.go`, which refuses an entry with no
-		// reason and prints the count on every run.
-		s.vlans,
+		// The last two, and the two whose recorded obstacle turned out to be
+		// wrong rather than merely untried. `bandwidth` coalesces onto the
+		// connection menu `conns` already subscribes to -- one read, two
+		// deliveries -- and `vlans` is mechanism A with a residual half that
+		// reads nothing at all. Every dormancy-eligible collector is now here.
+		s.bandwidth, s.vlans,
 	} {
 		c.UseCache(s.roscache)
 	}

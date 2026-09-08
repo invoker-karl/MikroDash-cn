@@ -430,7 +430,8 @@ type Vlans struct {
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
 
-	poll *pollLoop
+	poll  *pollLoop
+	sched scheduled
 
 	mu     sync.Mutex
 	cfgV   []routeros.Reply
@@ -450,10 +451,74 @@ type Vlans struct {
 func NewVlans(ros Reader, emit Emit, rates RateSource, leases LeaseCounts, pollMs int) *Vlans {
 	v := &Vlans{ros: ros, emit: emit, rates: rates, leases: leases,
 		pollMs: newPollInterval(clampPoll(pollMs, 5000, 2000, 60000)), dirty: true}
-	v.poll = newPollLoop(func() { v.Tick() }, func() time.Duration {
+	v.poll = newPollLoop(func() {
+		// THE LOOP IS TWO DIFFERENT JOBS, and which one it is depends on whether
+		// this collector got a cache. Polled, it is the whole collector: read the
+		// config when it is due, then emit. Scheduled, it is the RESIDUAL HALF,
+		// and reading anything here would be the second clock on menus the
+		// subscription already owns -- see the scheduled literal below.
+		if v.sched.scheduling() {
+			v.rebuild()
+			return
+		}
+		v.Tick()
+	}, func() time.Duration {
 		return v.pollMs.duration()
 	})
+	// ── STANDING ON ITS OWN, VIA MECHANISM A ────────────────────────────────
+	//
+	// This collector was held off the scheduler because subscribing it to a menu
+	// would have slowed its rate column from five seconds to sixty. That is true
+	// of a plain subscription and it is the wrong shape for this collector: the
+	// two halves run at genuinely different rates, and mechanism A is exactly
+	// how a collector says so.
+	//
+	//	SUBSCRIPTION  the three config menus, at the config cadence. VLAN topology
+	//	              changes when somebody edits the router, not every five seconds.
+	//	RESIDUAL      the rate column, at the poll cadence, READING NO MENU AT ALL.
+	//	              It re-rolls interface rates that `ifStatus` already has in
+	//	              memory, which is why this half costs no router I/O and why
+	//	              it satisfies the disjointness rule trivially.
+	//
+	// The residual half is therefore NOT the config read on a timer -- that is
+	// what `Tick` is, and `Tick` belongs to the polled path only. See rebuild.
+	v.sched = scheduled{
+		loop: v.poll, residual: true,
+		menu: vlanCmd.Path, fields: fieldsOf(vlanCmd),
+		cadence: func() time.Duration { return v.pollMs.duration() * vlanConfigEvery },
+		apply:   v.applyConfig,
+	}
 	return v
+}
+
+// applyConfig stores a config reading and rebuilds.
+//
+// The delivered rows ARE used, for the menu they came from; the other two are
+// read here through the cache. That is the ordinary shape for a collector
+// reading several menus: subscribe to the one whose cadence drives it, pull the
+// rest at the same moment.
+func (v *Vlans) applyConfig(rows []routeros.Reply, err error) {
+	v.mu.Lock()
+	if err == nil {
+		v.cfgV = nonEmptyRows(rows)
+	}
+	v.cfgBV = v.read(bridgeVlanCmd)
+	v.cfgP = v.read(vlanPortCmd)
+	v.dirty = false
+	v.mu.Unlock()
+	v.rebuild()
+}
+
+// rebuild is the residual half: derive and emit, WITHOUT READING ANY MENU.
+//
+// This is what makes the rate column keep its five seconds while the config
+// costs one scheduled read a minute. It is also the rule that keeps mechanism A
+// safe -- the residual loop must not read a menu the subscription reads, and the
+// cheapest way to satisfy that is to read nothing.
+func (v *Vlans) rebuild() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.emitLocked()
 }
 
 // read is routed THROUGH THE CACHE. Two of the three menus this collector
@@ -470,6 +535,12 @@ func (v *Vlans) read(cmd routeros.Cmd) []routeros.Reply {
 		}
 		return nil
 	}
+	return nonEmptyRows(rows)
+}
+
+// nonEmptyRows drops the blank sentence RouterOS sends for an empty menu, which
+// would otherwise become a row with no fields.
+func nonEmptyRows(rows []routeros.Reply) []routeros.Reply {
 	out := make([]routeros.Reply, 0, len(rows))
 	for _, r := range rows {
 		if len(r) > 0 {
@@ -497,7 +568,12 @@ func (v *Vlans) Tick() {
 		v.dirty = false
 	}
 	v.ticks++
+	v.emitLocked()
+}
 
+// emitLocked builds the payload from what is already held and emits it when the
+// shape changed. Called with v.mu held.
+func (v *Vlans) emitLocked() {
 	built := BuildVlanRows(v.cfgV, v.cfgBV, v.cfgP, v.rates, v.leases)
 	built.TS = time.Now().UnixMilli()
 	built.PollMs = v.pollMs.ms()
@@ -537,30 +613,30 @@ func (v *Vlans) Start() {
 	if v.ros.Connected() {
 		v.Tick()
 	}
-	v.poll.start()
+	v.sched.begin()
 }
 
 func (v *Vlans) Reconnected() {
-	v.poll.stop()
+	v.sched.end()
 	v.mu.Lock()
 	v.lastFp = ""
 	v.dirty = true
 	v.ticks = 0
 	v.mu.Unlock()
 	v.Tick()
-	v.poll.start()
+	v.sched.begin()
 }
 
-func (v *Vlans) Suspend() { v.poll.stop() }
+func (v *Vlans) Suspend() { v.sched.end() }
 
 func (v *Vlans) Resume() {
 	if v.ros.Connected() {
-		v.poll.start()
+		v.sched.begin()
 	}
 }
 
 func (v *Vlans) Stop() {
-	v.poll.stop()
+	v.sched.end()
 	v.mu.Lock()
 	v.lastFp = ""
 	v.mu.Unlock()
@@ -575,4 +651,7 @@ func (v *Vlans) SetPollMs(ms int) {
 
 // UseCache routes this collector's shareable reads through a per-router cache.
 // Set once, before Start; nil leaves every read direct.
-func (v *Vlans) UseCache(rc *roscache.Cache) { v.cache = rc }
+func (v *Vlans) UseCache(rc *roscache.Cache) {
+	v.cache = rc
+	v.sched.useCache(rc)
+}
