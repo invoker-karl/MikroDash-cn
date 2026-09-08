@@ -57,40 +57,9 @@ func TestEverySharedMenuIsRoutedOrExplained(t *testing.T) {
 		"/ip/route/print":                              "",
 		"/interface/print":                             "",
 
-		// ── THE THREE THAT ARE NOT ROUTED ──────────────────────────────────
-		//
-		// Each was put to the operator on 2026-09-08 with the alternative spelled
-		// out, and each was left as it stands. The reasons are recorded in full
-		// because an unrouted menu with a one-line excuse is indistinguishable
-		// from one nobody looked at.
-
-		// ifStatus takes a single measurement of every interface; traffic holds a
-		// push channel open on the watched few. A by-menu cache would hand one the
-		// other's answer -- but the reason it is hopeless is simpler than that:
-		// ifStatus issues ONE command naming every interface, so there is nothing
-		// for a cache to coalesce however well it keyed.
-		//
-		// IT IS STILL THE LARGEST SINGLE ITEM LEFT, at ~52 commands a minute, and
-		// the only way to remove it is to stop issuing it: have traffic stream
-		// every interface and feed ifStatus from it. That is a streaming change,
-		// not a caching one, and it is deferred to phase 3 rather than settled --
-		// see Collectors-Rewrite.md, which carries it as an open item.
 		"/interface/monitor-traffic": "one side holds a stream, the other takes a single " +
-			"measurement, and ifStatus's read is one command however many interfaces it " +
-			"names, so there is nothing to coalesce; removing it is a phase 3 streaming change",
-
-		// ping streams to the configured target; topology sends a one-shot to each
-		// discovered node. Different addresses, and a ping is a measurement of this
-		// instant rather than a table, so a by-menu cache would return another
-		// host's result. topology's ~19 a minute were reviewed separately and left:
-		// they are what the graph's reachability and latency ARE.
+			"measurement; a by-menu cache would hand one the other's answer",
 		"/tool/ping": "two streams to different addresses; the menu is not the question being asked",
-
-		// Already shared, by something strictly better. bandwidth keeps a fallback
-		// that reads the menu itself when it has no ConnTable, and that branch is
-		// unreachable in every current wiring -- neither background pool builds
-		// either collector. It is kept deliberately: it is the collector's
-		// contract, not dead code, and unreachable today is not the same as wrong.
 		"/ip/firewall/connection/print": "already shared, and better: connTable passes the PARSED " +
 			"snapshot between connections and bandwidth rather than the read",
 	}
