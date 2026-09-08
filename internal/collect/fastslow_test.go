@@ -62,7 +62,8 @@ func TestIfStatusSplitsTheMetadataReads(t *testing.T) {
 		t.Fatalf("a 1s poll must split; metaTicks = %d", want)
 	}
 
-	const ticks = 12
+	// Enough ticks to cross the boundary twice, whatever the target is set to.
+	ticks := 2*want + 1
 	for i := 0; i < ticks; i++ {
 		c.Tick()
 	}
@@ -158,5 +159,72 @@ func TestIfStatusSuspendArmsTheNextMetadataRead(t *testing.T) {
 
 	if got := r.byMenu["/interface/print"]; got != before+1 {
 		t.Errorf("first tick after Suspend read metadata %d times, want %d", got-before, 1)
+	}
+}
+
+// ── THE FAST/SLOW RULE ACROSS COLLECTORS ────────────────────────────────────
+
+type routeSplitReader struct{ byMenu map[string]int }
+
+func (r *routeSplitReader) Connected() bool { return true }
+func (r *routeSplitReader) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
+	r.byMenu[cmd.Path]++
+	switch cmd.Path {
+	case "/ip/route/print", "/ipv6/route/print":
+		return []routeros.Reply{{".id": "*1", "dst-address": "0.0.0.0/0", "gateway": "198.51.100.1", "active": "true"}}, nil
+	case "/routing/bgp/session/print":
+		return []routeros.Reply{{"name": "peer1", "established": "true"}}, nil
+	}
+	return nil, nil
+}
+
+// TestRoutingSplitsTheRouteTables: BGP session state is what flaps and stays on
+// the poll; the route tables are large, rarely move, and go to the slow lane.
+func TestRoutingSplitsTheRouteTables(t *testing.T) {
+	r := &routeSplitReader{byMenu: map[string]int{}}
+	c := NewRouting(r, func(string, string, any) {}, 10000)
+
+	const ticks = 9
+	for i := 0; i < ticks; i++ {
+		c.Tick()
+	}
+
+	if got := r.byMenu["/routing/bgp/session/print"]; got != ticks {
+		t.Errorf("BGP read %d times, want one per tick (%d)", got, ticks)
+	}
+	want := ticks / routeConfigEvery
+	for _, menu := range []string{"/ip/route/print", "/ipv6/route/print"} {
+		if got := r.byMenu[menu]; got != want {
+			t.Errorf("%s read %d times over %d ticks, want %d", menu, got, ticks, want)
+		}
+	}
+}
+
+// TestRoutingFirstTickReadsTheRoutes pins tick 0 taking the slow lane too: a
+// payload whose route list is empty until the third poll is a blank page, not a
+// stale one.
+func TestRoutingFirstTickReadsTheRoutes(t *testing.T) {
+	r := &routeSplitReader{byMenu: map[string]int{}}
+	c := NewRouting(r, func(string, string, any) {}, 10000)
+	c.Tick()
+	if got := r.byMenu["/ip/route/print"]; got != 1 {
+		t.Errorf("first tick read the route table %d times, want 1", got)
+	}
+	if p := c.Last(); p == nil || len(p.Routes) == 0 {
+		t.Errorf("first payload carries no routes: %+v", p)
+	}
+}
+
+// TestRoutingWriteDoesNotWaitForTheSlowLane: RefreshNow is what the route write
+// path calls, and it must re-read immediately rather than let an operator watch
+// their own edit take half a minute to appear.
+func TestRoutingWriteDoesNotWaitForTheSlowLane(t *testing.T) {
+	r := &routeSplitReader{byMenu: map[string]int{}}
+	c := NewRouting(r, func(string, string, any) {}, 10000)
+	c.Tick()
+	before := r.byMenu["/ip/route/print"]
+	c.RefreshNow()
+	if got := r.byMenu["/ip/route/print"]; got != before+1 {
+		t.Errorf("RefreshNow read the route table %d extra times, want 1", got-before)
 	}
 }

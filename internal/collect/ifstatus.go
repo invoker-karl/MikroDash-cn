@@ -63,7 +63,7 @@ package collect
 // `ifStatusMetaTarget` late. A link that drops is noticed within that window
 // rather than within a poll — on the Interfaces page, in the sidebar badge and
 // in the traffic picker. Rates, which are the thing anybody actually watches
-// move, are unchanged.
+// move, are unchanged. See the constant for what the operator set it to and why.
 //
 // A POLL INTERVAL AT OR ABOVE THE TARGET COLLAPSES THIS BACK TO ONE LANE, which
 // is not a coincidence to lean on: the frozen golden replay constructs this
@@ -83,17 +83,24 @@ import (
 )
 
 // ifStatusMetaTarget is how often the three metadata menus are re-read, and
-// therefore how late a link state change can be. Five seconds is chosen against
-// what the page does with it: an operator watching a port come up tolerates it,
-// and the alternative — 51 reads a minute of rows that had not changed — is what
-// this collector was doing.
-const ifStatusMetaTarget = 5 * time.Second
-
-// ifStatusMetaMaxTicks bounds the split from the other end. A very fast poll
-// must not stretch the metadata over an unbounded number of ticks: at 500ms the
-// target alone would ask for ten, and a page that has been running for a while
-// on nine ticks of stale metadata is harder to reason about than one extra read.
-const ifStatusMetaMaxTicks = 8
+// therefore how late a link state change can be.
+//
+// THIRTY SECONDS, SET BY THE OPERATOR (2026-09-08): "monitor-traffic needs to
+// tick every second, but the other three can be polled at let's say a 30 second
+// cadence or longer". It was five while the split was being proved out.
+//
+// WHAT THAT COSTS, stated once so nobody rediscovers it as a bug: `running`,
+// `disabled`, the addresses and the counters are up to 30 seconds old. A port
+// that goes down is late on the Interfaces page, on the sidebar badge and in the
+// traffic chart's picker, and an interface created on the router takes that long
+// to appear. Rates are not affected — they are the other lane.
+//
+// AND `running` CANNOT BE MOVED TO THE FAST LANE, which was checked rather than
+// assumed: `/interface/monitor-traffic` was run against live hardware and returns
+// only rates and per-second packet, drop and error counts. There is no link state
+// in it, so keeping link state current would mean a fifth command, which is the
+// cost this split exists to avoid.
+const ifStatusMetaTarget = 30 * time.Second
 
 const ifCounterProps = "rx-byte,tx-byte,rx-error,tx-error,rx-drop,tx-drop," +
 	"tx-queue-drop,link-downs,last-link-up-time"
@@ -339,10 +346,17 @@ func round3(f float64) float64 {
 // metaTicks is how many polls apart the three metadata reads are.
 //
 // DERIVED, NOT CONFIGURED. There is no second interval for an operator to set:
-// the metadata cadence is the poll interval rounded up to the target, so the two
-// can never be tuned into disagreeing. Note what the bounds mean — a poll at or
-// above the target returns 1 and every tick reads all four menus, which is
-// exactly the behaviour this collector had before the split.
+// the metadata cadence is the poll interval rounded to the target, so the two can
+// never be tuned into disagreeing. A poll at or above the target returns 1 and
+// every tick reads all four menus, which is exactly the behaviour this collector
+// had before the split.
+//
+// THERE IS NO CAP ON THE COUNT, and one was removed rather than raised. It read
+// "a very fast poll must not stretch the metadata over an unbounded number of
+// ticks" — but the bound that matters is TIME, and the target already is it. A
+// tick cap could only ever pull the metadata cadence BELOW the target, which is
+// the opposite of what it was there for: at a 1s poll and a 30s target it would
+// have quietly delivered 8 seconds.
 func (s *IfStatus) metaTicks() int {
 	p := s.pollMs.duration()
 	if p <= 0 {
@@ -351,9 +365,6 @@ func (s *IfStatus) metaTicks() int {
 	n := int((ifStatusMetaTarget + p/2) / p) // nearest, not floor
 	if n < 1 {
 		return 1
-	}
-	if n > ifStatusMetaMaxTicks {
-		return ifStatusMetaMaxTicks
 	}
 	return n
 }

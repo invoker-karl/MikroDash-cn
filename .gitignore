@@ -68,6 +68,11 @@ port_drift_notes.md
 # images under screenshots/ that the README renders.
 /*.png
 
+# Operator scratch: screenshots and temp files kept out of the repo root, so a
+# working session has somewhere to put them that is not next to the source.
+# ROOT-ANCHORED so it cannot swallow a directory of that name deeper in the tree.
+/.temp/
+
 # ── Transient gate bundles ────────────────────────────────────────────────
 #
 # Each gate esbuilds its port half to `testdata/.<name>-port.cjs` and removes it

@@ -190,9 +190,15 @@ func StartStats(every time.Duration) {
 				ms = append(ms, mc{m, n})
 			}
 			sort.Slice(ms, func(i, j int) bool { return ms[i].n > ms[j].n })
-			tops := make([]string, 0, 8)
+			// FOURTEEN, NOT EIGHT. Eight was enough while one collector was 76% of
+			// the load; once the fast/slow split landed, the menus that had been
+			// the top four fell out of the list entirely and the instrument could
+			// no longer say whether they were at 2 a minute or 11. A tool for
+			// finding where the total goes has to keep resolving it as the total
+			// shrinks.
+			tops := make([]string, 0, 14)
 			for i, x := range ms {
-				if i == 8 {
+				if i == 14 {
 					break
 				}
 				tops = append(tops, fmt.Sprintf("%s=%d", x.m, x.n))

@@ -344,7 +344,36 @@ type Routing struct {
 
 	// bgpOnly, when set, skips the route tables. See Tick.
 	bgpOnly bool
+
+	// ticks paces the route tables against the BGP menus. See routeConfigEvery.
+	ticks int
 }
+
+// routeConfigEvery is how many polls apart the route tables are re-read.
+//
+// ── THE FAST/SLOW RULE, WHICH THIS COLLECTOR WAS THE LAST TO APPLY ──────────
+//
+// The operator's rule (2026-09-08): a collector's LIVE reads keep its poll, and
+// its reads of things that rarely change go to "a 30 second cadence or longer".
+// Seven collectors already did this — `bridgeConfigEvery`, `vlanConfigEvery`,
+// `pppConfigEvery`, `capsConfigEvery`, `dnsConfigEvery`, `wanConfigEvery`,
+// `wifiConfigEvery`, plus `system`'s hand-rolled `systemHealthEvery` — and this
+// one did not, so it read two whole route tables every ten seconds.
+//
+// WHICH HALF IS WHICH, and it is not the obvious one. BGP SESSION STATE is the
+// live half: it is what flaps, and the peers payload is what the alert rules
+// read. The ROUTE TABLES are the slow half — they are large, and on a network
+// without a dynamic protocol they do not move at all. Splitting the other way
+// round would have kept the cheap read fast and the expensive one slow.
+//
+// Three at the 10s default is 30 seconds, the floor of the rule rather than the
+// 60-120s its neighbours sit at, because a route table IS more volatile than a
+// bridge port list — just not ten-seconds volatile.
+//
+// A WRITE DOES NOT WAIT FOR IT: `RefreshNow` re-reads the routes immediately and
+// is what the route write path calls, so an operator never watches their own
+// edit take half a minute to appear.
+const routeConfigEvery = 3
 
 func NewRouting(ros Reader, emit Emit, pollMs int) *Routing {
 	r := &Routing{
@@ -424,7 +453,8 @@ func (r *Routing) RefreshNow() {
 	r.emitPayload(r.buildPeers())
 }
 
-// Tick is the poll body: routes AND the BGP menus.
+// Tick is the poll body: the BGP menus every time, the routes every
+// routeConfigEvery.
 func (r *Routing) Tick() {
 	if !r.ros.Connected() {
 		return
@@ -440,9 +470,12 @@ func (r *Routing) Tick() {
 	// The live pool passes `bgpOnly: true` for exactly this reason
 	// (`alertSessions.js`), and says so. Without the option this port would read
 	// both tables on every alert tick for every router.
-	if !r.bgpOnly {
+	// The route tables are the SLOW lane; the BGP menus are the fast one. Tick 0
+	// reads both, so the first payload is never missing its routes.
+	if !r.bgpOnly && r.ticks%routeConfigEvery == 0 {
 		r.loadRoutes()
 	}
+	r.ticks++
 	r.loadBGP()
 	r.emitPayload(r.buildPeers())
 }
