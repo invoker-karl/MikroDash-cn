@@ -99,3 +99,53 @@ func (s *Session) reasonsLocked() Reasons {
 		Devices: s.holds["devices"],
 	}
 }
+
+// applyReasons brings the running collector set into line with why this session
+// is alive.
+//
+// ── IT DOES NOTHING WHILE A VIEWER IS PRESENT, AND THAT IS THE POINT ────────
+//
+// `Needs` says a viewer wants everything, which is a statement about what is
+// ALLOWED to run, not what should be running now. Page gating decides the rest,
+// and it is the reason an idle browser does not poll twenty-two collectors.
+// Resuming everything here because a viewer exists would undo all of it.
+//
+// So the prescriptive case is the other one: with NO viewer, the session runs
+// exactly the union of what its holders need, and nothing else. That is where
+// the saving is — an alerting router runs six collectors instead of fifteen.
+//
+// IDEMPOTENT, and called from every transition rather than one: connect, a
+// viewer arriving or leaving, a hold taken or dropped. The order those happen in
+// is racy — a Retain releases its own viewer reference while the connect
+// goroutine is still dialling — so this converges rather than being sequenced.
+func (s *Session) applyReasons() {
+	// NOTHING TO PRUNE BEFORE THE LINK IS UP. A hold taken while the session is
+	// still dialling finds no collectors running, and the connect path calls this
+	// itself once they are -- which is what makes the racy order between Retain
+	// and the connect goroutine converge instead of needing to be sequenced.
+	if s == nil || !s.Connected() {
+		return
+	}
+	s.mu.Lock()
+	why := s.reasonsLocked()
+	s.mu.Unlock()
+
+	if why.Viewer {
+		return
+	}
+	targets := s.targets()
+	for _, key := range targetKeys {
+		t, ok := targets[key]
+		if !ok {
+			continue
+		}
+		if Needs(key, why) {
+			// THROUGH THE FUNNEL, so the enabled check and the dormancy veto
+			// still apply. A collector the operator turned off for this router
+			// must not come back because alerting wants it.
+			s.ResumeCollector(key)
+			continue
+		}
+		t.suspend()
+	}
+}

@@ -1031,6 +1031,7 @@ func (m *Manager) Retain(routerID, reason string) (*Session, error) {
 	}
 	s.holds[reason] = true
 	s.mu.Unlock()
+	s.applyReasons()
 	// Acquire took a VIEWER reference, and this is not a viewer. Giving it back
 	// leaves the hold as the only thing keeping the session, which is what the
 	// caller asked for -- and it means an unheld session still lingers and dies
@@ -1052,6 +1053,7 @@ func (m *Manager) Drop(routerID, reason string) {
 	delete(s.holds, reason)
 	empty := len(s.holds) == 0 && s.refs <= 0
 	s.mu.Unlock()
+	s.applyReasons()
 	if !empty {
 		return
 	}
@@ -1562,6 +1564,19 @@ func (s *Session) connectLoop() {
 			// startup half for any router the background pools hold, because
 			// both build their sessions through the same connect path.
 			go s.primeAll()
+
+			// ── PHASE 4.3c: PRUNE TO WHAT THE HOLDERS NEED ──────────────
+			//
+			// The block below starts everything, which is right for a viewer
+			// and wrong for a session held only for alerting: fifteen
+			// collectors where six are read, and `wan` alone polls every two
+			// seconds. This suspends the rest, and does nothing at all when a
+			// viewer is present. See applyReasons.
+			//
+			// AFTER the starts rather than instead of them, so the start list
+			// stays the one statement of what a session runs and this is
+			// visibly a narrowing of it.
+			defer s.applyReasons()
 
 			// #105: EVERY START IS GATED on the router's resolved config, so a
 			// collector the operator turned off for this router is never
