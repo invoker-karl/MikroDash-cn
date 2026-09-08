@@ -14,7 +14,9 @@ package session
 // occupant and is suspended when the last viewer leaves.
 
 import (
+	"errors"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,6 +117,24 @@ type Session struct {
 	mu     sync.Mutex
 	client *routeros.Client
 	refs   int
+	// holds is the NON-VIEWER reasons this session must stay alive, by name.
+	//
+	// ── PHASE 4.3: WHY A SEPARATE SET AND NOT MORE refs ─────────────────────
+	//
+	// `refs` counts viewers, and its zero has a meaning the grace timer depends
+	// on: "the last browser left, start the countdown". A hold is a different
+	// claim -- alerting, history recording, the Devices page -- and it does not
+	// expire on a timer, because nobody is coming back to renew it.
+	//
+	// Folding the two into one counter would make "held for alerting" look like
+	// a viewer who never leaves, and the linger timer would never run for a
+	// router that has alerting on. Keeping them apart means the grace still
+	// governs viewers exactly as it did, and a hold simply vetoes teardown.
+	//
+	// NAMED rather than counted, so a caller cannot leak a hold by releasing
+	// twice, and so a stuck session can be explained: the names say who is
+	// keeping it.
+	holds map[string]bool
 	// linger is the pending idle teardown, armed when the last viewer leaves and
 	// stopped when one comes back. Non-nil only while the grace is running.
 	linger    *time.Timer
@@ -591,6 +611,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		history:       m.history,
 		connThreshMs:  historywire.ThresholdMs(connDownSecOf(rec)),
 		refs:          1,
+		holds:         map[string]bool{},
 		wake:          make(chan struct{}, 1),
 		cfg: routeros.Config{
 			Host: rec.Host, Port: rec.Port,
@@ -931,6 +952,101 @@ func (m *Manager) Release(routerID string) {
 	m.mu.Unlock()
 }
 
+// spokenForLocked reports whether anything still needs this session: a viewer,
+// or a non-viewer hold. The caller holds s.mu.
+//
+// EXTRACTED SO IT CAN BE TESTED. The teardown around it dereferences a fully
+// built session -- a client, a scheduler, a history wire -- so a test that drove
+// `idleOut` with a hand-made Session panicked before reaching the assertion. The
+// DECISION is the part worth pinning, and it is one line.
+func (s *Session) spokenForLocked() bool {
+	return s.refs > 0 || len(s.holds) > 0
+}
+
+// Retain keeps a session alive for a reason that is not a viewer.
+//
+// ── PHASE 4.3 ───────────────────────────────────────────────────────────────
+//
+// A Session already feeds the alert evaluator and the history recorder, at one
+// interception point in its emit closure -- so it does everything the background
+// pools do. The ONLY reason those pools exist is that a Session is reference
+// counted against viewers and dies when the last browser leaves.
+//
+// This is what lets it outlive them. `Retain(id, "alerts")` says the router needs
+// its rules evaluated whether or not anybody is looking; the session is built if
+// it is not already there, and teardown is vetoed while any hold stands.
+//
+// IDEMPOTENT BY NAME. Two calls with the same reason are one hold, so a caller
+// that re-syncs on every settings change cannot leak.
+func (m *Manager) Retain(routerID, reason string) (*Session, error) {
+	if reason == "" {
+		return nil, errors.New("session: a hold needs a reason")
+	}
+	s, err := m.Acquire(routerID)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if s.holds == nil {
+		s.holds = map[string]bool{}
+	}
+	s.holds[reason] = true
+	s.mu.Unlock()
+	// Acquire took a VIEWER reference, and this is not a viewer. Giving it back
+	// leaves the hold as the only thing keeping the session, which is what the
+	// caller asked for -- and it means an unheld session still lingers and dies
+	// exactly as before.
+	m.Release(routerID)
+	return s, nil
+}
+
+// Drop gives up one named hold. The session goes when nothing holds it and no
+// viewer has it.
+func (m *Manager) Drop(routerID, reason string) {
+	m.mu.Lock()
+	s, ok := m.live[routerID]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	delete(s.holds, reason)
+	empty := len(s.holds) == 0 && s.refs <= 0
+	s.mu.Unlock()
+	if !empty {
+		return
+	}
+	// The last hold is gone and no viewer is left, so start the same countdown a
+	// departing viewer starts. NOT an immediate teardown: a router that loses
+	// alerting and gains a viewer in the same sync should not be rebuilt.
+	m.mu.Lock()
+	s.mu.Lock()
+	if s.linger != nil {
+		s.linger.Stop()
+	}
+	s.linger = time.AfterFunc(m.grace(), func() { m.idleOut(routerID, s) })
+	s.mu.Unlock()
+	m.mu.Unlock()
+}
+
+// Held reports the reasons a session is being kept alive without a viewer.
+func (m *Manager) Held(routerID string) []string {
+	m.mu.Lock()
+	s, ok := m.live[routerID]
+	m.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.holds))
+	for r := range s.holds {
+		out = append(out, r)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // sameConnection reports whether two configs reach the same router the same way.
 //
 // Named to stay clear of `routers.SameEndpoint`, which looks similar and answers
@@ -1097,7 +1213,16 @@ func (m *Manager) idleOut(routerID string, s *Session) {
 		return
 	}
 	s.mu.Lock()
-	if s.refs > 0 {
+	// A VIEWER CAME BACK, or something is holding this session for a reason that
+	// is not a viewer at all.
+	//
+	// The second half is phase 4.3: alerting and history recording keep a router
+	// alive with nobody looking at it, which is the job the background pools were
+	// built to do. Checked HERE rather than at Release, because Release is the
+	// viewer's departure and a hold has nothing to say about that -- the grace
+	// should still run, and simply find at the end of it that the session is
+	// spoken for.
+	if s.spokenForLocked() {
 		s.linger = nil
 		s.mu.Unlock()
 		m.mu.Unlock()
