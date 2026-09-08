@@ -694,8 +694,6 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// matches what is scarce, for the same reason `roslimit` is keyed that way.
 	// Collectors that have not opted in read directly and are unaffected.
 	s.roscache = roscache.New(reader{s})
-	s.ifStatus.UseCache(s.roscache)
-	s.wan.UseCache(s.roscache)
 	s.packages = collect.NewPackages(reader{s}, emit, s.eff.Poll["packages"])
 	s.routing = collect.NewRouting(reader{s}, emit, s.eff.Poll["routing"])
 	// Built BEFORE dhcpNetworks, which takes it as its lease source: a subnet's
@@ -805,6 +803,25 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// the page all name the same interface.
 	s.traffic = collect.NewTraffic(reader{s}, emit,
 		defaultIfOr(rec.DefaultIf, defaultIfOr(globalDefaultIf(cfgSettings), "ether1")), 5)
+
+	// ── WHO SHARES A MENU WITH WHOM ────────────────────────────────────────
+	//
+	// ONE PLACE, and after every collector is built rather than beside each
+	// constructor. Opting in beside the constructor is what an earlier version
+	// did, and it only worked for the two collectors built early enough; the
+	// rest would have been wired before they existed. Keeping the list here also
+	// makes it readable as what it is — the answer to "which collectors can save
+	// each other a read" — instead of a line scattered through 150 lines of
+	// construction.
+	//
+	// A collector NOT on this list reads directly and is unaffected. That is the
+	// safe default and the reason this can be extended one menu at a time.
+	for _, c := range []interface{ UseCache(*roscache.Cache) }{
+		s.ifStatus, s.wan, // /interface/print
+		s.capsman, s.wifi, s.wireless, s.topology, // the wifi family, 4 menus
+	} {
+		c.UseCache(s.roscache)
+	}
 
 	m.live[routerID] = s
 	go s.connectLoop()

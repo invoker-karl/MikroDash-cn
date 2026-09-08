@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -127,6 +128,10 @@ type Wifi struct {
 	poll   *pollLoop
 	pollMs *pollInterval
 
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
+
 	mu sync.Mutex
 	// stack is "" while unprobed, then "wifi" | "wireless" | "none".
 	stack  string
@@ -158,11 +163,12 @@ func (w *Wifi) soft(cmd routeros.Cmd) []routeros.Reply {
 }
 
 func (w *Wifi) readWifi() (wifiView, error) {
-	ifaces, err := w.ros.Do(wifiIfaceCmd)
+	// THROUGH THE CACHE, along with the registration table below.
+	ifaces, err := readVia(w.cache, w.ros, wifiIfaceCmd, w.pollMs.duration())
 	if err != nil {
 		return wifiView{}, err
 	}
-	reg := w.soft(wifiRegCmd)
+	reg, _ := readVia(w.cache, w.ros, wifiRegCmd, w.pollMs.duration())
 	nets, radios := BuildWifiView(WifiViewInput{
 		Ifaces:   ifaces,
 		Configs:  w.soft(wifiConfigCmd),
@@ -406,3 +412,7 @@ func (w *Wifi) SetPollMs(ms int) {
 	w.pollMs.set(ms)
 	w.poll.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (w *Wifi) UseCache(c *roscache.Cache) { w.cache = c }

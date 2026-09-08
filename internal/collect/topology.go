@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -1215,6 +1216,10 @@ type Topology struct {
 	routerID string
 	rates    RateSource
 
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
+
 	mu        sync.Mutex
 	last      *TopologyPayload
 	discovery *TopoDiscovery
@@ -1664,18 +1669,19 @@ func (t *Topology) readWifi() (map[string]string, map[string]string, map[string]
 	capByPrefix := map[string]string{}
 	assoc := map[string]TopoAssoc{}
 
-	ifaces, err := t.ros.Do(topoWifiCmd)
+	// THROUGH THE CACHE: capsman, wifi and wireless read these same four menus.
+	ifaces, err := readVia(t.cache, t.ros, topoWifiCmd, t.pollMs.duration())
 	legacy := false
 	var reg []routeros.Reply
 	if err == nil {
-		reg, _ = t.ros.Do(topoRegCmd)
+		reg, _ = readVia(t.cache, t.ros, topoRegCmd, t.pollMs.duration())
 	} else {
-		ifaces, err = t.ros.Do(topoWlCmd)
+		ifaces, err = readVia(t.cache, t.ros, topoWlCmd, t.pollMs.duration())
 		if err != nil {
 			return ifaceRadio, capByPrefix, assoc
 		}
 		legacy = true
-		reg, _ = t.ros.Do(topoWlRegCmd)
+		reg, _ = readVia(t.cache, t.ros, topoWlRegCmd, t.pollMs.duration())
 	}
 
 	// radio-mac per interface, FOLLOWING master-interface for virtual APs: a
@@ -1789,3 +1795,7 @@ func (t *Topology) SetPollMs(ms int) {
 	t.pollMs.set(ms)
 	t.loop.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (t *Topology) UseCache(c *roscache.Cache) { t.cache = c }

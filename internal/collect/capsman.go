@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -495,6 +496,10 @@ type Capsman struct {
 	poll   *pollLoop
 	pollMs *pollInterval
 
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
+
 	mu       sync.Mutex
 	manager  routeros.Reply
 	cap      routeros.Reply
@@ -570,8 +575,11 @@ func (c *Capsman) Tick() {
 
 	remote := c.read(capsRemoteCmd, nil)
 	radios := c.read(capsRadioCmd, nil)
-	ifaces := c.read(capsIfaceCmd, nil)
-	reg := c.read(capsRegCmd, nil)
+	// THROUGH THE CACHE. Four collectors read each of these two menus, more
+	// than any other in the tree. `read`'s availability latch is not wanted
+	// here (both call sites pass nil), so readVia is the whole of it.
+	ifaces, _ := readVia(c.cache, c.ros, capsIfaceCmd, c.pollMs.duration())
+	reg, _ := readVia(c.cache, c.ros, capsRegCmd, c.pollMs.duration())
 
 	c.mu.Lock()
 	c.ticks++
@@ -709,3 +717,7 @@ func (c *Capsman) SetPollMs(ms int) {
 	c.pollMs.set(ms)
 	c.poll.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (c *Capsman) UseCache(rc *roscache.Cache) { c.cache = rc }

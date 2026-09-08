@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 	"mikrodash/internal/wifiscan"
 )
@@ -342,6 +343,10 @@ type Wireless struct {
 	pollMs *pollInterval
 	leases *DHCPLeases
 
+	// cache coalesces reads shared with another collector; nil outside a live
+	// session, which is every test. See collect/cache.go.
+	cache *roscache.Cache
+
 	mu     sync.Mutex
 	mode   string // wifi | wireless | none, latched on the first stack that answers
 	capsOK bool
@@ -481,22 +486,22 @@ func (w *Wireless) Tick() {
 
 	switch mode {
 	case "wifi":
-		rows, err := w.ros.Do(wlRegWifiCmd)
+		rows, err := readVia(w.cache, w.ros, wlRegWifiCmd, w.pollMs.duration())
 		if err == nil {
 			add(rows, false)
 		}
 	case "wireless":
-		rows, err := w.ros.Do(wlRegLegacyCmd)
+		rows, err := readVia(w.cache, w.ros, wlRegLegacyCmd, w.pollMs.duration())
 		if err == nil {
 			add(rows, false)
 		}
 	default:
 		// Probe. The modern stack first: on RouterOS 7.2x every board in this
 		// fleet answered it, including one still on 802.11ac.
-		if rows, err := w.ros.Do(wlRegWifiCmd); err == nil {
+		if rows, err := readVia(w.cache, w.ros, wlRegWifiCmd, w.pollMs.duration()); err == nil {
 			mode = "wifi"
 			add(rows, false)
-		} else if rows, err := w.ros.Do(wlRegLegacyCmd); err == nil {
+		} else if rows, err := readVia(w.cache, w.ros, wlRegLegacyCmd, w.pollMs.duration()); err == nil {
 			mode = "wireless"
 			add(rows, false)
 		} else {
@@ -575,8 +580,17 @@ func (w *Wireless) refreshSSIDs() {
 		order = []routeros.Cmd{wlIfaceLegacy}
 	}
 
+	// THROUGH THE CACHE. This collector asks for EVERY field, so it is the one
+	// that widens each of these menus' union to the whole row — see roscache's
+	// note on widening. That was the operator's call on 2026-09-08: one fewer
+	// command per sweep is worth a fatter reply for the other three consumers,
+	// because concurrent channels are the bottleneck and bytes are not.
+	//
+	// The loop dispatches across BOTH stacks from one call site, which is why
+	// /interface/wifi/print and /interface/wireless/print cannot be routed in
+	// separate commits.
 	for _, cmd := range order {
-		rows, err := w.ros.Do(cmd)
+		rows, err := readVia(w.cache, w.ros, cmd, w.pollMs.duration())
 		if err != nil {
 			continue
 		}
@@ -639,3 +653,7 @@ func (w *Wireless) SetPollMs(ms int) {
 	w.pollMs.set(ms)
 	w.loop.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (w *Wireless) UseCache(c *roscache.Cache) { w.cache = c }
