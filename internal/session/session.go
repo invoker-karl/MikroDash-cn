@@ -849,8 +849,8 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// A collector NOT on this list reads directly and is unaffected. That is the
 	// safe default and the reason this can be extended one menu at a time.
 	for _, c := range []interface{ UseCache(*roscache.Cache) }{
-		s.ifStatus, s.wan, // /interface/print
-		s.capsman, s.wifi, s.wireless, s.topology, // the wifi family, 4 menus
+		s.ifStatus,                     // /interface/print, with wan
+		s.wifi, s.wireless, s.topology, // the wifi family, 4 menus
 		s.vlans,        // /interface/vlan, with topology
 		s.dhcpNetworks, // /ip/address with ifStatus+wan, detect-internet with wan
 		s.bridges,      // /interface/bridge/port with vlans, /host with topology
@@ -865,7 +865,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// listing it twice would read as an oversight rather than as the two
 		// distinct uses it is.
 		s.netwatch, s.talkers, s.dns, s.packages, s.rosUsers, s.queues, s.bridges,
-		s.system, s.conns, s.dhcpLeases, s.dhcpNetworks,
+		s.system, s.conns, s.dhcpLeases, s.dhcpNetworks, s.wan, s.capsman,
 		s.routing, // /ip/route, with wan
 	} {
 		c.UseCache(s.roscache)

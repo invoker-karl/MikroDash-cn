@@ -328,6 +328,8 @@ type Wan struct {
 	pollMs *pollInterval
 	// cache coalesces reads shared with another collector; see collect/cache.go.
 	cache *roscache.Cache
+	// See scheduled.go: subscribes to detect-internet, the live uplink state.
+	sched scheduled
 
 	poll *pollLoop
 
@@ -353,6 +355,9 @@ func NewWan(ros Reader, emit Emit, rates RateSource, pollMs int) *Wan {
 	w.poll = newPollLoop(func() { w.Tick() }, func() time.Duration {
 		return w.pollMs.duration()
 	})
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	w.sched = scheduled{loop: w.poll, menu: wanDetectCmd.Path, apply: w.apply,
+		cadence: w.pollMs.duration}
 	return w
 }
 
@@ -418,7 +423,47 @@ func (w *Wan) Tick() {
 	}
 	w.ticks++
 
-	detect := w.read(wanDetectCmd, &w.detectAvailable)
+	w.applyLocked(w.read(wanDetectCmd, &w.detectAvailable))
+}
+
+// apply is what the scheduler calls with the detect-internet state, which is
+// this collector's live menu: it is what says whether an uplink is actually
+// carrying traffic. The routes are read alongside it, and the interface, DHCP
+// and address config keeps its slow lane -- see scheduled.go on why a collector
+// subscribes to ONE menu.
+func (w *Wan) apply(detect []routeros.Reply, err error) {
+	if !w.ros.Connected() {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err != nil {
+		// The latch `read` would have set, derived from what the scheduler hands
+		// over: a router without the detect-internet menu must stop being asked
+		// on this path too.
+		if menuMissing(err) {
+			no := false
+			w.detectAvailable = &no
+		}
+		return
+	}
+	if w.detectAvailable == nil {
+		yes := true
+		w.detectAvailable = &yes
+	}
+
+	if w.ticks%wanConfigEvery == 0 {
+		w.ifaces, _ = readVia(w.cache, w.ros, wanIfaceCmd, w.pollMs.duration())
+		w.dhcp = w.read(wanDhcpCmd, nil)
+		w.addrs = w.read(wanAddrCmd, nil)
+	}
+	w.ticks++
+	w.applyLocked(detect)
+}
+
+// applyLocked builds and emits. The caller holds the lock.
+func (w *Wan) applyLocked(detect []routeros.Reply) {
 	routes := w.read(wanRouteCmd, nil)
 
 	built := BuildWanRows(detect, w.dhcp, routes, w.addrs, w.ifaces, w.rates)
@@ -486,34 +531,36 @@ func (w *Wan) RefreshNow() {
 }
 
 func (w *Wan) Start() {
-	if w.ros.Connected() {
+	if w.ros.Connected() && !w.sched.scheduling() {
 		w.Tick()
 	}
-	w.poll.start()
+	w.sched.begin()
 }
 
 func (w *Wan) Reconnected() {
-	w.poll.stop()
+	w.sched.end()
 	w.mu.Lock()
 	w.lastFp = ""
 	w.ticks = 0
 	w.detectAvailable = nil
 	w.denied = false
 	w.mu.Unlock()
-	w.Tick()
-	w.poll.start()
+	if !w.sched.scheduling() {
+		w.Tick()
+	}
+	w.sched.begin()
 }
 
-func (w *Wan) Suspend() { w.poll.stop() }
+func (w *Wan) Suspend() { w.sched.end() }
 
 func (w *Wan) Resume() {
 	if w.ros.Connected() {
-		w.poll.start()
+		w.sched.begin()
 	}
 }
 
 func (w *Wan) Stop() {
-	w.poll.stop()
+	w.sched.end()
 	w.mu.Lock()
 	w.lastFp = ""
 	w.mu.Unlock()
@@ -526,6 +573,9 @@ func (w *Wan) SetPollMs(ms int) {
 	w.poll.retime()
 }
 
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (w *Wan) UseCache(c *roscache.Cache) { w.cache = c }
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+// Same cache, two uses.
+func (w *Wan) UseCache(c *roscache.Cache) {
+	w.cache = c
+	w.sched.useCache(c)
+}

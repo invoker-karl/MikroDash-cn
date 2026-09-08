@@ -499,6 +499,9 @@ type Capsman struct {
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
+	// See scheduled.go: subscribes to the registration table, the clients, which
+	// is the only menu here that changes on its own.
+	sched scheduled
 
 	mu       sync.Mutex
 	manager  routeros.Reply
@@ -521,6 +524,15 @@ func NewCapsman(ros Reader, emit Emit, pollMs int) *Capsman {
 		profiles: map[string][]routeros.Reply{}}
 	c.poll = newPollLoop(func() { c.Tick() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	//
+	// The scheduled path runs `loadConfigIfDue` too. An earlier version of this
+	// did not, on the reasoning that a write marks `dirty` and RefreshNow ticks --
+	// and that reasoning was wrong, because Resume begins a subscription without
+	// ticking, so a page refocus left the manager row empty for good. See
+	// loadConfigIfDue.
+	c.sched = scheduled{loop: c.poll, menu: capsRegCmd.Path, apply: c.apply,
+		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond }}
 	return c
 }
 
@@ -546,6 +558,25 @@ func (c *Capsman) read(cmd routeros.Cmd, avail **bool) []routeros.Reply {
 }
 
 func (c *Capsman) Tick() {
+	c.loadConfigIfDue()
+	reg, _ := readVia(c.cache, c.ros, capsRegCmd, c.pollMs.duration())
+	c.applyRest(reg)
+}
+
+// loadConfigIfDue reads the manager, the CAP, the provisioning rules and the
+// four profile menus, on the dirty-or-every-N cadence.
+//
+// ── CALLED FROM BOTH PATHS, AND THAT IS A FIX ───────────────────────────────
+//
+// This block lived only in Tick, and the scheduled path did not run it. The
+// consequence was not subtle and no test saw it: `Resume` begins a subscription
+// without ticking, so a page blur and refocus left `manager` and `cap` empty for
+// good, and the CAPsMAN page reported MODE Off on a router whose manager was
+// enabled. Everything else on the page -- CAPs, radios, clients -- kept working,
+// which is what made it look fine.
+//
+// Found by reading the page against the router, not by a failing test.
+func (c *Capsman) loadConfigIfDue() {
 	c.mu.Lock()
 	needConfig := c.dirty || c.ticks%capsConfigEvery == 0
 	c.mu.Unlock()
@@ -572,14 +603,28 @@ func (c *Capsman) Tick() {
 		c.dirty = false
 		c.mu.Unlock()
 	}
+}
 
+// apply is what the scheduler calls with the registration table -- the clients,
+// which is the only thing here that changes on its own. The CAP list, the radios
+// and the interface list are read alongside it, and the profiles keep their own
+// dirty-or-every-N cadence in Tick.
+func (c *Capsman) apply(reg []routeros.Reply, err error) {
+	if err != nil {
+		return
+	}
+	c.loadConfigIfDue()
+	c.applyRest(reg)
+}
+
+// applyRest reads the menus that accompany the registration table and emits.
+func (c *Capsman) applyRest(reg []routeros.Reply) {
 	remote := c.read(capsRemoteCmd, nil)
 	radios := c.read(capsRadioCmd, nil)
 	// THROUGH THE CACHE. Four collectors read each of these two menus, more
 	// than any other in the tree. `read`'s availability latch is not wanted
 	// here (both call sites pass nil), so readVia is the whole of it.
 	ifaces, _ := readVia(c.cache, c.ros, capsIfaceCmd, c.pollMs.duration())
-	reg, _ := readVia(c.cache, c.ros, capsRegCmd, c.pollMs.duration())
 
 	c.mu.Lock()
 	c.ticks++
@@ -688,24 +733,31 @@ func (c *Capsman) RefreshNow() {
 	c.Tick()
 }
 
-func (c *Capsman) Start() { c.Tick(); c.poll.start() }
+func (c *Capsman) Start() {
+	if !c.sched.scheduling() {
+		c.Tick()
+	}
+	c.sched.begin()
+}
 
 func (c *Capsman) Reconnected() {
-	c.poll.stop()
+	c.sched.end()
 	c.mu.Lock()
 	c.lastFP = ""
 	c.dirty = true
 	c.managerAvail, c.capAvail = nil, nil
 	c.mu.Unlock()
-	c.Tick()
-	c.poll.start()
+	if !c.sched.scheduling() {
+		c.Tick()
+	}
+	c.sched.begin()
 }
 
-func (c *Capsman) Suspend() { c.poll.stop() }
-func (c *Capsman) Resume()  { c.poll.start() }
+func (c *Capsman) Suspend() { c.sched.end() }
+func (c *Capsman) Resume()  { c.sched.begin() }
 
 func (c *Capsman) Stop() {
-	c.poll.stop()
+	c.sched.end()
 	c.mu.Lock()
 	c.lastFP = ""
 	c.mu.Unlock()
@@ -720,4 +772,7 @@ func (c *Capsman) SetPollMs(ms int) {
 
 // UseCache routes this collector's shareable reads through a per-router cache.
 // Set once, before Start; nil leaves every read direct.
-func (c *Capsman) UseCache(rc *roscache.Cache) { c.cache = rc }
+func (c *Capsman) UseCache(rc *roscache.Cache) {
+	c.cache = rc
+	c.sched.useCache(rc)
+}
