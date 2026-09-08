@@ -386,3 +386,23 @@ func (p *Ping) SetPollMs(ms int) {
 	p.stopStream()
 	p.startStream()
 }
+
+// Seed fills the RTT history from somewhere that already has it. See
+// `Traffic.Seed` for why the background pool is the source and the history
+// database is not.
+//
+// NEVER OVERWRITES: a non-empty history is this collector's own, and better.
+func (p *Ping) Seed(points []PingPoint) {
+	if len(points) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.history) > 0 {
+		return
+	}
+	if len(points) > pingMaxHistory {
+		points = points[len(points)-pingMaxHistory:]
+	}
+	p.history = append([]PingPoint{}, points...)
+}

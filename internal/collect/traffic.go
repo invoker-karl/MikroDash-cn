@@ -622,3 +622,61 @@ func (t *Traffic) onPacket(row routeros.Reply) {
 		t.emit("", "wan:status", wan)
 	}
 }
+
+// Seed fills the history ring for one interface from somewhere that already has
+// it, so a chart draws immediately instead of growing from one point.
+//
+// ── PHASE 5.1: WHERE THE POINTS COME FROM, AND WHY NOT THE DATABASE ─────────
+//
+// A Session is reference counted and built when the first viewer arrives, so its
+// ring is EMPTY at that moment and no amount of priming fills it faster than real
+// time. The points have to come from something that already holds them.
+//
+// The history DATABASE looks like that something and is not: `internal/history`
+// buckets to one row per interface per MINUTE, carrying the minute's mean, while
+// this ring is per-second with `maxPoints = historyMinutes * 60`. A five-minute
+// window wants three hundred points and the database can offer five.
+//
+// The BACKGROUND POOL is the right source. It runs this same collector for every
+// router with reporting enabled, streaming continuously on a connection it
+// already holds, so its ring is per-second and current -- and a live Session
+// displaces that pool, which is exactly when the copy should happen.
+//
+// ── IT NEVER OVERWRITES ─────────────────────────────────────────────────────
+//
+// A non-empty ring is live data this collector produced, and it is always better
+// than a seed. Seeding is for the blank case only, so a late or duplicated call
+// is a no-op rather than a rewind.
+//
+// `lastData` is deliberately NOT touched. That field is the STREAM WATCHDOG's,
+// and telling it a seed was traffic would suppress the restart that recovers a
+// stream which died silently -- a different question from whether the chart has
+// anything to draw.
+func (t *Traffic) Seed(ifName string, points []TrafficPoint) {
+	if ifName == "" || len(points) == 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.hist[ifName]) > 0 {
+		return
+	}
+	if len(points) > t.maxPoints {
+		points = points[len(points)-t.maxPoints:]
+	}
+	t.hist[ifName] = append([]TrafficPoint{}, points...)
+}
+
+// SeedableInterfaces is what a seed source holds, so a caller can copy every
+// interface without knowing which ones the pool happened to stream.
+func (t *Traffic) SeedableInterfaces() map[string][]TrafficPoint {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string][]TrafficPoint, len(t.hist))
+	for k, v := range t.hist {
+		if len(v) > 0 {
+			out[k] = append([]TrafficPoint{}, v...)
+		}
+	}
+	return out
+}

@@ -578,3 +578,47 @@ func buildsRouter(build []Router, id string) bool {
 	}
 	return false
 }
+
+// GraphSeed is the per-second history this pool has accumulated for one router,
+// for a live Session that is about to displace it.
+//
+// ── PHASE 5.1: WHY THE POOL IS THE SOURCE ───────────────────────────────────
+//
+// A Session is reference counted and built when the first viewer arrives, so its
+// traffic and ping rings are EMPTY at that moment. The operator's requirement is
+// that no page waits for data, and no amount of priming fills a per-second window
+// faster than real time -- so the points must come from something that already
+// holds them.
+//
+// This pool already holds them. For every router with reporting enabled it runs
+// `traffic` on the default interface and `ping` continuously, on a connection it
+// keeps anyway, so its rings are per-second and current. The history DATABASE is
+// NOT an alternative: `internal/history` buckets to one row per minute, and the
+// chart is per-second.
+//
+// Returns empty for a router this pool is not holding, or one whose collectors
+// have not produced yet. The caller seeds unconditionally and `collect`'s Seed
+// methods ignore nothing.
+func (p *Pool) GraphSeed(routerID string) (traffic map[string][]collect.TrafficPoint, ping []collect.PingPoint) {
+	p.mu.Lock()
+	s := p.sessions[routerID]
+	p.mu.Unlock()
+	if s == nil {
+		return nil, nil
+	}
+	// The collector pointers are read under the SESSION's lock, not the pool's:
+	// `buildCollectors` assigns them, and holding the pool lock across a
+	// collector call would put this on the wrong side of the pool/session lock
+	// order that Drop's own comment sets out.
+	s.mu.Lock()
+	tr, pg := s.traffic, s.ping
+	s.mu.Unlock()
+
+	if tr != nil {
+		traffic = tr.SeedableInterfaces()
+	}
+	if pg != nil {
+		ping = pg.History().History
+	}
+	return traffic, ping
+}

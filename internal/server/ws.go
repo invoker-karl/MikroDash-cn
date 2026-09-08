@@ -547,6 +547,23 @@ func (cn *conn) selectRouter(id string) {
 	if cn.srv.pool != nil {
 		cn.srv.pool.Drop(id)
 	}
+	// ── PHASE 5.1: TAKE THE GRAPH HISTORY BEFORE THE POOL LETS GO ─────────
+	//
+	// BEFORE syncAlertPool, and that ordering is the whole point: the line below
+	// is what makes the alert pool release this router, and its `traffic` and
+	// `ping` rings go with it. They hold per-second samples for a router nobody
+	// was watching, which is exactly the router somebody has just landed on.
+	//
+	// Without this the two GRAPHS are the one thing `Last()` replay cannot serve.
+	// Every other card is a reading and replays whole; a chart is a WINDOW, and a
+	// window that starts empty grows from a single point over a minute. The
+	// operator's requirement is that no page waits, so the window has to be
+	// handed over rather than re-earned.
+	//
+	// Seeding NEVER OVERWRITES -- see collect.Traffic.Seed -- so this is safe to
+	// run unconditionally, including on a re-select where the Session is already
+	// warm and the pool has nothing.
+	cn.seedGraphsFromPool(id, rs)
 	cn.srv.syncAlertPool()
 
 	// The stacks describe rows on the router being LEFT, and a `.id` from one
@@ -1497,5 +1514,23 @@ func (cn *conn) sendPooledStatus() {
 		}
 		cn.srv.hub.Send(cn.c, "router:status", map[string]any{
 			"routerId": id, "connected": up})
+	}
+}
+
+// seedGraphsFromPool hands the retiring pool's per-second rings to the Session
+// that displaced it. See the call site for why, and collect.Traffic.Seed for why
+// the history database is not the source.
+func (cn *conn) seedGraphsFromPool(routerID string, rs *session.Session) {
+	if cn.srv.alertPool == nil || rs == nil {
+		return
+	}
+	traffic, ping := cn.srv.alertPool.GraphSeed(routerID)
+	if tr := rs.Traffic(); tr != nil {
+		for ifName, points := range traffic {
+			tr.Seed(ifName, points)
+		}
+	}
+	if p := rs.Ping(); p != nil {
+		p.Seed(ping)
 	}
 }
