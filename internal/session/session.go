@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mikrodash/internal/alert"
@@ -73,6 +74,10 @@ type Session struct {
 	// dormancy decides which collectors are asleep. Nil until Acquire builds it,
 	// and consulted as a VETO by ResumeCollector — see dormancy_targets.go.
 	dormancy *dormancy.Supervisor
+	// dormancyAt is when the supervisor last judged, in ms. It is the DEBOUNCE
+	// for the delivery-driven tick -- see judgeOnDelivery -- and atomic because
+	// it is read and written from the scheduler's goroutines.
+	dormancyAt atomic.Int64
 
 	RouterID string
 	Label    string
@@ -1360,14 +1365,19 @@ func (s *Session) connectLoop() {
 
 		if first {
 			// THE DORMANCY SUPERVISOR runs alongside the collectors it judges.
-			// Started here rather than in Acquire because it must not tick before
-			// anything has reported: its first judgement would be of a fleet of
-			// empty payloads. It stops when Release closes the session.
+			// Wired here rather than in Acquire because it must not judge before
+			// anything has reported: its first verdict would be of a fleet of
+			// empty payloads.
+			//
+			// IT IS NO LONGER A GOROUTINE. It rides the scheduler's deliveries
+			// instead of a fifteen-second ticker, which is phase 3.3 -- see
+			// judgeOnDelivery for what that changed and what it deliberately did
+			// not.
 			//
 			// OUTSIDE the counted block below on purpose — it is not a collector
 			// and `TestTheBackgroundCollectorCountIsRecorded` counts that block
 			// with a regex.
-			go s.runDormancy()
+			s.judgeOnDelivery()
 
 			// #105: EVERY START IS GATED on the router's resolved config, so a
 			// collector the operator turned off for this router is never

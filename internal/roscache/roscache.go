@@ -94,6 +94,8 @@ type Cache struct {
 	demandMu sync.Mutex
 	subs     map[string]map[uint64]subscription
 	nextSub  uint64
+	// onDeliver is the after-refresh heartbeat. See OnDeliver in scheduler.go.
+	onDeliver func(menu string)
 }
 
 func New(ros Reader) *Cache {

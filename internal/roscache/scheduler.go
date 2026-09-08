@@ -170,4 +170,37 @@ func (c *Cache) deliver(menu string, rows []routeros.Reply, err error) {
 	for _, fn := range fns {
 		fn(rows, err)
 	}
+
+	c.demandMu.Lock()
+	after := c.onDeliver
+	c.demandMu.Unlock()
+	if after != nil {
+		after(menu)
+	}
+}
+
+// OnDeliver registers one callback fired after every scheduled refresh, whatever
+// menu it was and whoever consumed it.
+//
+// ── WHY THIS EXISTS: DORMANCY NEEDED A HEARTBEAT, NOT A CLOCK ───────────────
+//
+// The dormancy supervisor ran on a 15-second ticker per session. It judges
+// PAYLOADS, so it has to run after collectors have produced -- but a collector
+// only EMITS when its fingerprint changes, and a collector reporting nothing
+// over and over emits once and then goes quiet. So `emit` is the wrong signal
+// and a clock was the fallback.
+//
+// A DELIVERY IS THE RIGHT SIGNAL. It happens whether or not the answer changed,
+// it happens at a rate the collectors themselves declared, and it stops when
+// nothing is subscribed -- which is exactly when there is nothing to judge. One
+// hook here replaces a goroutine per session and needs nothing from the
+// nineteen collectors.
+//
+// Called with the cache's lock RELEASED, like the callbacks above and for the
+// same reason: the handler resumes and suspends collectors, which reaches back
+// into this cache.
+func (c *Cache) OnDeliver(fn func(menu string)) {
+	c.demandMu.Lock()
+	c.onDeliver = fn
+	c.demandMu.Unlock()
 }

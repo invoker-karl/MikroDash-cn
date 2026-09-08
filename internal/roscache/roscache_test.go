@@ -280,3 +280,62 @@ func TestInvalidateAndReset(t *testing.T) {
 		t.Errorf("after Reset the fetch asked %v, want just a", got)
 	}
 }
+
+// TestOnDeliverFiresForEveryRefresh. The dormancy supervisor rides this hook
+// instead of a fifteen-second ticker, so a refresh that fires no callback is a
+// judgement that never happens.
+func TestOnDeliverFiresForEveryRefresh(t *testing.T) {
+	f := &fake{}
+	c := New(f)
+	var seen []string
+	var mu sync.Mutex
+	c.OnDeliver(func(menu string) {
+		mu.Lock()
+		seen = append(seen, menu)
+		mu.Unlock()
+	})
+
+	// A subscriber with NO callback of its own. The hook must still fire: a
+	// collector that only declares demand still proves the router answered, and
+	// dormancy judges payloads rather than the rows this delivery carried.
+	rel := c.Subscribe("/ip/dns/print", nil, time.Millisecond, nil)
+	defer rel()
+
+	s := NewScheduler(c, time.Millisecond)
+	s.Start()
+	defer s.Stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(seen)
+		mu.Unlock()
+		if n >= 2 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("OnDeliver fired %d times in two seconds; dormancy would never run", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestOnDeliverIsCalledWithoutTheDemandLock. The handler suspends and resumes
+// collectors, which releases and takes subscriptions on this same cache. Holding
+// the lock across it is a deadlock, and it is the kind that only shows up under
+// a real router.
+func TestOnDeliverIsCalledWithoutTheDemandLock(t *testing.T) {
+	c := New(&fake{})
+	done := make(chan struct{})
+	c.OnDeliver(func(string) {
+		// Would block for ever if deliver still held demandMu.
+		c.Subscribe("/other/print", nil, time.Second, nil)()
+		close(done)
+	})
+	c.deliver("/ip/dns/print", nil, nil)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnDeliver ran under the demand lock")
+	}
+}

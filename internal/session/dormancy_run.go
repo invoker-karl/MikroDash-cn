@@ -40,23 +40,72 @@ type prober interface{ Probe() }
 // refresher asks for a reading now rather than at the next interval.
 type refresher interface{ RefreshNow() }
 
-// runDormancy is the 15s loop. It stops when the session is released.
+// judgeOnDelivery wires the supervisor to the scheduler's heartbeat.
 //
-// There is no context to cancel — a Session is reference counted and `Release`
-// sets `closed` when the last viewer lets go — so the loop checks that flag,
-// which is the same condition one tick later at worst.
-func (s *Session) runDormancy() {
-	t := time.NewTicker(dormancyTick)
-	defer t.Stop()
-	for range t.C {
+// ── WHAT REPLACED THE 15-SECOND GOROUTINE, AND WHY ──────────────────────────
+//
+// This was a ticker per session: wake every fifteen seconds, walk nineteen
+// payloads, judge, sleep. Phase 3.3 asked for it to go, and it could not until
+// every dormancy-eligible collector was on the scheduler -- which happened on
+// 2026-09-08. Now a DELIVERY is available as the tick, and it is a better one:
+//
+//   - it happens whether or not the payload changed, unlike `emit`, which a
+//     collector reporting nothing over and over calls exactly once. That is the
+//     case dormancy exists for, so `emit` could never have been the signal.
+//   - it arrives at a rate the collectors themselves declared.
+//   - it STOPS when nothing is subscribed. A session with no subscriptions has
+//     nothing running, so it has nothing to put to sleep, and a page focus wakes
+//     a sleeping collector through `ResumeCollector` without the supervisor's
+//     help. So the quiet case needs no clock at all.
+//
+// ── THE STEP 3.3 DESCRIBED, AND THE PART OF IT THAT WAS DROPPED ─────────────
+//
+// 3.3 was written as "back the QUERY off": run `internal/dormancy` per query
+// rather than per collector. That half was NOT done, and the reason is this
+// document's own: dormancy judges the PAYLOAD. `firewall`'s emptiness is eight
+// table keys at once and `queues` is simple and tree together, so backing off
+// individual menus asks a different question and would change behaviour the
+// dormancy corpora pin.
+//
+// So the state machine, its inputs, its verdicts and its corpus are untouched.
+// What moved is what drives the caller.
+//
+// ── THE DEBOUNCE IS THE OLD INTERVAL, ON PURPOSE ────────────────────────────
+//
+// Deliveries arrive several times a second on a busy router, and judging that
+// often would be waste. `dormancyTick` is kept as the FLOOR between judgements
+// so the rate is what it always was -- which also keeps the backoff timings in
+// `internal/dormancy` meaning what they meant.
+func (s *Session) judgeOnDelivery() {
+	if s.roscache == nil {
+		return
+	}
+	s.roscache.OnDeliver(func(string) { s.noteDelivery(time.Now().UnixMilli()) })
+}
+
+// noteDelivery runs a judgement if one is due. Exported to the package for its
+// test; `now` is a parameter for the same reason it is one in `dormancy`.
+//
+// NOT ON THE CALLER'S GOROUTINE. A delivery is running inside the scheduler, and
+// a judgement suspends and resumes collectors -- which releases and takes
+// subscriptions on the very cache that is mid-delivery.
+func (s *Session) noteDelivery(now int64) {
+	last := s.dormancyAt.Load()
+	if last != 0 && now-last < dormancyTick.Milliseconds() {
+		return
+	}
+	if !s.dormancyAt.CompareAndSwap(last, now) {
+		return // another delivery won the slot; one judgement is enough
+	}
+	go func() {
 		s.mu.Lock()
 		done := s.closed
 		s.mu.Unlock()
 		if done {
 			return
 		}
-		s.dormancyOnce(time.Now().UnixMilli())
-	}
+		s.dormancyOnce(now)
+	}()
 }
 
 // dormancyOnce is one tick, split out so a test can drive it without a clock.
