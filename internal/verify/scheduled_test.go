@@ -27,6 +27,11 @@ import (
 //
 // It fails in both directions: a collector that starts subscribing without being
 // listed fails, and a listed one that stops fails too.
+//
+// `Unscheduled_Collectors.md` is the readable companion to the `unscheduled` map
+// below -- same twelve entries, same grades, plus what would have to change for
+// each. It is gitignored, like the other working documents, so THIS is the copy
+// that survives a clone: keep the reasons here even when the prose moves.
 func TestScheduledCollectorsAreDeclared(t *testing.T) {
 	root := repoRoot(t)
 	dir := filepath.Join(root, "internal", "collect")
