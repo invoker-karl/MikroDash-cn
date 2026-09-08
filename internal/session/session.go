@@ -865,6 +865,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// listing it twice would read as an oversight rather than as the two
 		// distinct uses it is.
 		s.netwatch, s.talkers, s.dns, s.packages, s.rosUsers, s.queues, s.bridges,
+		s.system,
 		s.routing, // /ip/route, with wan
 	} {
 		c.UseCache(s.roscache)

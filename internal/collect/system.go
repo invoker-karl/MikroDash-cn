@@ -231,6 +231,9 @@ type System struct {
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
+	// sched subscribes to /system/resource, the live gauge row. The static read
+	// and the health window keep their own cadences. See scheduled.go.
+	sched scheduled
 
 	// mu guards everything the update goroutine touches. It is the only
 	// concurrency in this collector, and it exists because the update check can
@@ -270,6 +273,9 @@ func NewSystem(ros Reader, emit Emit, pollMs int) *System {
 	s.loop = newPollLoop(func() { s.Tick() }, func() time.Duration {
 		return s.pollMs.duration()
 	})
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	s.sched = scheduled{loop: s.loop, menu: systemResourceCmd.Path, apply: s.apply,
+		cadence: s.pollMs.duration}
 	return s
 }
 
@@ -333,11 +339,11 @@ type IdentityFunc func(Identity)
 // dedupes on the triple.
 func (s *System) SetOnIdentity(fn IdentityFunc) { s.onIdentity = fn }
 
-func (s *System) Suspend() { s.loop.stop() }
+func (s *System) Suspend() { s.sched.end() }
 
 func (s *System) Resume() {
 	if s.ros.Connected() {
-		s.loop.start()
+		s.sched.begin()
 	}
 }
 
@@ -345,11 +351,11 @@ func (s *System) Resume() {
 // startup. Everything slower than the tick is scheduled from inside Tick, so
 // there is one timer here rather than three.
 func (s *System) Start() {
-	s.loop.start()
+	s.sched.begin()
 	go s.checkForUpdates()
 }
 
-func (s *System) Stop() { s.loop.stop() }
+func (s *System) Stop() { s.sched.end() }
 
 // SetPollMs applies a new poll period to a RUNNING collector.
 //
@@ -379,7 +385,7 @@ func (s *System) SetPollMs(ms int) {
 // NOT survive: the usual reason a connection dropped is an upgrade, and the
 // router that came back need not be the same build.
 func (s *System) Reconnected() {
-	s.loop.stop()
+	s.sched.end()
 	s.mu.Lock()
 	s.staticRead = false
 	s.serial, s.license = nil, nil
@@ -387,8 +393,10 @@ func (s *System) Reconnected() {
 	s.healthAt = time.Time{}
 	s.lastFp = ""
 	s.mu.Unlock()
-	s.Tick()
-	s.loop.start()
+	if !s.sched.scheduling() {
+		s.Tick()
+	}
+	s.sched.begin()
 }
 
 func (s *System) Last() *SystemPayload {
@@ -405,6 +413,19 @@ func (s *System) Tick() {
 
 	// The static read happens from the SECOND tick on. See the note at the top:
 	// the first payload carries no serial in the live app either.
+	s.preRead()
+
+	rows, err := s.ros.Do(systemResourceCmd)
+	s.applyResource(rows, err)
+}
+
+// applyResource is what the scheduler calls with the resource row, and is
+// everything Tick does once it has it. The static read and the health window
+// stay on their own cadences above -- see scheduled.go on why a collector
+// subscribes to ONE menu and reads the rest itself.
+// preRead runs the two cadences that are not the resource row: the once-per-
+// connection static read, and the health window.
+func (s *System) preRead() {
 	s.mu.Lock()
 	doStatic := s.firstTick && !s.staticRead
 	doHealth := time.Since(s.healthAt) >= systemHealthEvery
@@ -416,8 +437,18 @@ func (s *System) Tick() {
 	if doHealth {
 		s.readHealth()
 	}
+}
 
-	rows, err := s.ros.Do(systemResourceCmd)
+// apply is the scheduler's entry point: the same two cadences, then the row.
+func (s *System) apply(rows []routeros.Reply, err error) {
+	if !s.ros.Connected() {
+		return
+	}
+	s.preRead()
+	s.applyResource(rows, err)
+}
+
+func (s *System) applyResource(rows []routeros.Reply, err error) {
 	if err != nil || len(rows) == 0 {
 		return
 	}
@@ -688,6 +719,11 @@ func cloneReply(r routeros.Reply) routeros.Reply {
 // re-tune it and then need to confirm what took effect.
 func (s *System) PollMs() int { return s.pollMs.ms() }
 
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (s *System) UseCache(rc *roscache.Cache) { s.cache = rc }
+// UseCache feeds BOTH halves: the shared-read cache from 1.4 (/system/routerboard
+// and /system/package/update, with `packages`) and the subscription. Same cache,
+// two uses; setting one and missing the other would silently drop whichever was
+// missed.
+func (s *System) UseCache(rc *roscache.Cache) {
+	s.cache = rc
+	s.sched.useCache(rc)
+}
