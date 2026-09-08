@@ -54,6 +54,39 @@ docker run --rm -v "$PWD":/src -w /src golang:1.25-alpine sh -c "go vet ./... &&
 # geoip tables are copied from it — see the Dockerfile's own note.
 docker build -t mikrodash:latest .
 
+# AND `docker compose up -d` TO DEPLOY IT. `docker restart` DOES NOT PICK UP A
+# REBUILD -- it restarts the existing container on the image it was created
+# from, so the tag moves and the container does not. On 2026-09-08 a whole
+# session's live verification was performed against a stale binary that way, and
+# every observation in it was of the OLD code. The tell is one command:
+#
+#   docker inspect MikroDash --format '{{.Image}}'   # vs `docker images mikrodash:latest`
+#
+# and the proof is the running binary itself, which carries Go's function names:
+#
+#   docker exec MikroDash grep -c '<a symbol only the new code has>' /usr/local/bin/mikrodash
+#
+# CLAUDE.md already carried "are you sure you rebuilt and started the right
+# container?" as a scar. This is the mechanism behind it, written down.
+
+# AND CLEAN UP AFTER IT. Each build MOVES the `:latest` tag and leaves the
+# previous 177 MB image untagged; five had piled up in three hours on 2026-09-08,
+# next to 3.9 GB of build cache, and the operator pruned 78 GB of accumulated
+# leftovers by hand. A scratch build is not finished until what it orphaned is
+# gone.
+#
+# NEVER `docker image prune -a` OR `docker volume prune` HERE, and the reason is
+# specific rather than cautious: the RUNNING dev instance sits on a DANGLING
+# image (a later build moved `:latest` off it), and `mikrodash-gomod` — the
+# module cache the verify run mounts by name — reports as an unused volume
+# between runs. Both are exactly what a blanket prune deletes. Other projects
+# share this daemon too.
+#
+# Remove by id, having checked nothing uses it:
+#   docker images -f dangling=true -q |
+#     while read id; do [ -z "$(docker ps -aq --filter ancestor=$id)" ] && docker rmi "$id"; done
+# The dev container, its image and `mikrodash_data` are excluded, always.
+
 # EVERYTHING THIS REPO CAN CHECK, discovered rather than listed.
 #
 # It runs the Go side (gofmt, vet, `go test ./...`, and `cmd/tsgen -check`), the
