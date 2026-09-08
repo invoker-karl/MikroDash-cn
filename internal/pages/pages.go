@@ -40,6 +40,30 @@ type Page struct {
 	// raw key, so the header read a lower-case "dashboard" -- inherited from a
 	// map that simply had no entry for them.
 	Title string
+	// Collector is the ONE collector whose data this page exists to show.
+	//
+	// ── WHY THIS IS DECLARED AND NOT DERIVED ────────────────────────────────
+	//
+	// It looks derivable: a collector emits to `page-<key>`, so scan the emits.
+	// It is not, and the arithmetic says why. There are 26 pages and 27 registry
+	// rows; SIX pages have no collector at all (dashboard, reports, audit-trail,
+	// backups, devices, settings), FIVE are fed by more than one, and six
+	// collector keys differ from the page they own -- `rosusers` owns `users`,
+	// `wifi` owns `wifi-networks`, `wireless` owns `wifi-clients`, `conns` owns
+	// `connections`, `ifStatus` owns `interfaces`, `topology` owns
+	// `network-topology`.
+	//
+	// So "which collector feeds this page" and "which collector is this page FOR"
+	// are different questions, and only the second one is useful. `interfaces` is
+	// fed by `ifStatus`; so is `network-topology`, and it is not that page's
+	// reason to exist.
+	//
+	// EMPTY MEANS NO OWNER, and that is a real answer rather than a gap. A page
+	// with no owner is one that cannot be emptied by turning a collector off.
+	//
+	// `internal/verify/ownership_test.go` checks every entry against the registry
+	// AND against the emit literals, so a declaration that stops being true fails.
+	Collector string
 	// Path is the URL segment when it differs from the key. Empty means the key
 	// IS the URL, which is true of 25 of the 26 pages.
 	//
@@ -62,26 +86,30 @@ type Page struct {
 // shortcuts address the first nine.
 var All = []Page{
 	{Key: "dashboard", Title: "Dashboard", Path: "home"},
-	{Key: "dns", Title: "DNS"},
-	{Key: "bridges", Title: "Bridges"},
-	{Key: "vlans", Title: "VLANs"},
-	{Key: "wan", Title: "WAN"},
-	{Key: "packages", Title: "Packages"},
-	{Key: "routing", Title: "Routing"},
-	{Key: "dhcp", Title: "DHCP"},
-	{Key: "ppp", Title: "PPP"},
-	{Key: "vpn", Title: "VPN"},
-	{Key: "users", Title: "Users"},
-	{Key: "queues", Title: "Queues"},
-	{Key: "firewall", Title: "Firewall"},
-	{Key: "wifi-networks", Title: "Wifi Networks"},
-	{Key: "capsman", Title: "CAPsMAN"},
-	{Key: "interfaces", Title: "Interfaces"},
-	{Key: "logs", Title: "Logs"},
-	{Key: "network-topology", Title: "Network Topology"},
-	{Key: "wifi-clients", Title: "Wifi Clients"},
-	{Key: "bandwidth", Title: "Bandwidth"},
-	{Key: "connections", Title: "Connections"},
+	{Key: "dns", Title: "DNS", Collector: "dns"},
+	{Key: "bridges", Title: "Bridges", Collector: "bridges"},
+	{Key: "vlans", Title: "VLANs", Collector: "vlans"},
+	{Key: "wan", Title: "WAN", Collector: "wan"},
+	{Key: "packages", Title: "Packages", Collector: "packages"},
+	{Key: "routing", Title: "Routing", Collector: "routing"},
+	// dhcp's owner is NOT disableable, so this page can never be emptied by
+	// turning a collector off. Deliberate: `conns` and `bandwidth` both read
+	// dhcpNetworks for LAN classification, so it is not the operator's to switch
+	// off. Said here so nobody "fixes" the asymmetry.
+	{Key: "dhcp", Title: "DHCP", Collector: "dhcpNetworks"},
+	{Key: "ppp", Title: "PPP", Collector: "ppp"},
+	{Key: "vpn", Title: "VPN", Collector: "vpn"},
+	{Key: "users", Title: "Users", Collector: "rosusers"},
+	{Key: "queues", Title: "Queues", Collector: "queues"},
+	{Key: "firewall", Title: "Firewall", Collector: "firewall"},
+	{Key: "wifi-networks", Title: "Wifi Networks", Collector: "wifi"},
+	{Key: "capsman", Title: "CAPsMAN", Collector: "capsman"},
+	{Key: "interfaces", Title: "Interfaces", Collector: "ifStatus"},
+	{Key: "logs", Title: "Logs", Collector: "logs"},
+	{Key: "network-topology", Title: "Network Topology", Collector: "topology"},
+	{Key: "wifi-clients", Title: "Wifi Clients", Collector: "wireless"},
+	{Key: "bandwidth", Title: "Bandwidth", Collector: "bandwidth"},
+	{Key: "connections", Title: "Connections", Collector: "conns"},
 	{Key: "reports", Title: "Reports"},
 	{Key: "audit-trail", Title: "Audit Trail"},
 	{Key: "backups", Title: "Backups"},
