@@ -459,7 +459,7 @@ replaced? That question died with the port, and 25 MB of recordings went with it
 
 | | |
 |---|---|
-| `internal/verify/` | 49 Go tests. Static checks over the CURRENT source: credentials, cited paths, the WebSocket vocabulary both ways, endpoints, selectors, module reachability, identity columns, the blur-suspend guard, the fast/slow poll ledger, the shared-menu ledger, fixture schemas, and that every page-key literal still names a real page. |
+| `internal/verify/` | 50 Go tests. Static checks over the CURRENT source: credentials, cited paths, the WebSocket vocabulary both ways, endpoints, selectors, module reachability, identity columns, the blur-suspend guard, the fast/slow poll ledger, the shared-menu ledger, fixture schemas, and that every page-key literal still names a real page. |
 | `web/test/` | 30 test files that bundle the app's TypeScript and run it against a DOM shim. The FILE count is here because it is the one the audit can measure; a case count cannot be derived statically and this one had already drifted from 32 to 35 unnoticed. |
 
 **Two rules carried across, and both are load-bearing:**
@@ -489,7 +489,7 @@ inert.
 - **The two gates are not unit tests.** `cmd/conformance` and `cmd/compat` run against live hardware
   and the live `/data`. They are the go/no-go checks, and a green unit suite does not substitute for
   them.
-- **`internal/verify/`** holds the repository's static self-checks as Go tests — 49 of them. They
+- **`internal/verify/`** holds the repository's static self-checks as Go tests — 50 of them. They
   read the CURRENT source and assert properties still worth holding: no committed credential, every
   cited path present, every emitted event consumed, every multi-room collector behind an occupancy
   guard. They are test-only, so nothing can link them into the binary.
