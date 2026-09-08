@@ -3,11 +3,11 @@ package verify
 import (
 	"encoding/json"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
 
+	"mikrodash/internal/collect"
 	"mikrodash/internal/pages"
 )
 
@@ -73,89 +73,37 @@ func TestPageOwnershipIsReal(t *testing.T) {
 		t.Fatal("no page declares an owner — this check is reading nothing")
 	}
 
-	// ── 3. THE OWNER ACTUALLY EMITS TO page-<key> ───────────────────────────
+	// ── 3. THE OWNER DECLARES page-<key> ───────────────────────────────────
 	//
-	// Scanned from the emit literals, which is the same source
-	// `collectorRooms` reads for the blur-suspend guard. A declaration that has
-	// stopped being true fails here rather than becoming folklore.
+	// READ AS DATA since 4.2. This used to scan `internal/collect` source for an
+	// emit literal, which meant a regex, a collector-key-to-filename table, and an
+	// exemption for `logs` and `talkers` because they emitted to a named constant
+	// and could not be seen at all.
 	//
-	// TWO EXCEPTIONS, both real and both recorded rather than special-cased in
-	// the data:
+	// Now that every audience is declared, the check asks the declaration
+	// directly. No regex to drift, no filenames to keep, and no exemptions —
+	// `logs` is checked like everything else.
 	//
-	//	logs           builds its room list at runtime, so there is no literal.
-	//	dhcpNetworks   emits "page-dhcp,dash-card-network" — the page room is
-	//	               there, it simply shares the string with a card.
-	//
-	// The second is not really an exception; it is why this matches a SUBSTRING
-	// of the emit rather than the whole argument.
-	exempt := map[string]string{
-		"logs": "builds its room list at runtime, so there is no literal to scan",
-	}
-
-	dir := filepath.Join(root, "internal", "collect")
-	rooms := map[string]string{} // file name -> its source
-	for _, name := range collectGoFiles(t, dir) {
-		if isTestSource(name) {
-			continue
-		}
-		rooms[name] = mustRead(t, filepath.Join(dir, name))
-	}
-
-	// ── THE OWNER'S OWN FILE, NOT ANY FILE ──────────────────────────────────
-	//
-	// THE FIRST VERSION OF THIS CHECK SEARCHED EVERY COLLECTOR FILE for an emit
-	// to `page-<key>`, and it was theatre: re-declaring `interfaces` as owned by
-	// `netwatch` PASSED, because `ifstatus.go` still emitted to
-	// `page-interfaces` and the scan did not care who did. It asserted "somebody
-	// feeds this page", which is true of every page by construction.
-	//
-	// Caught by mutation, not by review. The fix is to scan ONE file, which needs
-	// collector-key -> filename written down; `scheduled_test.go` keeps the same
-	// map for the same reason -- the names differ often enough (conns/connections,
-	// rosusers/rosusers.go, ifStatus/ifstatus.go) that deriving it would be a
-	// second source of truth.
-	fileOf := map[string]string{
-		"dns": "dns.go", "bridges": "bridges.go", "vlans": "vlans.go",
-		"wan": "wan.go", "packages": "packages.go", "routing": "routing.go",
-		"dhcpNetworks": "dhcpnetworks.go", "ppp": "ppp.go", "vpn": "vpn.go",
-		"rosusers": "rosusers.go", "queues": "queues.go", "firewall": "firewall.go",
-		"wifi": "wifi.go", "capsman": "capsman.go", "ifStatus": "ifstatus.go",
-		"logs": "logs.go", "topology": "topology.go", "wireless": "wireless.go",
-		"bandwidth": "bandwidth.go", "conns": "connections.go",
-	}
-
-	emitRoom := regexp.MustCompile(`emit\("([^"]*)"`)
+	// THE FIRST VERSION OF THIS ASSERTION WAS THEATRE, and it is worth
+	// remembering why: it searched EVERY collector file, so re-declaring
+	// `interfaces` as owned by `netwatch` passed — `ifstatus.go` still emitted to
+	// `page-interfaces` and the scan did not care who did. Reading one
+	// collector's own declaration is what makes it mean something.
 	var unproven []string
 	for _, p := range pages.All {
 		if p.Collector == "" {
 			continue
 		}
-		file, ok := fileOf[p.Collector]
-		if !ok {
-			t.Errorf("page %q is owned by %q and that collector has no file here. Add it, "+
-				"or the emit check silently skips this page.", p.Key, p.Collector)
-			continue
-		}
-		src, ok := rooms[file]
-		if !ok {
-			t.Errorf("%s is named as %s's source and does not exist", file, p.Collector)
-			continue
-		}
-		if why, exempted := exempt[p.Collector]; exempted {
-			t.Logf("%s: exempt from the emit check — %s", p.Collector, why)
-			continue
-		}
 		want := "page-" + p.Key
 		found := false
-		for _, m := range emitRoom.FindAllStringSubmatch(src, -1) {
-			for _, room := range strings.Split(m[1], ",") {
-				if strings.TrimSpace(room) == want {
-					found = true
-				}
+		for _, r := range collect.RoomsOf(p.Collector) {
+			if r == want {
+				found = true
 			}
 		}
 		if !found {
-			unproven = append(unproven, p.Key+" (owner "+p.Collector+", "+file+")")
+			unproven = append(unproven, p.Key+" (owner "+p.Collector+" declares "+
+				strings.Join(collect.RoomsOf(p.Collector), " ")+")")
 		}
 	}
 	sort.Strings(unproven)

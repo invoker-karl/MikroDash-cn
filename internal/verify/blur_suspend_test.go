@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"mikrodash/internal/collect"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -105,38 +106,61 @@ var (
 	sessAccessor = regexp.MustCompile(`func \(s \*Session\) (\w+)\(\) \*collect\.(\w+)`)
 )
 
-// collectorRooms maps a collector file to the set of rooms it emits to. Rooms are
-// comma-separated inside one string; the empty string is the router-wide room.
+// collectorRooms maps a collector file to the set of rooms it emits to.
+//
+// ── READS THE DECLARATIONS SINCE 4.2, NOT THE SOURCE ────────────────────────
+//
+// This used to scan `emit("…")` literals with a regex, plus a second regex for
+// the two collectors that emitted to a named constant, and it resolved those by
+// hunting for the constant's own declaration. Every audience is declared in
+// `internal/collect/rooms.go` now, so the values can simply be asked for.
+//
+// Three things got better and none got worse. There is no pattern to drift when
+// a call site is reformatted. `logs` and `talkers` are covered like everything
+// else rather than by best-effort constant resolution. And the rooms are real
+// values, so a typo inside one is a compile error in `collect` rather than a
+// silently unmatched regex here.
+//
+// STILL KEYED BY FILE, because both callers reach a collector through its Go
+// type and `suspendReceivers` resolves a type to a file. The key-to-file map is
+// the only hand-written part, and it is checked below.
 func collectorRooms(t *testing.T, dir string) map[string]map[string]bool {
 	t.Helper()
+	// collector key -> the file its type is declared in. Explicit for the reason
+	// `scheduled_test.go` gives: conns/connections.go and rosusers differ often
+	// enough that deriving it would be a second source of truth.
+	fileOf := map[string]string{
+		"bandwidth": "bandwidth.go", "bridges": "bridges.go", "capsman": "capsman.go",
+		"conns": "connections.go", "dhcpNetworks": "dhcpnetworks.go", "dns": "dns.go",
+		"firewall": "firewall.go", "ifStatus": "ifstatus.go", "logs": "logs.go",
+		"netwatch": "netwatch.go", "packages": "packages.go", "ping": "ping.go",
+		"ppp": "ppp.go", "queues": "queues.go", "rosusers": "rosusers.go",
+		"routing": "routing.go", "talkers": "talkers.go", "topology": "topology.go",
+		"vlans": "vlans.go", "vpn": "vpn.go", "wan": "wan.go", "wifi": "wifi.go",
+		"wireless": "wireless.go",
+	}
 	out := map[string]map[string]bool{}
-	for _, name := range goFiles(t, dir) {
-		src := mustRead(t, filepath.Join(dir, name))
-		add := func(spec string) {
-			if out[name] == nil {
-				out[name] = map[string]bool{}
-			}
-			if spec == "" {
-				out[name]["<router-wide>"] = true
-				return
-			}
-			for _, r := range strings.Split(spec, ",") {
-				out[name][strings.TrimSpace(r)] = true
-			}
+	for key, file := range fileOf {
+		rooms := collect.RoomsOf(key)
+		if len(rooms) == 0 {
+			t.Errorf("%s is named here and declares no rooms — the map and rooms.go "+
+				"have drifted, and this helper would silently report it as unguarded", key)
+			continue
 		}
-		for _, m := range emitLiteral.FindAllStringSubmatch(src, -1) {
-			add(m[1])
+		if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
+			t.Errorf("%s is named as %s's source and does not exist", file, key)
+			continue
 		}
-		// `emit(logRooms, …)` names a constant; resolve the obvious ones.
-		for _, m := range emitConst.FindAllStringSubmatch(src, -1) {
-			decl := regexp.MustCompile(regexp.QuoteMeta(m[1]) + `\s*=\s*"([^"]+)"`).FindStringSubmatch(src)
-			if decl != nil {
-				add(decl[1])
-			}
+		out[file] = map[string]bool{}
+		for _, r := range rooms {
+			out[file][r] = true
 		}
 	}
+	// The router-wide emits are not declared as rooms and never were guardable;
+	// the callers only ever asked "does this collector feed more than one room",
+	// for which the router-wide entry was noise.
 	if len(out) == 0 {
-		t.Fatal("no collector emits were read — the scan is broken")
+		t.Fatal("no collector rooms were read — the declarations are not reachable")
 	}
 	return out
 }
@@ -246,13 +270,8 @@ func sorted(m map[string]bool) []string {
 // blur], so it must be TESTED rather than assumed" — asserted rather than
 // described.
 //
-// TWO KINDS OF ROOM ARE DELIBERATELY NOT REQUIRED, and both are judgements
-// recorded at their call sites rather than omissions:
-//
-//	the router-wide room  every viewer of the router occupies it, so testing it
-//	                      would mean never suspending at all (see the `dhcp` case)
-//	page rooms            the blur case IS the page room, so it is already known
-//	                      empty by the time the guard is called
+// SINCE 4.2 THE ORIGINAL PROPERTY IS STRUCTURAL and this checks the new risk
+// instead — see the note above the match below.
 //
 // The whole of ws.go is scanned rather than just pageBlur's body, because the
 // conns guard lives in a helper — which is precisely how it escaped the first
@@ -261,73 +280,87 @@ func TestGuardedSuspendCoversEveryDashboardRoom(t *testing.T) {
 	root := repoRoot(t)
 	wsSrc := mustRead(t, filepath.Join(root, "internal", "server", "ws.go"))
 
-	roomsByFile := collectorRooms(t, filepath.Join(root, "internal", "collect"))
-	fileOfType := suspendReceivers(t, filepath.Join(root, "internal", "collect"), roomsByFile)
-	typeOfAccessor := sessionAccessors(t, mustRead(t, filepath.Join(root, "internal", "session", "session.go")))
-
 	// Both spellings of the receiver: `cn.rsession` in a pageBlur case, `rs` in a
 	// helper on Server. A third spelling would go unchecked, so the count guard
 	// at the bottom is what keeps that from being silent.
+	resolved := 0
+	// ── WHAT THIS ASSERTS SINCE 4.2, AND WHY IT CHANGED ─────────────────────
+	//
+	// It used to check that a guarded suspend LISTED every dashboard-card room
+	// its collector emits to — because the list was hand-written and could omit
+	// one, which is how the Connections card came to starve.
+	//
+	// That property is now STRUCTURAL. `collect.Others(key, page)` returns the
+	// whole declared audience minus the blurred page, and a card room is never a
+	// page room, so a card can no longer be dropped. The old assertion would pass
+	// for free, which makes it worse than useless: a green check nobody can fail.
+	//
+	// So it is re-aimed at the failure the new shape actually has. The guard names
+	// the collector by KEY and suspends it by ACCESSOR, and nothing connects the
+	// two — `collect.Others("vpn", …)` beside `Wireless().Suspend` compiles, reads
+	// perfectly, and guards the wrong collector. That is one copy-paste away, and
+	// it is silent: the wrong collector's rooms are consulted, so the right one
+	// suspends while somebody is watching it.
 	guarded := regexp.MustCompile(
-		`(?s)suspendIfNoRoomOccupied\(.*?\[\]string\{(.*?)\},\s*(?:cn\.rsession|rs)\.(\w+)\(\)\.Suspend\)`)
-	quoted := regexp.MustCompile(`"([^"]*)"`)
+		`collect\.Others\("(\w+)", "([a-z-]*)"\), (?:cn\.rsession|rs)\.(\w+)\(\)\.Suspend`)
 
-	resolved, withCards := 0, 0
-	for _, m := range guarded.FindAllStringSubmatch(wsSrc, -1) {
-		listed := map[string]bool{}
-		for _, q := range quoted.FindAllStringSubmatch(m[1], -1) {
-			listed[q[1]] = true
-		}
-		acc := m[2]
-		typ, ok := typeOfAccessor[acc]
-		if !ok {
-			continue
-		}
-		file, ok := fileOfType[typ]
-		if !ok {
-			continue
-		}
+	// accessor -> the collector key it must be guarded by.
+	keyOfAccessor := map[string]string{
+		"Routing": "routing", "DHCPNetworks": "dhcpNetworks", "VPN": "vpn",
+		"Firewall": "firewall", "Wireless": "wireless", "Bandwidth": "bandwidth",
+		"Conns": "conns",
+	}
+
+	// FLATTENED, and comments dropped first. The conns guard puts its argument
+	// and its receiver on separate lines with a comment between them, so a match
+	// against the raw source finds seven of eight -- and a silently-skipped guard
+	// is exactly what this test exists to prevent.
+	flat := strings.Join(strings.Fields(stripGoComments(wsSrc)), " ")
+	for _, m := range guarded.FindAllStringSubmatch(flat, -1) {
+		key, page, acc := m[1], m[2], m[3]
 		resolved++
 
-		var missing []string
-		cards := 0
-		for room := range roomsByFile[file] {
-			if !strings.HasPrefix(room, "dash-card-") {
-				continue
-			}
-			cards++
-			if !listed[room] {
-				missing = append(missing, room)
-			}
+		want, ok := keyOfAccessor[acc]
+		if !ok {
+			t.Errorf("a guarded suspend of %s() is not in keyOfAccessor, so the key it "+
+				"passes goes unchecked. Add it.", acc)
+			continue
 		}
-		if cards > 0 {
-			withCards++
+		if key != want {
+			t.Errorf("the guarded suspend of %s() asks about collector %q, but %s is %q.\n"+
+				"The guard would consult the WRONG collector's rooms and suspend this one "+
+				"while somebody is still watching it — silently, because both keys are real.",
+				acc, key, acc, want)
 		}
-		if len(missing) > 0 {
-			t.Errorf("the guarded suspend of %s() passes %v, which does not cover %v — "+
-				"%s emits there and a page blur says nothing about whether the CARD is still "+
-				"watching. One idle grace later the collector stops with a viewer on the "+
-				"dashboard.", acc, sorted(listed), sorted(setOf(missing)), file)
+		if len(collect.RoomsOf(key)) == 0 {
+			t.Errorf("%s() is guarded on %q, which declares no rooms — so the guard waits "+
+				"on nothing and always suspends", acc, key)
+		}
+		// The page named must be one this collector actually feeds, or the
+		// subtraction does nothing and the guard is stricter than intended.
+		if page != "" {
+			feeds := false
+			for _, r := range collect.RoomsOf(key) {
+				if r == "page-"+page {
+					feeds = true
+				}
+			}
+			if !feeds {
+				t.Errorf("%s() is guarded against a blur of page %q, which %q does not "+
+					"feed. Nothing is subtracted, so the collector never suspends.", acc, page, key)
+			}
 		}
 	}
 
 	// ── THE TEST MUST PROVE ITS OWN DATA IS REAL ────────────────────────────
 	//
-	// Covering every card room is the PASSING state, so on a clean run the
-	// failure branch never fires and a broken scan would look identical to a
-	// clean repository. These two make a pass mean something: the call shape
-	// still matches, and at least some of what was matched actually had a card
-	// room to cover.
-	if resolved < 5 {
-		t.Fatalf("only %d guarded suspends resolved to a collector; ws.go has at least six, so "+
-			"the call-shape match or the accessor chain has broken and this test checks nothing",
-			resolved)
+	// Every guard being correct is the PASSING state, so on a clean run the
+	// failure branches never fire and a broken match would look identical to a
+	// clean repository.
+	if resolved < 8 {
+		t.Fatalf("only %d guarded suspends matched; ws.go has eight, so the call shape "+
+			"has changed and this test checks nothing", resolved)
 	}
-	if withCards < 4 {
-		t.Fatalf("only %d of the guarded suspends were read as protecting a dash-card room; "+
-			"there are at least five, so the emit-reading has stopped matching", withCards)
-	}
-	t.Logf("%d guarded suspends resolved, %d protecting a dashboard card", resolved, withCards)
 }
 
 // setOf is the inverse of the room maps this file reads: a slice back to a set,

@@ -577,7 +577,7 @@ func (p *PPP) applyLocked(rows []routeros.Reply) {
 	}
 	p.lastFP = fp.String()
 	p.lastEmit = now
-	p.emit("page-ppp", "ppp:update", payload)
+	p.emit(pppRooms.Join(), "ppp:update", payload)
 }
 
 func (p *PPP) Last() *PPPPayload {

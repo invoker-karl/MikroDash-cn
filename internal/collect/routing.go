@@ -762,7 +762,7 @@ func (r *Routing) emitPayload(peers []Peer) {
 	// entry in `CARD_ROOMS` -- the grid never sends `dashcard:focus` for them, so
 	// there is no room to join. It is the same channel `netwatch:update`,
 	// `ping:update` and `talkers:update` already use to reach dashboard cards.
-	r.emit("page-routing,page-dashboard", "routing:update", payload)
+	r.emit(routingRooms.Join(), "routing:update", payload)
 }
 
 // SetPollMs applies a new poll period to a running collector.

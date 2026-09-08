@@ -390,7 +390,7 @@ func (b *Bridges) applyLocked(hostRows []routeros.Reply) {
 		return
 	}
 	b.lastFp = string(fp)
-	b.emit("page-bridges", "bridges:update", payload)
+	b.emit(bridgesRooms.Join(), "bridges:update", payload)
 }
 
 // Last is the most recent payload, replayed to a socket that has just opened

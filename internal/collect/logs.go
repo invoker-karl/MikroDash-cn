@@ -103,7 +103,9 @@ type Logs struct {
 
 // The two rooms this collector serves. The page and the dashboard card show the
 // same lines, and a viewer can hold both.
-const logRooms = "page-logs,dash-card-logs"
+// logRooms is kept as the name this file has always used; the VALUE now comes
+// from the one declaration in rooms.go, so the guard and the emit agree.
+var logRooms = logsRooms.Join()
 
 func NewLogs(ros Reader, emit Emit) *Logs {
 	return &Logs{ros: ros, emit: emit, size: logHistorySize()}

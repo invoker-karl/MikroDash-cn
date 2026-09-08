@@ -252,7 +252,8 @@ func (t *Talkers) markUnavailable() {
 	t.emit(talkersRoom, "talkers:update", p)
 }
 
-const talkersRoom = "page-dashboard"
+// talkersRoom keeps its name; the VALUE comes from rooms.go.
+var talkersRoom = talkersRooms.Join()
 
 // commit turns rows into the payload. Split from Tick so the differential gate
 // can drive it from a fixture without a router.

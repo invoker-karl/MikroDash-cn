@@ -158,6 +158,33 @@ func RoomsOf(key string) Rooms {
 	return nil
 }
 
+// keepAliveFor is rooms where a collector must keep RUNNING for another
+// collector's sake, and which are not part of its own audience.
+//
+// ── AN AUDIENCE AND A DEPENDENCY ARE DIFFERENT THINGS ───────────────────────
+//
+// `conns` emits to the Connections page and its dashboard card, and to nothing
+// else. But `bandwidth` reads the connection table `conns` deposits in
+// `ConnTable`, so suspending `conns` while somebody is on the BANDWIDTH page
+// starves a page `conns` never sends to.
+//
+// That is why `suspendConnsIfIdle` waited on `page-bandwidth`, and it is the one
+// entry here. Modelling it as an audience would have been wrong -- nothing is
+// ever emitted there by this collector -- and dropping it in the move to
+// declarations would have starved the Bandwidth page silently.
+//
+// ── IT MAY NOW BE REMOVABLE, AND IS DELIBERATELY NOT REMOVED ────────────────
+//
+// Since 3.2c `bandwidth` subscribes to `/ip/firewall/connection` itself and takes
+// its rows from the scheduler, so on a live session it no longer needs
+// `ConnTable` at all. The dependency survives only on the POLLED path, which a
+// Session never takes. Removing this is therefore probably safe and is a
+// behaviour change resting on that "probably", so it is recorded rather than
+// made in a refactor whose whole point is to change nothing.
+var keepAliveFor = map[string]Rooms{
+	"conns": {"page-bandwidth"},
+}
+
 // Others is the rooms a collector feeds APART from one page: what `pageBlur`
 // must find empty before it may suspend.
 //
@@ -167,7 +194,7 @@ func RoomsOf(key string) Rooms {
 // router nobody is watching.
 func Others(key, pageKey string) []string {
 	var out []string
-	for _, r := range RoomsOf(key) {
+	for _, r := range union(RoomsOf(key), keepAliveFor[key]) {
 		if r == "" || r == "page-"+pageKey {
 			continue
 		}

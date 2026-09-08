@@ -594,7 +594,7 @@ func (w *Wireless) Tick() {
 		w.alignSubscription(mode)
 	}
 
-	w.emit("page-wifi-clients,dash-card-wireless", "wireless:update", payload)
+	w.emit(wirelessRooms.Join(), "wireless:update", payload)
 }
 
 func modeOrNone(mode string) string {

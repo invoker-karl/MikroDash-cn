@@ -332,7 +332,7 @@ func (d *DHCPNetworks) apply(netRows []routeros.Reply, err error) {
 	// union — socket.io's `.to(a).to(b)` behaves the same way, and looping
 	// Broadcast would send that viewer the frame twice." This was two calls,
 	// so a viewer in both rooms received it twice.
-	d.emit("page-dhcp,dash-card-network", "lan:overview", payload)
+	d.emit(dhcpNetworksRooms.Join(), "lan:overview", payload)
 	// AND `lan:wan` ROUTER-WIDE, carrying just the WAN address.
 	//
 	// The empty room IS the router-wide convention — it broadcasts to

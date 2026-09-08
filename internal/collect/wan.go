@@ -509,7 +509,7 @@ func (w *Wan) applyLocked(detect []routeros.Reply) {
 		return
 	}
 	w.lastFp = string(fp)
-	w.emit("page-wan", "wan:update", &built)
+	w.emit(wanRooms.Join(), "wan:update", &built)
 }
 
 // Last is the most recent payload, replayed on page:focus.

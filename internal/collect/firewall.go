@@ -417,7 +417,7 @@ func (f *Firewall) buildAndEmit() {
 	f.mu.Unlock()
 
 	if changed {
-		f.emit("page-firewall,dash-card-firewall", "firewall:update", payload)
+		f.emit(firewallRooms.Join(), "firewall:update", payload)
 	}
 }
 

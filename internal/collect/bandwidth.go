@@ -608,7 +608,7 @@ func (b *Bandwidth) build(rows []routeros.Reply, now int64) {
 	b.mu.Unlock()
 
 	if changed {
-		b.emit("page-bandwidth,dash-card-bandwidth", "bandwidth:update", payload)
+		b.emit(bandwidthRooms.Join(), "bandwidth:update", payload)
 	}
 }
 

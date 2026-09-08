@@ -797,7 +797,7 @@ func (c *Connections) apply(rows []routeros.Reply, err error) {
 		light := *payload
 		light.CountryDests, light.CountryPorts = nil, nil
 		light.SourceDests, light.SourcePorts = nil, nil
-		c.emit("page-connections,dash-card-connections", "conn:update", connsLight{&light})
+		c.emit(connsRooms.Join(), "conn:update", connsLight{&light})
 	}
 	if detailChanged {
 		// ── THE PAGE ONLY, WHICH IS WHERE THE LEDGER ALWAYS HAD THEM ────────
@@ -831,10 +831,10 @@ func (c *Connections) apply(rows []routeros.Reply, err error) {
 		// The Node app sends both at `page-connections` alone. This is now the
 		// same, and matching it here is agreement about who needs the data rather
 		// than fidelity for its own sake.
-		c.emit("page-connections", "conn:country-data", map[string]any{
+		c.emit(connsDetailRooms.Join(), "conn:country-data", map[string]any{
 			"ts": payload.TS, "countryDests": payload.CountryDests, "countryPorts": payload.CountryPorts,
 		})
-		c.emit("page-connections", "conn:source-data", map[string]any{
+		c.emit(connsDetailRooms.Join(), "conn:source-data", map[string]any{
 			"ts": payload.TS, "sourceDests": payload.SourceDests, "sourcePorts": payload.SourcePorts,
 		})
 	}

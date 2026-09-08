@@ -409,7 +409,7 @@ func (v *VPN) build() {
 	// union — socket.io's `.to(a).to(b)` behaves the same way, and looping
 	// Broadcast would send that viewer the frame twice." This was two calls,
 	// so a viewer in both rooms received it twice.
-	v.emit("page-vpn,dash-card-vpn", "vpn:update", payload)
+	v.emit(vpnRooms.Join(), "vpn:update", payload)
 }
 
 // ParsePppSessions is the PPP half. Exported for the same reason ppp.go's is:

@@ -317,7 +317,7 @@ func (d *DNS) applyLocked(rows []routeros.Reply, _ error) {
 		return
 	}
 	d.lastFp = string(fp)
-	d.emit("page-dns", "dns:update", payload)
+	d.emit(dnsRooms.Join(), "dns:update", payload)
 }
 
 // Last is the most recent payload, replayed to a socket that has just opened
