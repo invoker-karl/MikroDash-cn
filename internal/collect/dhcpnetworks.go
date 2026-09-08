@@ -248,8 +248,12 @@ func poolRangeSize(ranges string) int {
 // Promise.allSettled on the Node side: a table that cannot be read leaves its
 // slice empty and the rebuild carries on, because three tables out of four still
 // describe most of the page.
+// read is routed THROUGH THE CACHE. Both menus this collector reads are
+// shared: /ip/address with ifStatus and wan, /interface/detect-internet/state
+// with wan. The routing goes in the helper because the logging below is what
+// makes an unavailable menu quiet.
 func (d *DHCPNetworks) read(cmd routeros.Cmd) []routeros.Reply {
-	rows, err := d.ros.Do(cmd)
+	rows, err := readVia(d.cache, d.ros, cmd, d.pollMs.duration())
 	if err != nil {
 		log.Printf("[dhcp-networks] %s unavailable: %v", cmd.Path, err)
 		return nil
