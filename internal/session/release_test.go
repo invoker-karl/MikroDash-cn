@@ -144,20 +144,34 @@ func TestBothTeardownPathsFlushHistory(t *testing.T) {
 	}
 }
 
-// TestTheConnectBlockStartsFourteenCollectors is the number CLAUDE.md and
-// the port record both quote for the coexistence argument ("Session STARTS 14
-// collectors on connect where the live pool runs 3").
+// TestTheConnectBlockCollectorCountIsPinned watches the number of collectors a
+// session starts on connect.
 //
 // It is pinned SEPARATELY from the test above on purpose: that one asserts the
-// two lists agree, and would stay green if somebody deleted a Start and its
-// matching Stop together. This one notices the count moved, which is what the
-// documents claim.
-func TestTheConnectBlockStartsFourteenCollectors(t *testing.T) {
+// start and stop lists agree, and would stay green if somebody deleted a Start
+// and its matching Stop together. This one notices the count moved.
+//
+// ── WHAT IT USED TO SAY, AND WHY THAT CHANGED ───────────────────────────────
+//
+// It read "the number CLAUDE.md and the port record both quote for the
+// coexistence argument", and derived a 4.7x ratio from it. Neither document says
+// so any more: the port record was deleted with the other finished port
+// documents on 2026-08-31, and CLAUDE.md carries no such figure. Checked rather
+// than assumed, on 2026-09-08, when the count moved.
+//
+// The count is still worth pinning — it is what a background-pool decision would
+// rest on, and a silent drift is how the "~11" it started as became 14 — but it
+// is pinned as a fact about this code, not as a claim some document makes.
+//
+// 14 -> 15 on 2026-09-08: phase 4.3b starts `vpn` at connect because the router
+// has ALERTING on, rather than leaving four of the six alert rules to depend on
+// whether somebody opened the VPN page.
+func TestTheConnectBlockCollectorCountIsPinned(t *testing.T) {
 	started := namesIn(blockBetween(t, sessionSource(t), "if first {", "\n\t\t}"), "Start")
-	if len(started) != 14 {
-		t.Errorf("the connect block starts %d collectors, not 14: %v\n"+
-			"CLAUDE.md and the port record both quote 14 and derive the 4.7x "+
-			"coexistence ratio from it. Update BOTH if this is deliberate.",
+	if len(started) != 15 {
+		t.Errorf("the connect block starts %d collectors, not 15: %v\n"+
+			"If that is deliberate, update this number and say why in the comment "+
+			"above — the count drifting unremarked is how it went from 11 to 14.",
 			len(started), started)
 	}
 }

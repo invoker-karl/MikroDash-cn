@@ -1162,7 +1162,7 @@ func (cn *conn) pageBlur(page string) {
 		// `blur-suspend-audit` caught this the moment the second room was added,
 		// which is the third time it has caught exactly this consequence
 		// (dhcpNetworks, bandwidth, vpn, firewall before it).
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID,
+		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "routing",
 			collect.Others("routing", "routing"), cn.rsession.Routing().Suspend)
 	case "dhcp":
 		// dhcpNetworks also feeds the dashboard's Network card AND the
@@ -1175,7 +1175,7 @@ func (cn *conn) pageBlur(page string) {
 		// chip is chrome fed by the same payload, and a viewer on any page has
 		// the value the handshake replayed. Recorded because it is a judgement,
 		// not a mechanism.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID,
+		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "dhcpNetworks",
 			collect.Others("dhcpNetworks", "dhcp"), cn.rsession.DHCPNetworks().Suspend)
 		cn.rsession.DHCPLeases().Suspend()
 	case "dashboard":
@@ -1190,7 +1190,7 @@ func (cn *conn) pageBlur(page string) {
 		// viewer who glanced at the dashboard once left it polling the router
 		// forever, on a box where concurrent channels are the documented
 		// bottleneck. Suspended only when the Routing page is not also open.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID,
+		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "routing",
 			collect.Others("routing", "dashboard"), cn.rsession.Routing().Suspend)
 	case "ppp":
 		cn.rsession.PPP().Suspend()
@@ -1200,7 +1200,7 @@ func (cn *conn) pageBlur(page string) {
 		// stream rooms, which is why the live app never had this. Found by
 		// The blur-suspend audit on its first run, after the same defect
 		// was fixed by hand for dhcpNetworks and bandwidth.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID,
+		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "vpn",
 			collect.Others("vpn", "vpn"), cn.rsession.VPN().Suspend)
 	case "users":
 		cn.rsession.RosUsers().Suspend()
@@ -1212,7 +1212,7 @@ func (cn *conn) pageBlur(page string) {
 		// one room where live sends it to two — and `blur-suspend-audit` caught
 		// the consequence immediately: a page blur says nothing about whether the
 		// CARD is still watching, so suspending here would starve it.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID,
+		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "firewall",
 			collect.Others("firewall", "firewall"), cn.rsession.Firewall().Suspend)
 	case "wifi-networks":
 		cn.rsession.Wifi().Suspend()
@@ -1226,11 +1226,11 @@ func (cn *conn) pageBlur(page string) {
 		// one room where live sends it to two — and `blur-suspend-audit` caught
 		// the consequence immediately: a page blur says nothing about whether the
 		// CARD is still watching, so suspending here would starve it.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID,
+		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "wireless",
 			collect.Others("wireless", "wifi-clients"), cn.rsession.Wireless().Suspend)
 	case "bandwidth":
 		// The dashboard's bandwidth card reads the same collector.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID,
+		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "bandwidth",
 			collect.Others("bandwidth", "bandwidth"), cn.rsession.Bandwidth().Suspend)
 		cn.srv.suspendConnsIfIdle(cn.rsession, cn.routerID)
 	case "connections":
@@ -1357,7 +1357,7 @@ func (cn *conn) dropTraffic() {
 // wrapping the call in this helper put it out of reach. Both are fixed;
 // `TestGuardedSuspendCoversEveryDashboardRoom` is the half that was missing.
 func (s *Server) suspendConnsIfIdle(rs *session.Session, routerID string) {
-	s.suspendIfNoRoomOccupied(rs, routerID,
+	s.suspendIfNoRoomOccupied(rs, routerID, "conns",
 		// No page is being blurred here -- this is the idle check -- so the
 		// whole audience is wanted, plus the keep-alive that `bandwidth` needs.
 		collect.Others("conns", ""),
@@ -1394,12 +1394,26 @@ func (s *Server) suspendConnsIfIdle(rs *session.Session, routerID string) {
 // The DASHBOARD ROOMS ARE THE POINT. A page room emptying is what triggers a
 // blur; a `dash-card-*` room emptying is not, so it must be TESTED rather than
 // assumed. `nil` is a collector this session does not have.
-func (s *Server) suspendIfNoRoomOccupied(rs *session.Session, routerID string,
+func (s *Server) suspendIfNoRoomOccupied(rs *session.Session, routerID, key string,
 	rooms []string, suspend func()) {
 	if rs == nil || routerID == "" || suspend == nil {
 		return
 	}
 	if s.roomsOccupied(routerID, rooms) {
+		return
+	}
+	// ── ALERTING IS A CONSUMER THAT OCCUPIES NO ROOM ──────────────────────
+	//
+	// Phase 4.3b. This helper asks "is anybody still watching a room this
+	// collector emits to". The alert rules are not in a room and never will be,
+	// so for them the answer is always no -- and suspending `vpn` or `routing`
+	// on a router with alerting ON silently stops four of the six rules.
+	//
+	// THE KEY IS PASSED, not derived from the rooms. Deriving looked tidier and
+	// is wrong: `Others` has already dropped the blurred page, so `page-dashboard`
+	// alone is left by `routing`, `netwatch` and `ping` alike and identifies none
+	// of them.
+	if rs.NeededForAlerts(key) {
 		return
 	}
 	// ── THE SAME GRACE THE SESSION GETS, AND FOR THE SAME EVENT ───────────

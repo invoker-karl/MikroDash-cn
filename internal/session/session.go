@@ -952,6 +952,45 @@ func (m *Manager) Release(routerID string) {
 	m.mu.Unlock()
 }
 
+// AlertFeeds names the collectors whose payloads the alert rules consume.
+//
+// ── PHASE 4.3b: THE FEED IS DECLARED, NOT INFERRED ──────────────────────────
+//
+// The six rules read `ping:update`, `vpn:update`, `ifstatus:update`,
+// `netwatch:update`, `system:update` and `routing:update`. Four of those
+// collectors are started when a session connects. TWO ARE NOT: `vpn` is resumed
+// by focusing the VPN page and `routing` by focusing the Dashboard, and nothing
+// starts either one because the router has alerting switched on.
+//
+// They run anyway today, which is why nobody noticed -- `primeAll` gives them a
+// payload and the dormancy probe then calls `ResumeCollector`. Verified live on
+// 2026-09-08: land on the Dashboard, never open /vpn, and the WireGuard card
+// populates and keeps advancing. But that is an ACCIDENT OF TWO OTHER
+// MECHANISMS. Turn either off -- or change when a probe fires -- and VPN and BGP
+// alerts stop firing for the router somebody is watching, with nothing to say so.
+//
+// So the dependency is written down. `internal/verify` checks this list against
+// the events `alertwire` actually dispatches on, in both directions.
+var AlertFeeds = []string{"ping", "vpn", "ifStatus", "netwatch", "system", "routing"}
+
+// NeededForAlerts reports whether this collector must keep running because the
+// router has alerting on, regardless of who is looking at what.
+//
+// This is what makes the feed page-independent. A page blur asks "is anybody
+// still watching a room this collector emits to"; alerting is not watching a
+// room, so the question does not reach it and the answer would be no.
+func (s *Session) NeededForAlerts(key string) bool {
+	if s == nil || !s.alertsEnabled {
+		return false
+	}
+	for _, k := range AlertFeeds {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
 // spokenForLocked reports whether anything still needs this session: a viewer,
 // or a non-viewer hold. The caller holds s.mu.
 //
@@ -1279,6 +1318,11 @@ func (m *Manager) idleOut(routerID string, s *Session) {
 	s.wan.Stop()
 	s.ifStatus.Stop()
 	s.firewall.Stop()
+	// vpn is started at connect for ALERTING (4.3b), so it must be stopped here
+	// like any other connect-started collector. `TestBothTeardownPathsStopEvery
+	// Collector` caught its absence the moment the start was added, which is the
+	// whole reason that gate reads the connect block rather than a list.
+	s.vpn.Stop()
 	s.system.Stop()
 	s.logs.Stop()
 	s.traffic.Stop()
@@ -1350,6 +1394,7 @@ func (m *Manager) Shutdown() {
 		s.wan.Stop()
 		s.ifStatus.Stop()
 		s.firewall.Stop()
+		s.vpn.Stop()
 		s.system.Stop()
 		s.logs.Stop()
 		s.traffic.Stop()
@@ -1551,6 +1596,28 @@ func (s *Session) connectLoop() {
 			// who never opens Firewall would otherwise be told "cannot say".
 			if s.eff.Enabled["firewall"] {
 				s.firewall.Start()
+			}
+			// ── PHASE 4.3b: THE ALERT FEED, STARTED BECAUSE ALERTING IS ON ──
+			//
+			// `vpn` and `routing` are page-gated: nothing starts them at connect,
+			// and four of the six alert rules read their payloads. They have been
+			// running anyway, by way of `primeAll` and the dormancy probe, which
+			// is an accident rather than an intention -- see AlertFeeds.
+			//
+			// Started here so the reason is the router's alert switch. Gated on
+			// it too, so a router with alerting OFF pays nothing: this is the
+			// same work the alert pool does for such a router today, moved to the
+			// session that was already doing the other four.
+			if s.alertsEnabled {
+				if s.eff.Enabled["vpn"] {
+					s.vpn.Start()
+				}
+				if s.eff.Enabled["routing"] {
+					// Resume, not Start:  has no Start -- it is a
+					// page-gated collector whose lifecycle begins at focus.
+					// Resuming it here is what gives alerting its own reason.
+					s.routing.Resume()
+				}
 			}
 			// Starts the gauge poll AND the one update check that runs at
 			// startup. The check is the only call in the app that leaves the

@@ -183,7 +183,10 @@ func TestTheNotPolledListIsStillTrue(t *testing.T) {
 // pool would be on every router in a fleet — and the documented bottleneck is
 // concurrent API channels on the MikroTik, not CPU.
 //
-// **That number was recorded as "~11" and was 14 when counted.** It drifted
+// **That number was recorded as "~11" and was 14 when counted.** It went to 15
+// on 2026-09-08 when phase 4.3b started `vpn` at connect for ALERTING rather
+// than leaving it to a page focus -- a deliberate move, recorded here because
+// this count is the basis of the background-pool decision. It drifted
 // because every collector wired into `Session` lands in the connect path too, so
 // it grows quietly with unrelated work and nothing said so. An operator reading
 // "roughly four times the live pool" was reading 4.7×.
@@ -195,7 +198,7 @@ func TestTheNotPolledListIsStillTrue(t *testing.T) {
 func TestTheBackgroundCollectorCountIsRecorded(t *testing.T) {
 	// Counted 2026-08-25: bridges dhcpLeases dhcpNetworks dns firewall ifStatus
 	// logs netwatch ping system talkers traffic vlans wan.
-	const recorded = 14
+	const recorded = 15
 
 	body, err := os.ReadFile("session.go")
 	if err != nil {

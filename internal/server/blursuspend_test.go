@@ -54,7 +54,7 @@ func TestSuspendIfNoRoomOccupied(t *testing.T) {
 			called := make(chan struct{}, 1)
 			// A non-nil session is required; the helper only uses it for the nil
 			// check, so the zero value is enough to reach the room logic.
-			s.suspendIfNoRoomOccupied(&session.Session{}, "r1",
+			s.suspendIfNoRoomOccupied(&session.Session{}, "r1", "vpn",
 				[]string{"page-vpn", "dash-card-vpn"}, func() { called <- struct{}{} })
 
 			var got bool
@@ -78,9 +78,9 @@ func TestSuspendIfNoRoomOccupiedRefusesIncompleteInput(t *testing.T) {
 	s := &Server{hub: h, idleGrace: 10 * time.Millisecond}
 	called := make(chan struct{}, 3)
 	fire := func() { called <- struct{}{} }
-	s.suspendIfNoRoomOccupied(nil, "r1", []string{"page-vpn"}, fire)
-	s.suspendIfNoRoomOccupied(&session.Session{}, "", []string{"page-vpn"}, fire)
-	s.suspendIfNoRoomOccupied(&session.Session{}, "r1", []string{"page-vpn"}, nil)
+	s.suspendIfNoRoomOccupied(nil, "r1", "vpn", []string{"page-vpn"}, fire)
+	s.suspendIfNoRoomOccupied(&session.Session{}, "", "vpn", []string{"page-vpn"}, fire)
+	s.suspendIfNoRoomOccupied(&session.Session{}, "r1", "vpn", []string{"page-vpn"}, nil)
 	// Incomplete input must be refused OUTRIGHT, not merely deferred — so this
 	// waits out the grace before believing it.
 	select {
