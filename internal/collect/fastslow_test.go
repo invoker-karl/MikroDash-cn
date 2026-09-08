@@ -3,6 +3,7 @@ package collect
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"mikrodash/internal/routeros"
 )
@@ -226,5 +227,89 @@ func TestRoutingWriteDoesNotWaitForTheSlowLane(t *testing.T) {
 	c.RefreshNow()
 	if got := r.byMenu["/ip/route/print"]; got != before+1 {
 		t.Errorf("RefreshNow read the route table %d extra times, want 1", got-before)
+	}
+}
+
+// ── PHASE 4.1: THE DERIVATION, TESTED WITHOUT A COLLECTOR ───────────────────
+//
+// `BuildIfStatus` is the worked example for extracting a derivation as a pure
+// function. The point of the extraction is exactly this: the error and drop
+// figures the page shows are DELTAS, and until now the only way to test one was
+// to drive a whole collector through two ticks against a fake router. Prior state
+// as a PARAMETER makes it two calls and no I/O at all.
+
+func ifRow(name string, rxErr, rxDrop string) routeros.Reply {
+	return routeros.Reply{
+		"name": name, "type": "ether", "running": "true", "disabled": "false",
+		"rx-error": rxErr, "tx-error": "0",
+		"rx-drop": rxDrop, "tx-drop": "0", "tx-queue-drop": "0",
+	}
+}
+
+func TestBuildIfStatusDifferencesTwoReadings(t *testing.T) {
+	t0 := time.Now()
+
+	base, snap, delta := BuildIfStatus(nil, IfStatusInput{
+		Ifaces: []routeros.Reply{ifRow("ether1", "5", "2")},
+		Addrs:  []routeros.Reply{{"interface": "ether1", "address": "198.51.100.1/24"}},
+		Now:    t0,
+	})
+	if len(base) != 1 {
+		t.Fatalf("first reading built %d rows, want 1", len(base))
+	}
+	// THE FIRST READING HAS NO BASELINE, and must not invent one. A zero delta
+	// here would read as "no errors in this window" on a link that has five.
+	if len(delta) != 0 {
+		t.Errorf("first reading produced a delta with nothing to subtract from: %v", delta)
+	}
+	if base[0].ErrorsDelta != nil {
+		t.Errorf("first reading carries an error delta: %v", *base[0].ErrorsDelta)
+	}
+
+	base2, _, delta2 := BuildIfStatus(snap, IfStatusInput{
+		Ifaces: []routeros.Reply{ifRow("ether1", "9", "2")},
+		Addrs:  []routeros.Reply{{"interface": "ether1", "address": "198.51.100.1/24"}},
+		Now:    t0.Add(30 * time.Second),
+	})
+	d, ok := delta2["ether1"]
+	if !ok || d.errors == nil {
+		t.Fatalf("second reading produced no error delta: %+v", delta2)
+	}
+	if *d.errors != 4 {
+		t.Errorf("error delta = %v, want 4 (9 minus 5)", *d.errors)
+	}
+	if d.windowMs != 30000 {
+		t.Errorf("delta window = %vms, want 30000 — the window is the gap between "+
+			"the two readings, not the poll", d.windowMs)
+	}
+	if base2[0].DeltaWindowMs == nil || *base2[0].DeltaWindowMs != 30000 {
+		t.Errorf("the window did not reach the payload: %+v", base2[0].DeltaWindowMs)
+	}
+}
+
+// TestBuildIfStatusIsPure pins the property the extraction exists for: same
+// inputs, same outputs, and the prior state handed in is not written through.
+func TestBuildIfStatusIsPure(t *testing.T) {
+	in := IfStatusInput{Ifaces: []routeros.Reply{ifRow("ether1", "5", "2")}, Now: time.Now()}
+	prior := map[string]counterSnap{}
+
+	a, snapA, _ := BuildIfStatus(prior, in)
+	b, snapB, _ := BuildIfStatus(prior, in)
+
+	if len(prior) != 0 {
+		t.Errorf("the prior state passed in was mutated: %v", prior)
+	}
+	if len(a) != len(b) || a[0].Name != b[0].Name || len(snapA) != len(snapB) {
+		t.Errorf("two identical calls disagreed: %+v vs %+v", a, b)
+	}
+}
+
+// TestBuildIfStatusRefusesToBuildFromNothing: nil is "keep what you have", and
+// the caller depends on it. Returning an empty slice instead would blank the
+// Interfaces page on one failed read.
+func TestBuildIfStatusRefusesToBuildFromNothing(t *testing.T) {
+	base, snap, delta := BuildIfStatus(nil, IfStatusInput{Now: time.Now()})
+	if base != nil || snap != nil || delta != nil {
+		t.Errorf("no rows produced a payload: %v %v %v", base, snap, delta)
 	}
 }

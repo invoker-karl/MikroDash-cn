@@ -471,8 +471,52 @@ func (s *IfStatus) refreshMeta() {
 	ifRows, _ := readVia(s.cache, s.ros, ifStatusIfCmd, time.Duration(s.metaTicks())*s.pollMs.duration())
 	addrRows := s.read(ifStatusAddrCmd)
 	ethRows := s.read(ifStatusEthCmd)
+	base, snap, delta := BuildIfStatus(s.prev, IfStatusInput{
+		Ifaces: ifRows, Addrs: addrRows, Eth: ethRows, Now: time.Now(),
+	})
+	if base == nil {
+		return // nothing to build from; keep what we had
+	}
+
+	// Replaced rather than merged, so a renamed interface does not leave a stale
+	// delta behind for a name that later gets reused.
+	s.prev, s.delta = snap, delta
+	s.ifRows, s.base = ifRows, base
+}
+
+// IfStatusInput is everything BuildIfStatus reads from the router.
+type IfStatusInput struct {
+	Ifaces []routeros.Reply // /interface
+	Addrs  []routeros.Reply // /ip/address
+	Eth    []routeros.Reply // /interface/ethernet
+	Now    time.Time
+}
+
+// BuildIfStatus turns three menus into the interface list, and is the worked
+// example for phase 4.1 of Collectors-Rewrite.md.
+//
+// ── PRIOR STATE IS A PARAMETER, NOT A RECEIVER ──────────────────────────────
+//
+// This derivation cannot be a function of its inputs alone: the error and drop
+// figures the page shows are DELTAS, and a delta has nothing to subtract from
+// without the previous reading. About a third of this app's collectors are like
+// that — bandwidth, traffic, queues, ppp, vpn, routing, topology all carry
+// something between ticks.
+//
+// The answer was already in the tree and had simply never been named as a rule:
+// `BuildBandwidth(prev, in)` and `BuildQueueRows(rows, prev, now)` take prior
+// state as an argument. So does this. THAT IS THE RULE for 4.1 — prior in,
+// prior out, nothing held on a receiver — and it is what lets the derivation be
+// tested by handing it two readings instead of driving a collector twice.
+//
+// Returns nil when there is nothing to build from, which the caller reads as
+// "keep the metadata you have" rather than blanking the page.
+func BuildIfStatus(prev map[string]counterSnap, in IfStatusInput) (
+	[]Interface, map[string]counterSnap, map[string]counterDelta) {
+
+	ifRows, addrRows, ethRows, now := in.Ifaces, in.Addrs, in.Eth, in.Now
 	if len(ifRows) == 0 {
-		return
+		return nil, nil, nil
 	}
 
 	addrs := map[string][]string{}
@@ -489,7 +533,6 @@ func (s *IfStatus) refreshMeta() {
 		}
 	}
 
-	now := time.Now()
 	snap := map[string]counterSnap{}
 	delta := map[string]counterDelta{}
 	base := make([]Interface, 0, len(ifRows))
@@ -516,7 +559,7 @@ func (s *IfStatus) refreshMeta() {
 		// meant to be: differencing two readings of the same rows would report a
 		// zero delta over a window no counter had a chance to move in.
 		snap[name] = counterSnap{errors: errs, drops: drops, ts: now}
-		if p, ok := s.prev[name]; ok {
+		if p, ok := prev[name]; ok {
 			de, dd := deltaOf(p.errors, errs), deltaOf(p.drops, drops)
 			if de != nil || dd != nil {
 				delta[name] = counterDelta{errors: de, drops: dd,
@@ -552,10 +595,7 @@ func (s *IfStatus) refreshMeta() {
 		base = append(base, iface)
 	}
 
-	// Replaced rather than merged, so a renamed interface does not leave a stale
-	// delta behind for a name that later gets reused.
-	s.prev, s.delta = snap, delta
-	s.ifRows, s.base = ifRows, base
+	return base, snap, delta
 }
 
 // NamesOf reduces a full interface payload to the names-and-state one.
