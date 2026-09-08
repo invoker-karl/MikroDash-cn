@@ -38,6 +38,38 @@ package collect
 // /interface/monitor-traffic reports rx-bits-per-second directly, and it can
 // only be asked once the interface list is known — so the order within a tick is
 // metadata first, rates second.
+//
+// ── THE FOUR READS ARE SPLIT, BECAUSE ONLY ONE OF THEM MOVES ────────────────
+//
+// This collector was four commands on every tick, and its tick is the fastest
+// in the app. Measured against one idle CHR at the default cadence: 267 commands
+// a minute reached the router, and 204 of them — 76% — were these four. That is
+// what MikroDash costs a router when nobody is doing anything.
+//
+// Three of the four answer questions that do not change at that speed. An
+// interface's name, type, comment, MAC, addresses and driver error counters do
+// not move between one second and the next; asking 51 times a minute buys
+// nothing. Only /interface/monitor-traffic answers a question whose whole value
+// is that it is current.
+//
+// So the metadata reads are re-run every `metaTicks` polls and the rates read
+// every poll, and a tick publishes the held metadata with the rates it just
+// fetched. `metaTicks` targets `ifStatusMetaTarget` and is DERIVED from the poll
+// interval rather than configured, so an operator who slows this collector down
+// never gets metadata faster than rates, and one who speeds it up does not
+// multiply the metadata cost with it.
+//
+// WHAT IS TRADED: `running`, `disabled` and the counters are up to
+// `ifStatusMetaTarget` late. A link that drops is noticed within that window
+// rather than within a poll — on the Interfaces page, in the sidebar badge and
+// in the traffic picker. Rates, which are the thing anybody actually watches
+// move, are unchanged.
+//
+// A POLL INTERVAL AT OR ABOVE THE TARGET COLLAPSES THIS BACK TO ONE LANE, which
+// is not a coincidence to lean on: the frozen golden replay constructs this
+// collector at 30s, so it takes that branch and reads all four menus on every
+// tick exactly as before. The split is therefore NOT covered by the golden, and
+// `TestIfStatusSplitsTheMetadataReads` is what covers it instead.
 
 import (
 	"encoding/json"
@@ -49,6 +81,19 @@ import (
 	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
+
+// ifStatusMetaTarget is how often the three metadata menus are re-read, and
+// therefore how late a link state change can be. Five seconds is chosen against
+// what the page does with it: an operator watching a port come up tolerates it,
+// and the alternative — 51 reads a minute of rows that had not changed — is what
+// this collector was doing.
+const ifStatusMetaTarget = 5 * time.Second
+
+// ifStatusMetaMaxTicks bounds the split from the other end. A very fast poll
+// must not stretch the metadata over an unbounded number of ticks: at 500ms the
+// target alone would ask for ten, and a page that has been running for a while
+// on nine ticks of stale metadata is harder to reason about than one extra read.
+const ifStatusMetaMaxTicks = 8
 
 const ifCounterProps = "rx-byte,tx-byte,rx-error,tx-error,rx-drop,tx-drop," +
 	"tx-queue-drop,link-downs,last-link-up-time"
@@ -182,6 +227,17 @@ type IfStatus struct {
 	prev  map[string]counterSnap
 	delta map[string]counterDelta
 
+	// The metadata half, held between refreshes. `base` is the payload's
+	// interface list with every field EXCEPT the rates filled in, so a tick that
+	// only fetched rates still publishes a complete row. `ifRows` is kept beside
+	// it because the rates read needs the raw name/disabled columns.
+	//
+	// base nil means "metadata has never been read", which is also what a
+	// reconnect leaves behind; metaIn counts polls down to the next refresh.
+	base   []Interface
+	ifRows []routeros.Reply
+	metaIn int
+
 	last       *IfStatusPayload
 	lastErr    string
 	lastFp     string
@@ -280,7 +336,30 @@ func round3(f float64) float64 {
 	return r
 }
 
-// Tick reads the four menus and builds the payload.
+// metaTicks is how many polls apart the three metadata reads are.
+//
+// DERIVED, NOT CONFIGURED. There is no second interval for an operator to set:
+// the metadata cadence is the poll interval rounded up to the target, so the two
+// can never be tuned into disagreeing. Note what the bounds mean — a poll at or
+// above the target returns 1 and every tick reads all four menus, which is
+// exactly the behaviour this collector had before the split.
+func (s *IfStatus) metaTicks() int {
+	p := s.pollMs.duration()
+	if p <= 0 {
+		return 1
+	}
+	n := int((ifStatusMetaTarget + p/2) / p) // nearest, not floor
+	if n < 1 {
+		return 1
+	}
+	if n > ifStatusMetaMaxTicks {
+		return ifStatusMetaMaxTicks
+	}
+	return n
+}
+
+// Tick publishes a payload every poll. It fetches the RATES every time and the
+// three metadata menus only every metaTicks — see the split note in the header.
 func (s *IfStatus) Tick() {
 	if !s.ros.Connected() {
 		return
@@ -288,102 +367,38 @@ func (s *IfStatus) Tick() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// THROUGH THE CACHE: `wan` reads this same menu with a proplist that is a
-	// strict subset of ours, so once either has fetched, the other costs nothing.
-	ifRows, _ := readVia(s.cache, s.ros, ifStatusIfCmd, s.pollMs.duration())
-	addrRows := s.read(ifStatusAddrCmd)
-	ethRows := s.read(ifStatusEthCmd)
-	if len(ifRows) == 0 {
+	if s.base == nil || s.metaIn <= 0 {
+		s.refreshMeta()
+		s.metaIn = s.metaTicks()
+	}
+	s.metaIn--
+
+	if len(s.base) == 0 {
 		return // nothing to build from; do not publish an empty interface list
 	}
-	rateBy := s.rates(ifRows)
 
-	addrs := map[string][]string{}
-	for _, a := range addrRows {
-		if a["interface"] == "" {
+	// The fast half, and on most ticks the ONLY command this collector issues.
+	rateBy := s.rates(s.ifRows)
+
+	// Copied rather than written through, because `base` outlives the tick and
+	// a rate written into it would still be there when the router stopped
+	// reporting one — the interface would hold its last speed for ever.
+	interfaces := make([]Interface, len(s.base))
+	copy(interfaces, s.base)
+	for i := range interfaces {
+		rt, ok := rateBy[interfaces[i].Name]
+		if !ok {
 			continue
 		}
-		addrs[a["interface"]] = append(addrs[a["interface"]], a["address"])
-	}
-	eth := map[string]routeros.Reply{}
-	for _, e := range ethRows {
-		if e["name"] != "" {
-			eth[e["name"]] = e
+		if rt.RxMbps != nil {
+			interfaces[i].RxMbps = *rt.RxMbps
+		}
+		if rt.TxMbps != nil {
+			interfaces[i].TxMbps = *rt.TxMbps
 		}
 	}
 
 	now := time.Now()
-	snap := map[string]counterSnap{}
-	delta := map[string]counterDelta{}
-	interfaces := make([]Interface, 0, len(ifRows))
-
-	for _, r := range ifRows {
-		name := r["name"]
-		// Errors are the interface's own plus the ethernet driver's, when the
-		// interface has an ethernet row. Either may be absent; null only when
-		// BOTH are.
-		errs := sumCounters(r, ifErrFields)
-		if e, ok := eth[name]; ok {
-			if phy := sumCounters(e, ethErrFields); phy != nil {
-				if errs == nil {
-					z := 0.0
-					errs = &z
-				}
-				v := *errs + *phy
-				errs = &v
-			}
-		}
-		drops := sumCounters(r, ifDropFields)
-
-		snap[name] = counterSnap{errors: errs, drops: drops, ts: now}
-		if p, ok := s.prev[name]; ok {
-			de, dd := deltaOf(p.errors, errs), deltaOf(p.drops, drops)
-			if de != nil || dd != nil {
-				delta[name] = counterDelta{errors: de, drops: dd,
-					windowMs: float64(now.Sub(p.ts).Milliseconds())}
-			}
-		}
-
-		typ := r["type"]
-		if typ == "" {
-			typ = "ether"
-		}
-		ips := addrs[name]
-		if ips == nil {
-			ips = []string{}
-		}
-		iface := Interface{
-			Name: name, Type: typ,
-			Running: r["running"] == "true", Disabled: r["disabled"] == "true",
-			Comment: r["comment"], MacAddr: r["mac-address"],
-			IPs:        ips,
-			RxBytes:    jsNum(r, "rx-byte"),
-			TxBytes:    jsNum(r, "tx-byte"),
-			Errors:     errs,
-			Drops:      drops,
-			LinkDowns:  jsNum(r, "link-downs"),
-			LastLinkUp: r["last-link-up-time"],
-		}
-		if rt, ok := rateBy[name]; ok {
-			if rt.RxMbps != nil {
-				iface.RxMbps = *rt.RxMbps
-			}
-			if rt.TxMbps != nil {
-				iface.TxMbps = *rt.TxMbps
-			}
-		}
-		if d, ok := delta[name]; ok {
-			iface.ErrorsDelta, iface.DropsDelta = d.errors, d.drops
-			w := d.windowMs
-			iface.DeltaWindowMs = &w
-		}
-		interfaces = append(interfaces, iface)
-	}
-
-	// Replaced rather than merged, so a renamed interface does not leave a stale
-	// delta behind for a name that later gets reused.
-	s.prev, s.delta = snap, delta
-
 	payload := &IfStatusPayload{TS: now.UnixMilli(), RouterID: s.routerID, Interfaces: interfaces}
 	s.last = payload
 
@@ -419,6 +434,110 @@ func (s *IfStatus) Tick() {
 	s.emit("page-interfaces,page-network-topology,dash-card-physports", "ifstatus:update", payload)
 
 	s.emit("", "ifstatus:names", NamesOf(payload))
+}
+
+// refreshMeta re-reads the three metadata menus and rebuilds the interface list
+// everything except the rates comes from.
+//
+// A FAILED READ KEEPS THE PREVIOUS METADATA rather than blanking the list. That
+// is a change from the pre-split collector, which skipped the whole tick: rates
+// now keep flowing over one interval of slightly older metadata instead of the
+// page freezing entirely. The first read is the exception — there is nothing to
+// keep, and `base` staying nil is what makes Tick decline to publish.
+func (s *IfStatus) refreshMeta() {
+	// THROUGH THE CACHE: `wan` reads this same menu with a proplist that is a
+	// strict subset of ours, so once either has fetched, the other costs nothing.
+	// The TTL offered is this collector's METADATA interval, not its poll — the
+	// cache keeps the shortest any consumer asks for, so offering the poll here
+	// would pin the entry to a freshness this half no longer needs.
+	ifRows, _ := readVia(s.cache, s.ros, ifStatusIfCmd, time.Duration(s.metaTicks())*s.pollMs.duration())
+	addrRows := s.read(ifStatusAddrCmd)
+	ethRows := s.read(ifStatusEthCmd)
+	if len(ifRows) == 0 {
+		return
+	}
+
+	addrs := map[string][]string{}
+	for _, a := range addrRows {
+		if a["interface"] == "" {
+			continue
+		}
+		addrs[a["interface"]] = append(addrs[a["interface"]], a["address"])
+	}
+	eth := map[string]routeros.Reply{}
+	for _, e := range ethRows {
+		if e["name"] != "" {
+			eth[e["name"]] = e
+		}
+	}
+
+	now := time.Now()
+	snap := map[string]counterSnap{}
+	delta := map[string]counterDelta{}
+	base := make([]Interface, 0, len(ifRows))
+
+	for _, r := range ifRows {
+		name := r["name"]
+		// Errors are the interface's own plus the ethernet driver's, when the
+		// interface has an ethernet row. Either may be absent; null only when
+		// BOTH are.
+		errs := sumCounters(r, ifErrFields)
+		if e, ok := eth[name]; ok {
+			if phy := sumCounters(e, ethErrFields); phy != nil {
+				if errs == nil {
+					z := 0.0
+					errs = &z
+				}
+				v := *errs + *phy
+				errs = &v
+			}
+		}
+		drops := sumCounters(r, ifDropFields)
+
+		// The delta window is now the METADATA cadence, which is what it always
+		// meant to be: differencing two readings of the same rows would report a
+		// zero delta over a window no counter had a chance to move in.
+		snap[name] = counterSnap{errors: errs, drops: drops, ts: now}
+		if p, ok := s.prev[name]; ok {
+			de, dd := deltaOf(p.errors, errs), deltaOf(p.drops, drops)
+			if de != nil || dd != nil {
+				delta[name] = counterDelta{errors: de, drops: dd,
+					windowMs: float64(now.Sub(p.ts).Milliseconds())}
+			}
+		}
+
+		typ := r["type"]
+		if typ == "" {
+			typ = "ether"
+		}
+		ips := addrs[name]
+		if ips == nil {
+			ips = []string{}
+		}
+		iface := Interface{
+			Name: name, Type: typ,
+			Running: r["running"] == "true", Disabled: r["disabled"] == "true",
+			Comment: r["comment"], MacAddr: r["mac-address"],
+			IPs:        ips,
+			RxBytes:    jsNum(r, "rx-byte"),
+			TxBytes:    jsNum(r, "tx-byte"),
+			Errors:     errs,
+			Drops:      drops,
+			LinkDowns:  jsNum(r, "link-downs"),
+			LastLinkUp: r["last-link-up-time"],
+		}
+		if d, ok := delta[name]; ok {
+			iface.ErrorsDelta, iface.DropsDelta = d.errors, d.drops
+			w := d.windowMs
+			iface.DeltaWindowMs = &w
+		}
+		base = append(base, iface)
+	}
+
+	// Replaced rather than merged, so a renamed interface does not leave a stale
+	// delta behind for a name that later gets reused.
+	s.prev, s.delta = snap, delta
+	s.ifRows, s.base = ifRows, base
 }
 
 // NamesOf reduces a full interface payload to the names-and-state one.
@@ -502,12 +621,27 @@ func (s *IfStatus) Reconnected() {
 	// that boundary would report movement that never happened.
 	s.prev = map[string]counterSnap{}
 	s.delta = map[string]counterDelta{}
+	// And the metadata, for the same reason: it describes the interfaces of a
+	// connection that is gone. Nil is what makes the next tick re-read.
+	s.base, s.ifRows, s.metaIn = nil, nil, 0
 	s.mu.Unlock()
 	s.Tick()
 	s.poll.start()
 }
 
-func (s *IfStatus) Suspend() { s.poll.stop() }
+// Suspend stops the poll, and ARMS the next metadata read.
+//
+// Without that, a page left blurred for an hour resumes by publishing an hour
+// old interface list with fresh rates on it, and keeps doing so until the
+// countdown that was mid-flight when it stopped runs out. The rows are still
+// worth keeping — they are the right shape and mostly still true — so this
+// re-reads them on the first tick back rather than blanking the page.
+func (s *IfStatus) Suspend() {
+	s.poll.stop()
+	s.mu.Lock()
+	s.metaIn = 0
+	s.mu.Unlock()
+}
 
 func (s *IfStatus) Resume() {
 	if s.ros.Connected() {
