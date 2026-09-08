@@ -59,6 +59,13 @@ type Session struct {
 	// something that does not exist.
 	eff collection.Resolved
 
+	// sched is the router's ONE scheduler, phase 3.2. It services the cache's
+	// demand set, so a collector that has subscribed does not own a timer. Nil
+	// until the session is built; started on the first connect and stopped in
+	// Release, before the connection closes, because Stop waits for the loop and
+	// a fetch must not still be in flight against a socket about to shut.
+	sched *roscache.Scheduler
+
 	// roscache coalesces reads two collectors share. See Collectors-Rewrite.md
 	// phase 1; nil until Acquire builds the collectors.
 	roscache *roscache.Cache
@@ -694,6 +701,31 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// matches what is scarce, for the same reason `roslimit` is keyed that way.
 	// Collectors that have not opted in read directly and are unaffected.
 	s.roscache = roscache.New(reader{s})
+	// The tick is how often the demand set is re-read, not how often any menu
+	// is fetched. It bounds how late a newly subscribed menu is picked up, so
+	// it wants to be comfortably shorter than the shortest cadence anybody
+	// asks for and no shorter than that.
+	s.sched = roscache.NewScheduler(s.roscache, 250*time.Millisecond)
+	// STARTED HERE, NOT WITH THE COLLECTORS, for two reasons.
+	//
+	// It reads nothing until something subscribes, and nothing subscribes until a
+	// collector's Start, which runs after the first connect — so an idle loop on
+	// an unconnected session costs a Demand() call every 250ms and issues no
+	// command.
+	//
+	// And `TestTheBackgroundCollectorCountIsRecorded` counts `s.X.Start()` inside
+	// the first-connect block below, with a regex, because that count is the
+	// basis of the background-pool decision. A scheduler started there reads as a
+	// fifteenth collector. The test caught exactly that, and the fix is placement
+	// rather than a looser regex.
+	//
+	// THE ANCHOR IS ALSO A TRAP AND IT CAUGHT ME TWICE IN ONE EDIT. That test
+	// finds its block by searching for the opening line of the first-connect
+	// condition, so writing that line out in a comment ANYWHERE ABOVE IT moves
+	// the anchor and the test then reads the wrong region. This paragraph
+	// deliberately describes it instead of quoting it. The test file records the
+	// same trap from the last time somebody hit it.
+	s.sched.Start()
 	s.packages = collect.NewPackages(reader{s}, emit, s.eff.Poll["packages"])
 	s.routing = collect.NewRouting(reader{s}, emit, s.eff.Poll["routing"])
 	// Built BEFORE dhcpNetworks, which takes it as its lease source: a subnet's
@@ -824,7 +856,8 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		s.bridges,            // /interface/bridge/port with vlans, /host with topology
 		s.packages, s.system, // /system/routerboard and /system/package/update
 		s.ppp, s.vpn, // /ppp/active
-		s.routing, // /ip/route, with wan
+		s.netwatch, // phase 3.2: subscribes rather than polling
+		s.routing,  // /ip/route, with wan
 	} {
 		c.UseCache(s.roscache)
 	}
@@ -1113,6 +1146,11 @@ func (m *Manager) idleOut(routerID string, s *Session) {
 	s.netwatch.Stop()
 	s.talkers.Stop()
 	s.ping.Stop()
+	// BEFORE THE CLOSE. Stop waits for the loop to finish, so no scheduled
+	// fetch is still in flight against a connection about to shut.
+	if s.sched != nil {
+		s.sched.Stop()
+	}
 	if c != nil {
 		_ = c.Close()
 	}
