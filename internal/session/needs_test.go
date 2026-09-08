@@ -1,6 +1,9 @@
 package session
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The decision that keeps 4.3 from being a regression.
 //
@@ -95,17 +98,115 @@ func TestApplyReasonsLeavesAViewerAlone(t *testing.T) {
 func TestEveryTransitionConverges(t *testing.T) {
 	src := readSource(t, "session.go")
 	for _, where := range []string{
-		"s.holds[reason] = true s.mu.Unlock() s.applyReasons()",
+		// The Retain path. NOT "hold then applyReasons" -- that adjacency is what
+		// the first version of this test asserted, and it was pinning the BUG:
+		// applyReasons no-ops while a viewer is present, and Acquire's reference
+		// is still held at that point. The correct shape is release, THEN apply,
+		// and TestRetainPrunesAfterGivingBackItsViewerReference checks the order
+		// directly. Here it is enough that the Retain path applies at all.
+		"m.Release(routerID)",
 		// The Drop path. Checked as the whole sequence, because `delete(s.holds,
 		// reason)` alone is trivially present and a mutation removing the
 		// applyReasons after it SURVIVED the first version of this test.
 		"delete(s.holds, reason) empty := len(s.holds) == 0 && s.refs <= 0 s.mu.Unlock() s.applyReasons()",
-		"defer s.applyReasons()",
+		// The connect path. NOT deferred -- see TestTheConnectPruneIsNotDeferred.
+		"s.applyReasons() first = false",
 	} {
 		if !contains(src, where) {
 			t.Errorf("a holder transition no longer calls applyReasons (%q). The session "+
 				"then runs whatever the last transition left, which for an alerting "+
 				"router is fifteen collectors instead of six.", where)
 		}
+	}
+}
+
+// TestRetainPrunesAfterGivingBackItsViewerReference.
+//
+// ── THE BUG THIS PINS, WHICH EVERY TEST MISSED ──────────────────────────────
+//
+// `Retain` acquires (taking a VIEWER reference), records the hold, and releases.
+// `applyReasons` does nothing while a viewer is present — so calling it between
+// the hold and the release saw refs == 1, concluded a viewer wanted everything,
+// and returned. The session then ran all fifteen collectors for a router nobody
+// was watching.
+//
+// Every test was green. The tests ask what the code DECIDES; none of them could
+// see how much the router was being asked. It was found by measuring: 119-120
+// commands a minute became 263-311.
+func TestRetainPrunesAfterGivingBackItsViewerReference(t *testing.T) {
+	src := readSource(t, "session.go")
+	rel := indexOf(src, "m.Release(routerID) ")
+	app := indexOf(src, "s.applyReasons() return s, nil")
+	if rel < 0 || app < 0 {
+		t.Fatal("Retain no longer releases then applies; this check is reading the wrong " +
+			"shape and would pass against anything")
+	}
+	if app < rel {
+		t.Error("Retain calls applyReasons BEFORE giving back its viewer reference. " +
+			"applyReasons no-ops while a viewer is present, so the prune never happens " +
+			"and a router held for alerting runs every collector.")
+	}
+}
+
+// TestAViewerLeavingAHeldSessionPrunes. Without it, one browser visit
+// permanently upgrades an alerting router to the full viewer set.
+func TestAViewerLeavingAHeldSessionPrunes(t *testing.T) {
+	src := readSource(t, "session.go")
+	if !contains(src, "held := len(s.holds) > 0") || !contains(src, "if held { s.applyReasons() }") {
+		t.Error("Release no longer prunes a held session when its last viewer leaves, so " +
+			"visiting a router once leaves it running the viewer's collector set for ever")
+	}
+}
+
+// indexOf is strings.Index over the flattened source the two checks above read.
+func indexOf(src, want string) int {
+	return strings.Index(src, strings.Join(strings.Fields(want), " "))
+}
+
+// TestTheConnectPruneIsNotDeferred.
+//
+// It was written as `defer s.applyReasons()`. A defer runs when the FUNCTION
+// returns, and the function is `connectLoop` — a loop that runs for the life of
+// the session and never returns. So the prune never happened, and a router held
+// only for alerting kept all fifteen collectors.
+//
+// Every test stayed green, because they assert the call EXISTS and it did. It
+// took a command-rate measurement to find: 264-287 a minute against a 119-120
+// baseline. This is the cheap version of that measurement.
+func TestTheConnectPruneIsNotDeferred(t *testing.T) {
+	src := readSource(t, "session.go")
+	if contains(src, "defer s.applyReasons()") {
+		t.Error("the connect path defers applyReasons. connectLoop never returns, so a " +
+			"deferred call never runs and a held session keeps every collector.")
+	}
+	if !contains(src, "s.replayResumes() // ── PHASE 4.3c") && !contains(src, "s.applyReasons() first = false") {
+		t.Error("the connect path no longer prunes at the end of the start block, so what " +
+			"a held session runs depends on whatever touched it last")
+	}
+}
+
+// TestResumeCollectorRefusesWhatTheSessionHasNoReasonToRun.
+//
+// The connect-time prune is not enough on its own. The dormancy probe calls
+// `ResumeCollector` for any collector due for a probe, and it has no way to know
+// why the session exists — so after the prune it talked `queues` back into
+// running on a router nobody was watching.
+//
+// Found by measurement, not by reading: the rate settled at 147-167 a minute
+// against a 119-120 baseline, and the busiest-menu list named `/queue/simple`
+// and `/queue/tree`. The funnel is where the veto belongs, beside the enabled
+// check, because every resume in the app goes through it.
+func TestResumeCollectorRefusesWhatTheSessionHasNoReasonToRun(t *testing.T) {
+	src := readSource(t, "dormancy_targets.go")
+	if !contains(src, "why := s.reasonsLocked()") || !contains(src, "if !Needs(key, why) { return }") {
+		t.Error("ResumeCollector no longer refuses a collector the session has no reason " +
+			"to run, so the dormancy probe resumes whatever it likes on a held session " +
+			"and the prune is undone within a minute")
+	}
+	// Beside the enabled check, not after the work: a refusal that happens later
+	// has already started something.
+	if indexOf(src, "if !Needs(key, why) { return }") > indexOf(src, "if !s.Connected() {") {
+		t.Error("the Needs veto is after the not-connected latch, so a refused resume is " +
+			"still remembered and replayed when the link comes up")
 	}
 }

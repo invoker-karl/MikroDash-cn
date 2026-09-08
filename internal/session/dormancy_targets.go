@@ -234,6 +234,26 @@ func (s *Session) ResumeCollector(key string) {
 	if !s.CollectorEnabled(key) {
 		return
 	}
+	// ── AND NOTHING THIS SESSION HAS NO REASON TO RUN ─────────────────────
+	//
+	// Phase 4.3c. A session held only for alerting must not be talked back into
+	// running `queues` by something that does not know why it exists.
+	//
+	// MEASURED, and it is why this clause is here rather than argued for: after
+	// the connect-time prune, the command rate settled at 147-167 a minute
+	// against a 119-120 baseline, and the busiest-menu list showed
+	// `/queue/simple` and `/queue/tree` being read on a router nobody was
+	// watching. The DORMANCY PROBE had resumed them -- `probe` calls this for any
+	// collector due for one, and had no way to know the session did not want it.
+	//
+	// A viewer is unaffected: `Needs` returns true for everything while one is
+	// present, which is the existing behaviour that page gating narrows.
+	s.mu.Lock()
+	why := s.reasonsLocked()
+	s.mu.Unlock()
+	if !Needs(key, why) {
+		return
+	}
 	// REMEMBERED WHEN THE LINK IS NOT UP YET. THIRTEEN of the twenty-six
 	// collectors open Resume() with `if ros.Connected()` and drop the request on
 	// the floor with nothing to ask again -- measured, after an earlier version of

@@ -948,8 +948,16 @@ func (m *Manager) Release(routerID string) {
 		}
 		s.linger = time.AfterFunc(m.grace(), func() { m.idleOut(routerID, s) })
 	}
+	held := len(s.holds) > 0
 	s.mu.Unlock()
 	m.mu.Unlock()
+	// A VIEWER LEFT A SESSION SOMETHING ELSE IS HOLDING. The session survives,
+	// and must now run the HOLDERS' set rather than the viewer's -- otherwise one
+	// browser visit permanently upgrades an alerting router to fifteen
+	// collectors. Outside both locks, because applyReasons takes s.mu.
+	if held {
+		s.applyReasons()
+	}
 }
 
 // AlertFeeds names the collectors whose payloads the alert rules consume.
@@ -1031,12 +1039,23 @@ func (m *Manager) Retain(routerID, reason string) (*Session, error) {
 	}
 	s.holds[reason] = true
 	s.mu.Unlock()
-	s.applyReasons()
 	// Acquire took a VIEWER reference, and this is not a viewer. Giving it back
 	// leaves the hold as the only thing keeping the session, which is what the
 	// caller asked for -- and it means an unheld session still lingers and dies
 	// exactly as before.
 	m.Release(routerID)
+	// ── AFTER THE RELEASE, AND THAT ORDER IS THE WHOLE THING ──────────────
+	//
+	// `applyReasons` does nothing while a viewer is present, and the Acquire
+	// above took a viewer reference. Called BEFORE the release it therefore saw
+	// refs == 1, concluded a viewer wanted everything, and returned -- leaving a
+	// session held for alerting running all fifteen collectors.
+	//
+	// MEASURED, not reasoned. The command rate for one unwatched router went
+	// from 119-120 a minute to 263-311. Every test was green: the tests ask what
+	// the code DECIDES, and not one of them could see how much the router was
+	// actually being asked.
+	s.applyReasons()
 	return s, nil
 }
 
@@ -1576,7 +1595,19 @@ func (s *Session) connectLoop() {
 			// AFTER the starts rather than instead of them, so the start list
 			// stays the one statement of what a session runs and this is
 			// visibly a narrowing of it.
-			defer s.applyReasons()
+			//
+			// ── NOT `defer`, AND THAT COST A DEPLOY TO FIND ─────────────
+			//
+			// This was written as `defer s.applyReasons()`. A defer runs when
+			// the FUNCTION returns, and the function here is `connectLoop` --
+			// which is a loop that never returns for the life of the session. So
+			// it never ran, and a router held only for alerting kept all fifteen
+			// collectors.
+			//
+			// Every test stayed green: they assert that the call exists, which it
+			// did. The command rate is what showed it -- 264-287 a minute against
+			// a 119-120 baseline. Placed at the END of the start block, where the
+			// deferred version was meant to take effect.
 
 			// #105: EVERY START IS GATED on the router's resolved config, so a
 			// collector the operator turned off for this router is never
@@ -1729,6 +1760,23 @@ func (s *Session) connectLoop() {
 			// "restore page-aware streams for any pages still open"
 			// (src/index.js:685). This is that, for the connect it was missing on.
 			s.replayResumes()
+
+			// ── PHASE 4.3c: PRUNE TO WHAT THE HOLDERS NEED ──────────────
+			//
+			// The block above starts everything, which is right for a viewer and
+			// wrong for a session held only for alerting: fifteen collectors
+			// where six are read, and `wan` alone polls every two seconds. This
+			// suspends the rest, and does nothing at all when a viewer is
+			// present. See applyReasons.
+			//
+			// AFTER the starts and after replayResumes, so it is the last word on
+			// what runs -- and NOT `defer`. It was written as one, and a defer
+			// runs when the FUNCTION returns: the function is `connectLoop`,
+			// which never returns for the life of the session, so it never ran.
+			// Every test stayed green, because they assert the call exists and it
+			// did. The command rate is what showed it: 264-287 a minute against a
+			// 119-120 baseline.
+			s.applyReasons()
 			first = false
 		} else {
 			// THE CACHED ROWS CAME FROM A CONNECTION THAT IS GONE. Their age says

@@ -251,7 +251,59 @@ func (s *Server) syncAlertPool() {
 	// That whole question is gone. Recording is each router's own
 	// `ReportingEnabled`, carried in the projection above, and `PlanSync`
 	// rebuilds a session whose flag changed. `activeID` is still the constant.
+	// ── PHASE 4.3d: HOLD A SESSION FOR THE ROUTERS THAT NEED ONE ──────────
+	//
+	// A `session.Session` already feeds the alert evaluator and the history
+	// recorder, at one seam in its emit closure. The only reason this pool
+	// exists is that a Session dies when its last viewer leaves — so a router
+	// that needs alerting or recording is held instead, and `alertPoolExclusions`
+	// then drops it from the pool WITHOUT A NEW RULE, because it already excludes
+	// every router with a live session.
+	//
+	// A held session runs the six collectors alerting reads, not the fifteen a
+	// viewer gets: see `session.Needs`. The pool ran seven for the same job.
+	//
+	// BEFORE `Sync`, so the exclusion set the pool is handed already reflects the
+	// holds taken here. Taking them after would leave one sync's worth of both
+	// holding the same router — which is the duplicate-evaluation bug that filed
+	// 50 spurious rows in a day.
+	s.holdSessionsForAlertsAndHistory(out)
+	excluded = s.alertPoolExclusions()
+
 	s.alertPool.Sync(out, activeID, excluded)
+}
+
+// holdSessionsForAlertsAndHistory keeps a session alive for every router whose
+// alerts must be evaluated or whose history must be written, and lets go of the
+// ones that no longer need it.
+//
+// BOTH DIRECTIONS MATTER. A router that loses alerting keeps a held session for
+// ever unless the hold is dropped, and a held session is a connection and a
+// collector set — the exact cost this phase exists to remove.
+func (s *Server) holdSessionsForAlertsAndHistory(rs []alertpool.Router) {
+	if s.sessions == nil {
+		return
+	}
+	for _, r := range rs {
+		for _, h := range []struct {
+			reason string
+			want   bool
+		}{
+			{"alerts", r.AlertsEnabled && !r.Disabled},
+			{"history", r.ReportingEnabled && !r.Disabled},
+		} {
+			if !h.want {
+				s.sessions.Drop(r.ID, h.reason)
+				continue
+			}
+			if _, err := s.sessions.Retain(r.ID, h.reason); err != nil {
+				// A router that cannot be dialled is not a reason to fail the
+				// sync: the pool still covers it this round, and the next sync
+				// tries again.
+				log.Printf("[session] hold %q for %s: %v", h.reason, r.Label, err)
+			}
+		}
+	}
 }
 
 // collectionRaw is the router's #105 block as stored, or nil.

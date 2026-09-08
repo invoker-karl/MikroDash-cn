@@ -11,13 +11,31 @@ import (
 // readSource reads a file of this package, for the two source-reading checks
 // below. They read the CURRENT source, which is the only way to tell a gate that
 // still exists from one a refactor quietly removed.
+// COMMENTS ARE STRIPPED FIRST, and that is not tidiness.
+//
+// Several of these checks FORBID a shape, and the comment explaining what they
+// forbid necessarily contains it. This repository has now hit that four times --
+// the credential scanner reading a comment about proplists, a dormancy gate
+// reading its own explanation, two of the 4.2 room checks, and the connect-prune
+// check reading the sentence describing the defer it exists to prevent.
+//
+// Fixing it in the shared helper rather than in each caller is what stops a
+// fifth.
 func readSource(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(name)
 	if err != nil {
 		t.Fatalf("reading %s: %v", name, err)
 	}
-	return strings.Join(strings.Fields(string(b)), " ")
+	var code strings.Builder
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		code.WriteString(line)
+		code.WriteByte('\n')
+	}
+	return strings.Join(strings.Fields(code.String()), " ")
 }
 
 func contains(src, want string) bool {
