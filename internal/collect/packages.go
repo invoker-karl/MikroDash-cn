@@ -338,7 +338,10 @@ func (p *Packages) read(cmd routeros.Cmd, flag **bool) []routeros.Reply {
 	if *flag != nil && !**flag {
 		return nil
 	}
-	rows, err := p.ros.Do(cmd)
+	// THROUGH THE CACHE: `system` reads /system/routerboard and
+	// /system/package/update too. The routing is in the helper because the
+	// absent-menu latch below has to keep working whichever collector paid.
+	rows, err := readVia(p.cache, p.ros, cmd, p.pollMs.duration())
 	if err != nil {
 		if menuMissing(err) {
 			no := false

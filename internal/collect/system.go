@@ -511,7 +511,10 @@ func systemFingerprint(p *SystemPayload) string {
 // that is not an error worth reporting on a gauge card.
 func (s *System) readStatic() {
 	var serial, license *string
-	if rows, err := s.ros.Do(systemRouterboardCmd); err == nil && len(rows) > 0 {
+	// THROUGH THE CACHE: `packages` reads this menu too. This side reads it ONCE
+	// PER CONNECTION, so it is the one that gains -- a serial number that has not
+	// changed since boot costs nothing when packages has just fetched it.
+	if rows, err := readVia(s.cache, s.ros, systemRouterboardCmd, s.pollMs.duration()); err == nil && len(rows) > 0 {
 		if v := rows[0]["serial-number"]; v != "" {
 			serial = &v
 		}
@@ -586,7 +589,8 @@ func (s *System) checkForUpdates() {
 	_, checkErr := s.ros.Do(systemUpdateCheckCmd)
 	denied := checkErr != nil && menuDenied(checkErr)
 
-	rows, err := s.ros.Do(systemUpdatePrintCmd)
+	// THROUGH THE CACHE: `packages` reads this menu too.
+	rows, err := readVia(s.cache, s.ros, systemUpdatePrintCmd, s.pollMs.duration())
 	row := routeros.Reply{}
 	if err == nil && len(rows) > 0 {
 		row = rows[0]
