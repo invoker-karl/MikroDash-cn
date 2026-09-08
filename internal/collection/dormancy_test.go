@@ -109,17 +109,66 @@ func TestTheUnreadableCasesAreStillPresent(t *testing.T) {
 	}
 }
 
+// addedSinceLive is every collector this app has made dormancy-eligible that the
+// Node implementation did not.
+//
+// ── WHY THIS LIST EXISTS RATHER THAN A RE-RECORDED CORPUS ───────────────────
+//
+// The corpus is a RECORDING of what shipped, and the generator that made it is
+// gone. Re-recording is not available, and editing the recording to match the
+// code would turn a comparison into a tautology. So the recording stays exactly
+// as it was and the DIFFERENCE is declared here, one line per deliberate change,
+// which keeps the corpus answering "what did the live app do" while the test
+// answers "and what have we changed on purpose".
+//
+// Both halves still fail: an addition not listed here fails, and a listed
+// addition that stops being one fails too.
+var addedSinceLive = map[string]string{
+	"conns": "2026-09-08. Measured on the CHR: the connection payload's four `top*` arrays " +
+		"are its whole content, and a router with connection tracking disabled returns " +
+		"them empty forever while being polled every three seconds. The live app left " +
+		"this collector unjudgeable; nothing about that was deliberate.",
+}
+
 func TestDormancyEligibleMatchesLive(t *testing.T) {
 	doc := loadEmptyCases(t)
 	got := DormancyEligible()
-	if len(got) != len(doc.Eligible) {
-		t.Fatalf("%d collectors eligible, the live filter selects %d", len(got), len(doc.Eligible))
+
+	live := map[string]bool{}
+	for _, k := range doc.Eligible {
+		live[k] = true
 	}
-	// ORDER TOO: the live supervisor walks the registry in order, so verdicts are
-	// announced in that order.
-	for i := range got {
-		if got[i].Key != doc.Eligible[i] {
-			t.Errorf("position %d is %q, live has %q", i, got[i].Key, doc.Eligible[i])
+
+	// ORDER IS PART OF THE CLAIM: the live supervisor walks the registry in
+	// order, so verdicts are announced in that order. Comparing the recorded
+	// sequence against this one with the additions skipped keeps that intact.
+	i := 0
+	for _, c := range got {
+		if !live[c.Key] {
+			if addedSinceLive[c.Key] == "" {
+				t.Errorf("%s is dormancy-eligible here and was not in the live app, with no "+
+					"reason recorded. An emptyKey added by hand changes when a collector "+
+					"sleeps; say why in addedSinceLive.", c.Key)
+			}
+			continue
+		}
+		if i >= len(doc.Eligible) {
+			t.Errorf("%s is eligible past the end of the recorded sequence", c.Key)
+			break
+		}
+		if c.Key != doc.Eligible[i] {
+			t.Errorf("position %d is %q, live has %q", i, c.Key, doc.Eligible[i])
+		}
+		i++
+	}
+	if i != len(doc.Eligible) {
+		t.Errorf("%d of the %d collectors the live app judged are eligible here; one has LOST "+
+			"its emptyKey, which stops it ever sleeping — silently", i, len(doc.Eligible))
+	}
+	for key := range addedSinceLive {
+		if live[key] {
+			t.Errorf("%s is recorded as an addition and the live app had it too. Drop the "+
+				"entry rather than leaving a reason that is not about anything.", key)
 		}
 	}
 	// The filter must actually filter, or it is not one.

@@ -69,7 +69,12 @@
       "pollable": true,
       "disableable": true,
       "requires": [],
-      "emptyKey": [],
+      "emptyKey": [
+        "topSources",
+        "topDestinations",
+        "topCountries",
+        "topPorts"
+      ],
       "sessionProp": "conns"
     },
     {
