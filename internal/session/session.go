@@ -1379,6 +1379,20 @@ func (s *Session) connectLoop() {
 			// with a regex.
 			s.judgeOnDelivery()
 
+			// ── PHASE 5.2: PRIME, SO NO PAGE WAITS ON ITS FIRST LANDING ──
+			//
+			// In a goroutine because it SLEEPS between reads -- see
+			// primeSpacing -- and this loop must go on to start the collectors.
+			// It skips anything that already has a payload, so it costs one pass
+			// and races nothing: a collector that produces first simply is not
+			// primed.
+			//
+			// The operator asked for this at app startup AND at router select
+			// (2026-09-08). This is the router-select half, and it is also the
+			// startup half for any router the background pools hold, because
+			// both build their sessions through the same connect path.
+			go s.primeAll()
+
 			// #105: EVERY START IS GATED on the router's resolved config, so a
 			// collector the operator turned off for this router is never
 			// started. The calls keep their literal shape because

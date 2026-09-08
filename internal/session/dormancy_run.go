@@ -37,9 +37,6 @@ const dormancyTick = 15 * time.Second
 // probe() it is used without anybody remembering this file.
 type prober interface{ Probe() }
 
-// refresher asks for a reading now rather than at the next interval.
-type refresher interface{ RefreshNow() }
-
 // judgeOnDelivery wires the supervisor to the scheduler's heartbeat.
 //
 // ── WHAT REPLACED THE 15-SECOND GOROUTINE, AND WHY ──────────────────────────
@@ -204,9 +201,77 @@ func (s *Session) probe(key string, t collectorTarget) {
 		return
 	}
 	// The fallback: resume THROUGH THE FUNNEL, then ask for a reading now.
+	//
+	// THE SECOND HALF USED TO BE A TYPE ASSERTION THAT COULD NEVER PASS. It
+	// asked whether the TARGET STRUCT implemented a refresher interface --
+	// `collectorTarget` has no methods, so the answer was always no, and no
+	// probe has ever refreshed anything. The collector was resumed and then
+	// waited a full cadence for its answer. See collectorTarget.refresh.
+	//
+	// The old expression is deliberately NOT written out here. A gate in
+	// prime_test.go scans this file for it, and quoting it made that gate fail
+	// against its own explanation -- the same trap CLAUDE.md records for the
+	// credential scanner reading a comment about proplists.
 	s.ResumeCollector(key)
-	if r, ok := any(t).(refresher); ok {
-		r.RefreshNow()
+	if t.refresh != nil {
+		t.refresh()
+	}
+}
+
+// primeSpacing is the gap between one-shot reads in a priming pass.
+//
+// The live app staggered its startup in 75 ms burst groups, and the reason
+// carries over: a weak board should not meet twenty-odd commands at once, and
+// the pass must not crowd out the first REAL reads a viewer is waiting on.
+// `roslimit` caps concurrency at eight regardless, so this is about smoothing
+// rather than about safety.
+const primeSpacing = 75 * time.Millisecond
+
+// primeAll asks every collector that has never produced for one reading.
+//
+// ── PHASE 5.2: WHY THIS EXISTS ──────────────────────────────────────────────
+//
+// The operator's requirement is that landing on a page never waits for data.
+// `Last()` replay on focus already serves any collector that has produced, so
+// the hang is specifically the FIRST landing, before a collector's own cadence
+// has come round -- and some of those cadences are minutes.
+//
+// ── ONLY WHAT HAS NOTHING, AND THAT IS THE WHOLE GATE ───────────────────────
+//
+// A collector with a payload is skipped. So this costs one pass at session
+// start and nothing afterwards: a second call is free, a reconnect re-primes
+// only what was lost, and it can be called from anywhere without a caller
+// having to reason about whether it is due.
+//
+// ── IT DELIBERATELY READS WHAT NOBODY IS WATCHING YET ───────────────────────
+//
+// That is the opposite of the idle and page-room gates, ON PURPOSE, and it is
+// bounded: one reading per collector, once, on a router a viewer has just asked
+// for. Anyone reading this as a gate violation should read this paragraph
+// instead of removing it.
+//
+// It also HELPS dormancy rather than fighting it: a collector that has produced
+// can be judged, so a router with no queues gets that collector slept sooner.
+func (s *Session) primeAll() {
+	for _, key := range targetKeys {
+		s.mu.Lock()
+		done := s.closed
+		s.mu.Unlock()
+		if done || !s.Connected() {
+			return
+		}
+		t, ok := s.targets()[key]
+		if !ok || t.refresh == nil {
+			continue
+		}
+		if !s.CollectorEnabled(key) {
+			continue
+		}
+		if t.last() != nil {
+			continue // already has something to replay
+		}
+		t.refresh()
+		time.Sleep(primeSpacing)
 	}
 }
 

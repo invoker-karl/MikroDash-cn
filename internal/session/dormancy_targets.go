@@ -52,6 +52,22 @@ type collectorTarget struct {
 	last    func() any
 	suspend func()
 	resume  func()
+	// refresh asks this collector for a reading NOW, rather than at its next
+	// interval.
+	//
+	// ── IT USED TO BE A TYPE ASSERTION, AND THE ASSERTION COULD NEVER PASS ──
+	//
+	// `probe` asked whether THIS STRUCT implemented a refresher interface. It has
+	// no methods, so the answer was always no, and the refresh half of every
+	// dormancy probe never ran -- the
+	// collector was resumed and then waited a full cadence for its answer, which
+	// on `wifi`'s 300s subscription is five minutes of a page saying nothing.
+	//
+	// The `prober` assertion beside it is deliberate and documented: nothing
+	// implements Probe(). This one was not; the collectors DO implement
+	// RefreshNow, and the assertion was simply asking the wrong object. A closure
+	// asks the right one, and cannot silently stop matching.
+	refresh func()
 }
 
 // targets is built per call rather than cached: the collectors are fixed for the
@@ -59,8 +75,8 @@ type collectorTarget struct {
 // more thing to invalidate when a session is rebuilt.
 func (s *Session) targets() map[string]collectorTarget {
 	t := map[string]collectorTarget{}
-	add := func(key string, last func() any, suspend, resume func()) {
-		t[key] = collectorTarget{last: last, suspend: suspend, resume: resume}
+	add := func(key string, last func() any, suspend, resume, refresh func()) {
+		t[key] = collectorTarget{last: last, suspend: suspend, resume: resume, refresh: refresh}
 	}
 
 	add("dns", func() any {
@@ -68,133 +84,133 @@ func (s *Session) targets() map[string]collectorTarget {
 			return p
 		}
 		return nil
-	}, s.dns.Suspend, s.dns.Resume)
+	}, s.dns.Suspend, s.dns.Resume, s.dns.RefreshNow)
 	add("bridges", func() any {
 		if p := s.bridges.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.bridges.Suspend, s.bridges.Resume)
+	}, s.bridges.Suspend, s.bridges.Resume, s.bridges.RefreshNow)
 	add("vlans", func() any {
 		if p := s.vlans.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.vlans.Suspend, s.vlans.Resume)
+	}, s.vlans.Suspend, s.vlans.Resume, s.vlans.RefreshNow)
 	add("wan", func() any {
 		if p := s.wan.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.wan.Suspend, s.wan.Resume)
+	}, s.wan.Suspend, s.wan.Resume, s.wan.RefreshNow)
 	add("packages", func() any {
 		if p := s.packages.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.packages.Suspend, s.packages.Resume)
+	}, s.packages.Suspend, s.packages.Resume, s.packages.RefreshNow)
 	add("routing", func() any {
 		if p := s.routing.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.routing.Suspend, s.routing.Resume)
+	}, s.routing.Suspend, s.routing.Resume, s.routing.RefreshNow)
 	add("ppp", func() any {
 		if p := s.ppp.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.ppp.Suspend, s.ppp.Resume)
+	}, s.ppp.Suspend, s.ppp.Resume, s.ppp.RefreshNow)
 	add("vpn", func() any {
 		if p := s.vpn.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.vpn.Suspend, s.vpn.Resume)
+	}, s.vpn.Suspend, s.vpn.Resume, s.vpn.RefreshNow)
 	add("rosusers", func() any {
 		if p := s.rosUsers.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.rosUsers.Suspend, s.rosUsers.Resume)
+	}, s.rosUsers.Suspend, s.rosUsers.Resume, s.rosUsers.RefreshNow)
 	add("queues", func() any {
 		if p := s.queues.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.queues.Suspend, s.queues.Resume)
+	}, s.queues.Suspend, s.queues.Resume, s.queues.RefreshNow)
 	add("firewall", func() any {
 		if p := s.firewall.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.firewall.Suspend, s.firewall.Resume)
+	}, s.firewall.Suspend, s.firewall.Resume, s.firewall.RefreshNow)
 	add("wifi", func() any {
 		if p := s.wifi.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.wifi.Suspend, s.wifi.Resume)
+	}, s.wifi.Suspend, s.wifi.Resume, s.wifi.RefreshNow)
 	add("capsman", func() any {
 		if p := s.capsman.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.capsman.Suspend, s.capsman.Resume)
+	}, s.capsman.Suspend, s.capsman.Resume, s.capsman.RefreshNow)
 	add("netwatch", func() any {
 		if p := s.netwatch.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.netwatch.Suspend, s.netwatch.Resume)
+	}, s.netwatch.Suspend, s.netwatch.Resume, s.netwatch.Tick)
 	add("ifStatus", func() any {
 		if p := s.ifStatus.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.ifStatus.Suspend, s.ifStatus.Resume)
+	}, s.ifStatus.Suspend, s.ifStatus.Resume, s.ifStatus.Tick)
 	add("topology", func() any {
 		if p := s.topology.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.topology.Suspend, s.topology.Resume)
+	}, s.topology.Suspend, s.topology.Resume, s.topology.Tick)
 	add("wireless", func() any {
 		if p := s.wireless.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.wireless.Suspend, s.wireless.Resume)
+	}, s.wireless.Suspend, s.wireless.Resume, s.wireless.Tick)
 	add("bandwidth", func() any {
 		if p := s.bandwidth.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.bandwidth.Suspend, s.bandwidth.Resume)
+	}, s.bandwidth.Suspend, s.bandwidth.Resume, s.bandwidth.Tick)
 	add("talkers", func() any {
 		if p := s.talkers.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.talkers.Suspend, s.talkers.Resume)
+	}, s.talkers.Suspend, s.talkers.Resume, s.talkers.Tick)
 	add("conns", func() any {
 		if p := s.conns.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.conns.Suspend, s.conns.Resume)
+	}, s.conns.Suspend, s.conns.Resume, s.conns.Tick)
 	add("dhcpLeases", func() any {
 		if p := s.dhcpLeases.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.dhcpLeases.Suspend, s.dhcpLeases.Resume)
+	}, s.dhcpLeases.Suspend, s.dhcpLeases.Resume, s.dhcpLeases.RefreshNow)
 	add("dhcpNetworks", func() any {
 		if p := s.dhcpNetworks.Last(); p != nil {
 			return p
 		}
 		return nil
-	}, s.dhcpNetworks.Suspend, s.dhcpNetworks.Resume)
+	}, s.dhcpNetworks.Suspend, s.dhcpNetworks.Resume, s.dhcpNetworks.RefreshNow)
 	return t
 }
 
