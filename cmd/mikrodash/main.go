@@ -23,6 +23,7 @@ import (
 
 	"mikrodash/internal/db"
 	"mikrodash/internal/geo"
+	"mikrodash/internal/roslimit"
 	"mikrodash/internal/server"
 	"mikrodash/internal/store"
 )
@@ -221,6 +222,11 @@ func main() {
 	} else if n > 0 {
 		log.Printf("[mikrodash] set the reporting default on %d router(s)", n)
 	}
+
+	// The command-rate instrument for Collectors-Rewrite.md phase 1. A no-op
+	// unless MIKRODASH_CMD_STATS is set, so this costs a nil check on every
+	// install that is not being measured.
+	roslimit.StartStats(time.Minute)
 
 	srv, err := server.New(st, server.Options{
 		NodeURL:         *node,

@@ -38,9 +38,14 @@
 package roslimit
 
 import (
+	"fmt"
+	"log"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
 
 // DefaultMax is deliberately generous rather than tuned.
@@ -56,6 +61,15 @@ var (
 	mu     sync.Mutex
 	gates  = map[string]chan struct{}{}
 	maxOne = -1 // resolved once, on first use
+
+	// counts is commands issued per router since the last report.
+	//
+	// It lives under `mu` DELIBERATELY, rather than behind atomics or a second
+	// mutex. `Acquire` already takes this lock to find the gate, so an increment
+	// inside that critical section costs one map write and no extra
+	// synchronisation. A separate lock would double the contention on the hot
+	// path to count it, which is a strange trade for an instrument.
+	counts = map[string]int64{}
 )
 
 // max reads the override once. An unparseable or non-positive value falls back
@@ -93,6 +107,10 @@ func Acquire(routerID string) func() {
 		g = make(chan struct{}, max())
 		gates[routerID] = g
 	}
+	// Counted here, not at release: the question is how many commands this
+	// process ASKS a router for, and one that blocks on a full gate has still
+	// been asked for.
+	counts[routerID]++
 	mu.Unlock()
 
 	g <- struct{}{}
@@ -108,6 +126,61 @@ func InFlight(routerID string) int {
 	return len(gates[routerID])
 }
 
+// StartStats logs how many commands each router was asked for, once per period.
+//
+// ── WHY THIS EXISTS, AND WHY IT IS OFF BY DEFAULT ───────────────────────────
+//
+// `Collectors-Rewrite.md` phase 1 rests on a measurement: the collectors issue
+// 98 commands per full sweep against 72 distinct ones, so 26 are redundant. That
+// figure is a static count of the code and an UPPER BOUND — it assumes every
+// consumer is active at once, which the gating already prevents some of the
+// time. This is the instrument that replaces the estimate with a number.
+//
+// Off unless MIKRODASH_CMD_STATS is set, because one line per period forever is
+// noise on an install that is not being measured. Same idiom as
+// MIKRODASH_ROUTER_CONCURRENCY above: an env knob read once, ignored if
+// malformed, never a reason to refuse to start.
+//
+// ONE LINE FOR THE WHOLE FLEET, not one per router. A ten-router install would
+// otherwise write 14,400 lines a day, and the total is the number phase 1 is
+// judged on anyway.
+func StartStats(every time.Duration) {
+	if os.Getenv("MIKRODASH_CMD_STATS") == "" {
+		return
+	}
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for range t.C {
+			mu.Lock()
+			total := int64(0)
+			parts := make([]string, 0, len(counts))
+			for id, n := range counts {
+				total += n
+				parts = append(parts, fmt.Sprintf("%s=%d", short(id), n))
+			}
+			clear(counts)
+			mu.Unlock()
+
+			if total == 0 {
+				continue // a quiet minute is not worth a line
+			}
+			sort.Strings(parts) // stable output, so two runs can be diffed
+			log.Printf("[roslimit] %d commands in %s across %d router(s): %s",
+				total, every, len(parts), strings.Join(parts, " "))
+		}
+	}()
+}
+
+// short trims a router id to something readable in a log line. The ids are
+// UUIDs; the first segment is unique enough to tell a fleet apart.
+func short(id string) string {
+	if i := strings.IndexByte(id, '-'); i > 0 {
+		return id[:i]
+	}
+	return id
+}
+
 // Reset drops every gate. Tests only: it exists so one test's saturation cannot
 // leak into the next, and calling it while commands are in flight would let them
 // release into a channel nobody is holding.
@@ -115,5 +188,6 @@ func Reset() {
 	mu.Lock()
 	defer mu.Unlock()
 	gates = map[string]chan struct{}{}
+	counts = map[string]int64{}
 	maxOne = -1
 }
