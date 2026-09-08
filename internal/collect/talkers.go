@@ -227,7 +227,14 @@ const talkersRoom = "page-dashboard"
 
 // commit turns rows into the payload. Split from Tick so the differential gate
 // can drive it from a fixture without a router.
-func (t *Talkers) commit(rows []routeros.Reply) {
+// BuildTalkers turns the Kid Control rows into the ranked device list.
+//
+// Phase 4.1: the derivation, with no receiver and no I/O. `topN` is a parameter
+// rather than a field for the same reason prior state is elsewhere -- everything
+// the result depends on arrives as an argument, so the function can be checked by
+// handing it rows instead of building a collector.
+func BuildTalkers(rows []routeros.Reply, topN int) []TalkerDevice {
+
 	// ORDER-PRESERVING DEDUPLICATION BY MAC, matching the Map: a repeated MAC
 	// keeps the LAST row's values but the FIRST row's position, because a JS Map
 	// overwrites in place rather than moving the key to the end. That matters
@@ -261,9 +268,15 @@ func (t *Talkers) commit(rows []routeros.Reply) {
 	sort.SliceStable(devices, func(i, j int) bool {
 		return devices[i].TxMbps+devices[i].RxMbps > devices[j].TxMbps+devices[j].RxMbps
 	})
-	if len(devices) > t.topN {
-		devices = devices[:t.topN]
+	if len(devices) > topN {
+		devices = devices[:topN]
 	}
+
+	return devices
+}
+
+func (t *Talkers) commit(rows []routeros.Reply) {
+	devices := BuildTalkers(rows, t.topN)
 
 	p := &TalkersPayload{
 		TS: t.now().UnixMilli(), Devices: devices,
