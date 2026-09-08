@@ -261,6 +261,9 @@ type Packages struct {
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
+	// sched is this collector's subscription to the package list. See
+	// scheduled.go. The firmware and update rows keep their config cadence.
+	sched scheduled
 
 	packages []Package
 	firmware Firmware
@@ -294,19 +297,34 @@ func NewPackages(ros Reader, emit Emit, pollMs int) *Packages {
 	p.loop = newPollLoop(func() { p.Tick() }, func() time.Duration {
 		return p.pollMs.duration()
 	})
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	p.sched = scheduled{loop: p.loop, menu: packageCmd.Path, apply: p.apply,
+		cadence: p.pollMs.duration}
 	return p
 }
 
-func (p *Packages) Suspend() { p.loop.stop() }
+// UseCache moves this collector onto the router's scheduler. Set once, before
+// Start; nil leaves it on its own poll loop.
+// BOTH HALVES. This collector already routed its shared reads through the cache
+// in 1.4 (/system/routerboard and /system/package/update, with `system`), and now
+// also subscribes for its own scheduling. They are the same cache and two
+// different uses of it, so setting one and not the other would silently drop
+// whichever was missed.
+func (p *Packages) UseCache(c *roscache.Cache) {
+	p.cache = c
+	p.sched.useCache(c)
+}
+
+func (p *Packages) Suspend() { p.sched.end() }
 
 func (p *Packages) Resume() {
 	if p.ros.Connected() {
-		p.loop.start()
+		p.sched.begin()
 	}
 }
 
 func (p *Packages) Stop() {
-	p.loop.stop()
+	p.sched.end()
 	p.lastFp = ""
 }
 
@@ -315,12 +333,14 @@ func (p *Packages) Stop() {
 // package changes reboots the router, and the whole point of the reboot is that
 // the package set is different afterwards.
 func (p *Packages) Reconnected() {
-	p.loop.stop()
+	p.sched.end()
 	p.lastFp = ""
 	p.ticks = 0
 	p.pkgOK, p.boardOK, p.updateOK = nil, nil, nil
-	p.Tick()
-	p.loop.start()
+	if !p.sched.scheduling() {
+		p.Tick()
+	}
+	p.sched.begin()
 }
 
 // RefreshNow re-reads immediately. Called after an action so the pending-changes
@@ -381,7 +401,38 @@ func (p *Packages) Tick() {
 	}
 	p.ticks++
 
-	p.packages = parsePackages(p.read(packageCmd, &p.pkgOK))
+	p.applyRows(p.read(packageCmd, &p.pkgOK), nil)
+}
+
+// apply is what the scheduler calls with the package list. The firmware and
+// update rows keep their own config cadence and are read here, as before -- see
+// scheduled.go on why a collector subscribes to ONE menu and reads the rest.
+func (p *Packages) apply(rows []routeros.Reply, err error) {
+	if err != nil {
+		// The availability latch the polled path gets from `read`, derived from
+		// what the scheduler hands over. Without it a router that cannot answer
+		// this menu would be asked for ever on one path and never on the other.
+		if menuMissing(err) {
+			no := false
+			p.pkgOK = &no
+		}
+		return
+	}
+	if p.pkgOK == nil {
+		yes := true
+		p.pkgOK = &yes
+	}
+	if p.ticks%configEvery == 0 {
+		p.firmware = parseFirmware(firstRow(p.read(routerboardCmd, &p.boardOK)))
+		p.update = parseUpdate(firstRow(p.read(packageUpdateCmd, &p.updateOK)))
+	}
+	p.ticks++
+	p.applyRows(rows, err)
+}
+
+// applyRows builds and emits from the package list.
+func (p *Packages) applyRows(rows []routeros.Reply, _ error) {
+	p.packages = parsePackages(rows)
 
 	counts := PackageCounts{Total: len(p.packages)}
 	scheduled := 0
@@ -442,7 +493,3 @@ func (p *Packages) SetPollMs(ms int) {
 	p.pollMs.set(ms)
 	p.loop.retime()
 }
-
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (p *Packages) UseCache(rc *roscache.Cache) { p.cache = rc }

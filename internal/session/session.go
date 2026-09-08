@@ -852,12 +852,20 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		s.ifStatus, s.wan, // /interface/print
 		s.capsman, s.wifi, s.wireless, s.topology, // the wifi family, 4 menus
 		s.vlans, s.dhcpLeases, // /interface/vlan, with topology
-		s.dhcpNetworks,       // /ip/address with ifStatus+wan, detect-internet with wan
-		s.bridges,            // /interface/bridge/port with vlans, /host with topology
-		s.packages, s.system, // /system/routerboard and /system/package/update
-		s.ppp, s.vpn, // /ppp/active
-		s.netwatch, // phase 3.2: subscribes rather than polling
-		s.routing,  // /ip/route, with wan
+		s.dhcpNetworks, // /ip/address with ifStatus+wan, detect-internet with wan
+		s.bridges,      // /interface/bridge/port with vlans, /host with topology
+		s.system,       // /system/routerboard and /system/package/update, with packages
+		s.ppp, s.vpn,   // /ppp/active
+		// Phase 3.2: these SUBSCRIBE to a menu and the scheduler decides when to
+		// read it, instead of each owning a timer. The entries above are here for
+		// 1.4's shared reads only and still poll.
+		//
+		// `packages` is on this line and not the one above because it does both:
+		// its UseCache feeds the shared-read cache AND the subscription, and
+		// listing it twice would read as an oversight rather than as the two
+		// distinct uses it is.
+		s.netwatch, s.talkers, s.dns, s.packages,
+		s.routing, // /ip/route, with wan
 	} {
 		c.UseCache(s.roscache)
 	}
