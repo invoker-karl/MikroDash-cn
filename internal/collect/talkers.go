@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -85,6 +86,13 @@ type Talkers struct {
 	last        *TalkersPayload
 	loop        *pollLoop
 	now         func() time.Time
+
+	// Phase 3.2: with a cache this collector subscribes instead of polling, and
+	// the router's one scheduler decides when. The loop stays for the pools,
+	// which build collectors with no cache — see netwatch.go for the same note
+	// at length.
+	cache   *roscache.Cache
+	release func()
 }
 
 // NewTalkers builds the collector. `topN` of 0 takes the original's default of
@@ -108,17 +116,48 @@ func NewTalkers(ros Reader, emit Emit, pollMs, topN int) *Talkers {
 
 // Start reads once and then polls, matching Netwatch.Start. The immediate tick
 // is what stops the card sitting empty for a whole interval after a connect.
-func (t *Talkers) Start() { t.Tick(); t.loop.start() }
+// UseCache moves this collector onto the router's scheduler. Set once, before
+// Start; nil leaves it on its own poll loop.
+func (t *Talkers) UseCache(c *roscache.Cache) { t.cache = c }
 
-func (t *Talkers) Suspend() { t.loop.stop() }
-
-func (t *Talkers) Resume() {
-	if t.ros.Connected() {
+func (t *Talkers) subscribe() {
+	if t.cache == nil {
 		t.loop.start()
+		return
+	}
+	if t.release != nil {
+		return
+	}
+	t.release = t.cache.Subscribe(talkersCmd.Path, nil, t.pollMs.duration(), t.apply)
+}
+
+func (t *Talkers) unsubscribe() {
+	if t.cache == nil {
+		t.loop.stop()
+		return
+	}
+	if t.release != nil {
+		t.release()
+		t.release = nil
 	}
 }
 
-func (t *Talkers) Stop() { t.loop.stop() }
+func (t *Talkers) Start() {
+	if t.cache == nil {
+		t.Tick()
+	}
+	t.subscribe()
+}
+
+func (t *Talkers) Suspend() { t.unsubscribe() }
+
+func (t *Talkers) Resume() {
+	if t.ros.Connected() {
+		t.subscribe()
+	}
+}
+
+func (t *Talkers) Stop() { t.unsubscribe() }
 
 // Reconnected CLEARS the latch, and that is the opposite of what an earlier
 // version of this comment claimed.
@@ -139,11 +178,13 @@ func (t *Talkers) Stop() { t.loop.stop() }
 // always sent — a browser that reconnected has nothing on screen to compare it
 // against.
 func (t *Talkers) Reconnected() {
-	t.loop.stop()
+	t.unsubscribe()
 	t.unavailable = false
 	t.lastFp = ""
-	t.Tick()
-	t.loop.start()
+	if t.cache == nil {
+		t.Tick()
+	}
+	t.subscribe()
 }
 
 func (t *Talkers) Last() *TalkersPayload { return t.last }
@@ -195,7 +236,16 @@ func (t *Talkers) Tick() {
 	if !t.ros.Connected() || t.unavailable {
 		return
 	}
-	rows, err := t.ros.Do(talkersCmd)
+	t.apply(t.ros.Do(talkersCmd))
+}
+
+// apply is everything Tick does once it has the rows, and is what the scheduler
+// calls. Split so the polled and the scheduled paths cannot drift into handling
+// the unavailable latch differently.
+func (t *Talkers) apply(rows []routeros.Reply, err error) {
+	if t.unavailable {
+		return
+	}
 	if err != nil {
 		m := strings.ToLower(err.Error())
 		if strings.Contains(m, "unknown command") || strings.Contains(m, "no such") {
