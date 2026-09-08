@@ -110,6 +110,25 @@ type Wire struct {
 	// now is the clock, injectable so a test can assert that one event stamps
 	// every row it files with ONE instant.
 	now func() int64
+	// seen counts evaluations per router, ever, so the subsystem can be observed.
+	//
+	// ── WHY A COUNTER EXISTS AT ALL ─────────────────────────────────────────
+	//
+	// Alerting is invisible when it is working AND when it is broken. It runs
+	// for routers nobody is watching, it writes a row only when a rule actually
+	// fires, and on a healthy fleet that is rare -- this install has 389 alert
+	// rows in its whole history and the most recent was nine hours old when this
+	// was written.
+	//
+	// So "compare the alert row rate before and after" -- which is what phase
+	// 4.3's verification says to do -- CANNOT DETECT A BREAK HERE: zero rows
+	// before and zero rows after look identical, and would still look identical
+	// if the evaluator had stopped being called entirely.
+	//
+	// This counts the thing that is actually continuous: payloads reaching the
+	// rules. It is reported on /healthz rather than logged, so it costs no log
+	// volume and can be sampled before and after a change.
+	seen map[string]int64
 }
 
 func New(hist History, set alert.Settings) *Wire {
@@ -189,10 +208,33 @@ func (w *Wire) forRouter(routerID string, now int64) (*alert.Evaluator, *sync.Mu
 // Each case asserts the collector's own struct. A payload that is not that type
 // evaluates nothing rather than guessing at half-read fields — the same outcome
 // as the collector not having run, which is a state every rule already handles.
+// Seen is evaluations per router since start, for /healthz.
+//
+// A snapshot rather than the live map: a caller must not be able to hold this
+// package's lock, and must not see the count change under it mid-render.
+func (w *Wire) Seen() map[string]int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make(map[string]int64, len(w.seen))
+	for k, v := range w.seen {
+		out[k] = v
+	}
+	return out
+}
+
 func (w *Wire) Evaluate(r alert.Router, event string, payload any) []alert.Fired {
 	if w == nil || r.ID == "" {
 		return nil
 	}
+	// Counted BEFORE the rules run, and before any early return below: the
+	// question this answers is "are payloads still reaching alerting", which is
+	// asked of a subsystem that may be silent for hours because nothing is wrong.
+	w.mu.Lock()
+	if w.seen == nil {
+		w.seen = map[string]int64{}
+	}
+	w.seen[r.ID]++
+	w.mu.Unlock()
 
 	// ── ONE ROUTER'S RULES RUN ONE AT A TIME ──────────────────────────────
 	//

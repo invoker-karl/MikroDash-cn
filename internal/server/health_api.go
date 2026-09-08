@@ -102,6 +102,17 @@ func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 		"uptime":           time.Since(s.startedAt).Seconds(),
 		"now":              time.Now().UnixMilli(),
 		"version":          AppVersion,
+		// EVALUATIONS PER ROUTER, so alerting can be seen to be alive.
+		//
+		// It is the only continuous signal this subsystem has. A rule fires
+		// rarely on a healthy fleet -- this install averages well under one a day
+		// -- so the alert row count cannot tell "working" from "stopped", and
+		// both look like zero. Payloads reaching the rules is the thing that
+		// happens every few seconds whether or not anything is wrong.
+		//
+		// Added for phase 4.3, whose stated verification (compare alert row rates
+		// before and after) would have compared zero with zero.
+		"alertsEvaluated": s.alertsSeen(),
 		// NO `checks` MAP, and that omission IS deliberate: `computeHealthStatus`
 		// builds it from a per-collector freshness ledger this port does not
 		// have. Reporting healthy on two of three checks is honest; an always-
@@ -266,4 +277,12 @@ func (s *Server) activeRouterHealth() (bool, string) {
 		}
 	}
 	return false, activeID
+}
+
+// alertsSeen is evaluations per router, for /healthz. Empty when alerting is off.
+func (s *Server) alertsSeen() map[string]int64 {
+	if s.alerts == nil {
+		return map[string]int64{}
+	}
+	return s.alerts.Seen()
 }
