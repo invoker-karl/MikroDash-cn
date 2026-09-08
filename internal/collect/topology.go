@@ -1197,8 +1197,21 @@ func firstNonEmptyStr(vals ...string) string {
 var (
 	topoNeighborCmd = routeros.Cmd{Path: "/ip/neighbor/print"}
 	topoSettingsCmd = routeros.Cmd{Path: "/ip/neighbor/discovery-settings/print"}
-	topoHostsCmd    = routeros.Cmd{Path: "/interface/bridge/host/print", Args: []string{
-		"?local=false", "=.proplist=mac-address,on-interface,bridge,vid"}}
+	// THE ROUTER-SIDE FILTER WAS TRADED AWAY FOR A SHARED READ (operator's call,
+	// 2026-09-08). This asked the router for non-local hosts only; `bridges` asks
+	// for the whole table, and a query argument makes a command uncacheable --
+	// roscache keys by menu, so serving one consumer the other's answer would be
+	// wrong. Dropping the query is what lets these two share one read.
+	//
+	// `local` IS NOW IN THE PROPLIST, and that is not decoration. The filter moved
+	// into readHosts, and when topology reads first it is topology's own field
+	// list the router answers -- without `local` the filter would see an empty
+	// string on every row and keep the local entries it exists to drop.
+	//
+	// The cost is the reply: every local host now crosses the wire and is thrown
+	// away here.
+	topoHostsCmd = routeros.Cmd{Path: "/interface/bridge/host/print", Args: []string{
+		"=.proplist=mac-address,on-interface,bridge,vid,local"}}
 	topoVlanCmd  = routeros.Cmd{Path: "/interface/vlan/print", Args: []string{"=.proplist=name,vlan-id"}}
 	topoWifiCmd  = routeros.Cmd{Path: "/interface/wifi/print", Args: []string{"=.proplist=name,radio-mac,master-interface,disabled"}}
 	topoRegCmd   = routeros.Cmd{Path: "/interface/wifi/registration-table/print", Args: []string{"=.proplist=mac-address,interface,ssid,signal,uptime"}}
@@ -1631,7 +1644,8 @@ func (t *Topology) republish() {
 // here. VLANs ACCUMULATE, because a trunked device legitimately appears on more
 // than one.
 func (t *Topology) readHosts() ([]hostEntry, map[string][]int) {
-	rows, err := t.ros.Do(topoHostsCmd)
+	// THROUGH THE CACHE: bridges reads this same menu, unfiltered.
+	rows, err := readVia(t.cache, t.ros, topoHostsCmd, t.pollMs.duration())
 	if err != nil {
 		// A router with no bridge, or a user without the policy: the map still
 		// works, it just falls back to the arrival interface.
@@ -1641,6 +1655,12 @@ func (t *Topology) readHosts() ([]hostEntry, map[string][]int) {
 	hosts := []hostEntry{}
 	vlans := map[string][]int{}
 	for _, r := range rows {
+		// What `?local=false` used to do on the router. Only an explicit "true"
+		// is dropped: a row that does not report the field is not a local one,
+		// and treating absence as local would silently empty the host map.
+		if r["local"] == "true" {
+			continue
+		}
 		mac := strings.ToUpper(strings.TrimSpace(r["mac-address"]))
 		port := r["on-interface"]
 		if mac == "" || port == "" {
