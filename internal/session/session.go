@@ -29,6 +29,7 @@ import (
 	"mikrodash/internal/geo"
 	"mikrodash/internal/historywire"
 	"mikrodash/internal/hub"
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 	"mikrodash/internal/store"
 
@@ -57,6 +58,10 @@ type Session struct {
 	// answering. Recorded here rather than left as a comment describing
 	// something that does not exist.
 	eff collection.Resolved
+
+	// roscache coalesces reads two collectors share. See Collectors-Rewrite.md
+	// phase 1; nil until Acquire builds the collectors.
+	roscache *roscache.Cache
 
 	// dormancy decides which collectors are asleep. Nil until Acquire builds it,
 	// and consulted as a VETO by ResumeCollector — see dormancy_targets.go.
@@ -398,6 +403,7 @@ func (r reader) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
 	// was never going to reach the router does not hold a slot while it fails.
 	// Deferred immediately, so an early return or a panic inside Do cannot leak
 	// one -- a leaked slot never comes back.
+	roslimit.Note(r.s.RouterID, cmd.Path)
 	done := roslimit.Acquire(r.s.RouterID)
 	defer done()
 	return c.Do(cmd)
@@ -676,6 +682,20 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// degrading to 0 until someone answers it.
 	s.vlans = collect.NewVlans(reader{s}, emit, s.ifStatus, nil, s.eff.Poll["vlans"])
 	s.wan = collect.NewWan(reader{s}, emit, s.ifStatus, s.eff.Poll["wan"])
+
+	// ── ONE COALESCING CACHE PER ROUTER ────────────────────────────────────
+	//
+	// `ifStatus` and `wan` both read `/interface/print`, and `wan`'s proplist is
+	// a strict subset of `ifStatus`'s, so whichever ticks first pays for the read
+	// and the other is served from it. Both start at connect, so they always
+	// overlap.
+	//
+	// The cache is shared BY ROUTER, not by collector: that is the only key that
+	// matches what is scarce, for the same reason `roslimit` is keyed that way.
+	// Collectors that have not opted in read directly and are unaffected.
+	s.roscache = roscache.New(reader{s})
+	s.ifStatus.UseCache(s.roscache)
+	s.wan.UseCache(s.roscache)
 	s.packages = collect.NewPackages(reader{s}, emit, s.eff.Poll["packages"])
 	s.routing = collect.NewRouting(reader{s}, emit, s.eff.Poll["routing"])
 	// Built BEFORE dhcpNetworks, which takes it as its lease source: a subnet's
@@ -1408,6 +1428,13 @@ func (s *Session) connectLoop() {
 			s.replayResumes()
 			first = false
 		} else {
+			// THE CACHED ROWS CAME FROM A CONNECTION THAT IS GONE. Their age says
+			// nothing about the new one, and a collector served from them would
+			// render pre-reconnect state as current.
+			if s.roscache != nil {
+				s.roscache.Reset()
+			}
+
 			// #105: GATED LIKE THE STARTS, and for a sharper reason.
 			// `Reconnected()` is not a latch-clearing no-op — every collector's
 			// version ends `Tick(); loop.start()`, so an ungated one RESTARTS a

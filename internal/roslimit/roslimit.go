@@ -70,6 +70,15 @@ var (
 	// synchronisation. A separate lock would double the contention on the hot
 	// path to count it, which is a strange trade for an instrument.
 	counts = map[string]int64{}
+
+	// menus is commands per RouterOS menu since the last report.
+	//
+	// The per-router total says how much this app costs a device; this says
+	// WHERE it goes. Step 1.3 of Collectors-Rewrite.md needed it: the static
+	// count of duplicated menus (26 per sweep) turned out not to predict the
+	// per-minute cost at all, because the duplicated menus are read at very
+	// different cadences. Optimising the static count optimises the wrong thing.
+	menus = map[string]int64{}
 )
 
 // max reads the override once. An unparseable or non-positive value falls back
@@ -118,6 +127,18 @@ func Acquire(routerID string) func() {
 	return func() { once.Do(func() { <-g }) }
 }
 
+// Note records which menu a command was for. Called beside Acquire by each of
+// the three readers, rather than folded into Acquire, so the concurrency gate
+// keeps its signature and its single responsibility.
+func Note(routerID, menu string) {
+	if menu == "" {
+		return
+	}
+	mu.Lock()
+	menus[menu]++
+	mu.Unlock()
+}
+
 // InFlight reports how many commands hold a slot for this router. For tests and
 // diagnostics only.
 func InFlight(routerID string) int {
@@ -159,7 +180,26 @@ func StartStats(every time.Duration) {
 				total += n
 				parts = append(parts, fmt.Sprintf("%s=%d", short(id), n))
 			}
+			// The busiest menus, which is what says where the total goes.
+			type mc struct {
+				m string
+				n int64
+			}
+			ms := make([]mc, 0, len(menus))
+			for m, n := range menus {
+				ms = append(ms, mc{m, n})
+			}
+			sort.Slice(ms, func(i, j int) bool { return ms[i].n > ms[j].n })
+			tops := make([]string, 0, 8)
+			for i, x := range ms {
+				if i == 8 {
+					break
+				}
+				tops = append(tops, fmt.Sprintf("%s=%d", x.m, x.n))
+			}
+			top := strings.Join(tops, " ")
 			clear(counts)
+			clear(menus)
 			mu.Unlock()
 
 			if total == 0 {
@@ -168,6 +208,9 @@ func StartStats(every time.Duration) {
 			sort.Strings(parts) // stable output, so two runs can be diffed
 			log.Printf("[roslimit] %d commands in %s across %d router(s): %s",
 				total, every, len(parts), strings.Join(parts, " "))
+			if top != "" {
+				log.Printf("[roslimit] busiest menus: %s", top)
+			}
 		}
 	}()
 }
@@ -189,5 +232,6 @@ func Reset() {
 	defer mu.Unlock()
 	gates = map[string]chan struct{}{}
 	counts = map[string]int64{}
+	menus = map[string]int64{}
 	maxOne = -1
 }

@@ -273,6 +273,7 @@ func (r reader) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
 	// The same per-router budget the viewing session and the alert pool take.
 	// This pool reaches routers nobody is watching, but it reaches the SAME
 	// routers, so a cap that skipped it would not be a cap on the device.
+	roslimit.Note(r.s.cfg.ID, cmd.Path)
 	done := roslimit.Acquire(r.s.cfg.ID)
 	defer done()
 	return c.Do(cmd)

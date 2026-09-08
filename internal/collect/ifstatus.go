@@ -46,6 +46,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -171,6 +172,9 @@ type IfStatus struct {
 	emit     Emit
 	routerID string
 	pollMs   *pollInterval
+	// cache coalesces reads shared with another collector. Nil outside a live
+	// session, which is every test — see collect/cache.go.
+	cache *roscache.Cache
 
 	poll *pollLoop
 
@@ -284,7 +288,9 @@ func (s *IfStatus) Tick() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	ifRows := s.read(ifStatusIfCmd)
+	// THROUGH THE CACHE: `wan` reads this same menu with a proplist that is a
+	// strict subset of ours, so once either has fetched, the other costs nothing.
+	ifRows, _ := readVia(s.cache, s.ros, ifStatusIfCmd, s.pollMs.duration())
 	addrRows := s.read(ifStatusAddrCmd)
 	ethRows := s.read(ifStatusEthCmd)
 	if len(ifRows) == 0 {
@@ -542,3 +548,7 @@ func (i *IfStatus) SetPollMs(ms int) {
 	i.pollMs.set(ms)
 	i.poll.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (s *IfStatus) UseCache(c *roscache.Cache) { s.cache = c }

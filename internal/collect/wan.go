@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -325,6 +326,8 @@ type Wan struct {
 	emit   Emit
 	rates  RateSource
 	pollMs *pollInterval
+	// cache coalesces reads shared with another collector; see collect/cache.go.
+	cache *roscache.Cache
 
 	poll *pollLoop
 
@@ -401,7 +404,9 @@ func (w *Wan) Tick() {
 	defer w.mu.Unlock()
 
 	if w.ticks%wanConfigEvery == 0 {
-		w.ifaces = w.read(wanIfaceCmd, nil)
+		// THROUGH THE CACHE: ifStatus reads this menu with a superset of our
+		// proplist, so whichever gets there first pays and the other does not.
+		w.ifaces, _ = readVia(w.cache, w.ros, wanIfaceCmd, w.pollMs.duration())
 		w.dhcp = w.read(wanDhcpCmd, nil)
 		w.addrs = w.read(wanAddrCmd, nil)
 	}
@@ -514,3 +519,7 @@ func (w *Wan) SetPollMs(ms int) {
 	w.pollMs.set(ms)
 	w.poll.retime()
 }
+
+// UseCache routes this collector's shareable reads through a per-router cache.
+// Set once, before Start; nil leaves every read direct.
+func (w *Wan) UseCache(c *roscache.Cache) { w.cache = c }

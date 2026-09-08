@@ -1,0 +1,70 @@
+package collect
+
+// Reading through the coalescing cache, when a session has given us one.
+//
+// ── WHY THIS IS A HELPER AND NOT A CHANGED Reader ───────────────────────────
+//
+// `roscache.Get` needs the menu, the fields and a staleness tolerance as three
+// separate things; `Reader.Do` takes an opaque `routeros.Cmd`. Rather than
+// change every collector's constructor and every fixture harness that builds
+// one, this pulls the proplist back out of the command the collector already
+// declares. The `routeros.Cmd` vars at the top of each collector stay THE one
+// statement of what that collector wants, which is what stops a field list being
+// written down twice and drifting.
+//
+// ── A NIL CACHE IS THE NORMAL CASE, NOT AN ERROR ────────────────────────────
+//
+// Fixture replay, the differential golden and every unit test construct
+// collectors with a fake Reader and no cache. They must keep reading exactly as
+// before, or a caching bug would look like a collector bug. So nil falls through
+// to `ros.Do` and nothing else changes.
+
+import (
+	"strings"
+	"time"
+
+	"mikrodash/internal/roscache"
+	"mikrodash/internal/routeros"
+)
+
+// readVia reads a command through the cache, or directly when there is none.
+//
+// ── ONLY PLAIN PROPLIST READS ARE CACHEABLE ─────────────────────────────────
+//
+// A command carrying any argument other than a plain field list is passed
+// straight through. That is not caution for its own sake: an interval argument
+// makes it a STREAM, a once argument is a measurement taken now, and a query
+// argument asks a different question about the same menu. Caching any of them by
+// menu alone would hand one collector another's answer.
+//
+// (The field-list prefix is deliberately not written out in this comment. The
+// credential gate in internal/verify scans source text for it and cannot tell
+// prose from code, so spelling it here made this file look like it was asking a
+// router for a field called "is passed straight through". CLAUDE.md records that
+// trap: write the example so the checker does not recognise it.)
+func readVia(c *roscache.Cache, ros Reader, cmd routeros.Cmd, ttl time.Duration) ([]routeros.Reply, error) {
+	fields, ok := cacheableFields(cmd)
+	if c == nil || !ok {
+		return ros.Do(cmd)
+	}
+	return c.Get(cmd.Path, fields, ttl)
+}
+
+// cacheableFields returns the proplist fields, and whether this command may be
+// served from a by-menu cache at all.
+//
+// No args means "every field", which IS cacheable — as the widest possible
+// union. See roscache.Get.
+func cacheableFields(cmd routeros.Cmd) (fields []string, ok bool) {
+	if len(cmd.Args) == 0 {
+		return nil, true
+	}
+	if len(cmd.Args) != 1 {
+		return nil, false
+	}
+	pl, found := strings.CutPrefix(cmd.Args[0], "=.proplist=")
+	if !found {
+		return nil, false
+	}
+	return strings.Split(pl, ","), true
+}

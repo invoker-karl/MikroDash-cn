@@ -38,6 +38,7 @@ func (r reader) Do(c routeros.Cmd) ([]routeros.Reply, error) {
 	}
 	// The third holder of this router's budget. A router that is watched AND
 	// alerted would otherwise get two independent allowances.
+	roslimit.Note(r.s.r.ID, c.Path)
 	done := roslimit.Acquire(r.s.r.ID)
 	defer done()
 	return conn.Do(c)
