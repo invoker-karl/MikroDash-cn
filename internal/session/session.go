@@ -819,6 +819,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	for _, c := range []interface{ UseCache(*roscache.Cache) }{
 		s.ifStatus, s.wan, // /interface/print
 		s.capsman, s.wifi, s.wireless, s.topology, // the wifi family, 4 menus
+		s.vlans, s.dhcpLeases, // /interface/vlan, with topology
 	} {
 		c.UseCache(s.roscache)
 	}

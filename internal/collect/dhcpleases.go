@@ -139,7 +139,16 @@ func (d *DHCPLeases) loadServerMap() {
 		log.Printf("[leases] server/VLAN map unavailable: %v", err)
 		return
 	}
-	vlans, err := d.ros.Do(dhcpVlansCmd)
+	// THROUGH THE CACHE, with NO TOLERANCE OF ITS OWN -- the zero TTL.
+	//
+	// The cache judges freshness by the SHORTEST tolerance any consumer asked
+	// for, so a zero here means "serve me from whatever another consumer keeps
+	// fresh, and fetch when nobody does". That is right for this collector and
+	// only because it is the slowest: it polls every ten minutes, against vlans
+	// at five seconds and topology at thirty, so anything it is handed is far
+	// fresher than what it would have fetched. A FAST consumer must never pass
+	// zero -- it would inherit a slow consumer's tolerance and read stale rows.
+	vlans, err := readVia(d.cache, d.ros, dhcpVlansCmd, 0)
 	if err != nil {
 		log.Printf("[leases] server/VLAN map unavailable: %v", err)
 		return

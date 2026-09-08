@@ -1765,7 +1765,8 @@ func (t *Topology) readDiscovery() {
 }
 
 func (t *Topology) readVlans() {
-	rows, err := t.ros.Do(topoVlanCmd)
+	// THROUGH THE CACHE: vlans and dhcpLeases read this menu too.
+	rows, err := readVia(t.cache, t.ros, topoVlanCmd, t.pollMs.duration())
 	if err != nil {
 		return // no VLANs configured, or not permitted: ids alone still work
 	}

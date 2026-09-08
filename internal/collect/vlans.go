@@ -456,8 +456,14 @@ func NewVlans(ros Reader, emit Emit, rates RateSource, leases LeaseCounts, pollM
 	return v
 }
 
+// read is routed THROUGH THE CACHE. Two of the three menus this collector
+// reads are shared -- /interface/vlan with dhcpLeases and topology, and
+// /interface/bridge/port with bridges -- and the error handling below is what
+// makes a missing menu quiet, so the routing goes here rather than at each
+// call site. /interface/bridge/vlan has only this consumer and is unaffected:
+// a cache entry with one consumer, read once per poll, never serves a hit.
 func (v *Vlans) read(cmd routeros.Cmd) []routeros.Reply {
-	rows, err := v.ros.Do(cmd)
+	rows, err := readVia(v.cache, v.ros, cmd, v.pollMs.duration())
 	if err != nil {
 		if !menuMissing(err) {
 			v.lastErr = err.Error()
