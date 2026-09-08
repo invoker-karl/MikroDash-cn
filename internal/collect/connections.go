@@ -553,6 +553,8 @@ type Connections struct {
 	emit   Emit
 	pollMs *pollInterval
 	topN   int
+	// See scheduled.go: subscribes to the connection table, its only menu.
+	sched scheduled
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
@@ -595,6 +597,9 @@ func NewConnections(ros Reader, emit Emit, table *ConnTable, leases *DHCPLeases,
 	c.loop = newPollLoop(func() { c.Tick() }, func() time.Duration {
 		return c.pollMs.duration()
 	})
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	c.sched = scheduled{loop: c.loop, menu: connsCmd.Path, apply: c.apply,
+		cadence: c.pollMs.duration}
 	return c
 }
 
@@ -648,25 +653,32 @@ func (c *Connections) WithOrg(fn OrgLookup) *Connections {
 	return c
 }
 
-func (c *Connections) Suspend() { c.loop.stop() }
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+// Same cache, two uses.
+func (c *Connections) UseCache(rc *roscache.Cache) {
+	c.cache = rc
+	c.sched.useCache(rc)
+}
+
+func (c *Connections) Suspend() { c.sched.end() }
 
 func (c *Connections) Resume() {
 	if c.ros.Connected() {
-		c.loop.start()
+		c.sched.begin()
 	}
 }
 
-func (c *Connections) Start() { c.loop.start() }
+func (c *Connections) Start() { c.sched.begin() }
 
-func (c *Connections) Stop() { c.loop.stop() }
+func (c *Connections) Stop() { c.sched.end() }
 
 func (c *Connections) Reconnected() {
-	c.loop.stop()
+	c.sched.end()
 	c.mu.Lock()
 	c.prevIDs = map[string]bool{}
 	c.lastFp, c.lastDetailFp = "", ""
 	c.mu.Unlock()
-	c.loop.start()
+	c.sched.begin()
 }
 
 func (c *Connections) Last() *ConnsPayload {
@@ -713,7 +725,12 @@ func (c *Connections) Tick() {
 	if !c.ros.Connected() {
 		return
 	}
-	rows, err := c.ros.Do(connsCmd)
+	c.apply(c.ros.Do(connsCmd))
+}
+
+// apply is what the scheduler calls with the connection table, and is everything
+// Tick does once it has the rows.
+func (c *Connections) apply(rows []routeros.Reply, err error) {
 	if err != nil {
 		return
 	}
@@ -866,7 +883,3 @@ func (c *Connections) SetPollMs(ms int) {
 	c.pollMs.set(ms)
 	c.loop.retime()
 }
-
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (c *Connections) UseCache(rc *roscache.Cache) { c.cache = rc }

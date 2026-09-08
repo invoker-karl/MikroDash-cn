@@ -101,6 +101,8 @@ type DHCPLeases struct {
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
+	// See scheduled.go: subscribes to the lease table.
+	sched scheduled
 
 	mu sync.Mutex
 	// order is the IPs in the order first seen; byIP is the lease behind each.
@@ -123,6 +125,16 @@ func NewDHCPLeases(ros Reader, emit Emit, pollMs int) *DHCPLeases {
 	ms := clampPoll(pollMs, 600000, 500, 600000)
 	d.poll = newPollLoop(func() { d.RefreshNow() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback. The
+	// server/VLAN map is refreshed before each scheduled read, because a
+	// reservation on a server this process has not seen before needs it -- which
+	// is the reason RefreshNow does the whole read rather than just the leases.
+	d.sched = scheduled{loop: d.poll, menu: dhcpLeasesCmd.Path,
+		apply: func(rows []routeros.Reply, err error) {
+			d.loadServerMap()
+			d.apply(rows, err)
+		},
+		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond }}
 	return d
 }
 
@@ -322,7 +334,13 @@ func (d *DHCPLeases) RefreshNow() {
 		return
 	}
 	d.loadServerMap()
-	rows, err := d.ros.Do(dhcpLeasesCmd)
+	d.apply(d.ros.Do(dhcpLeasesCmd))
+}
+
+// apply is what the scheduler calls with the lease table, and is everything
+// RefreshNow does once it has the rows. The server map keeps its own read, which
+// on the scheduled path happens in `preRead` below.
+func (d *DHCPLeases) apply(rows []routeros.Reply, err error) {
 	if err != nil {
 		log.Printf("[leases] load failed: %v", err)
 		return
@@ -427,18 +445,28 @@ func (d *DHCPLeases) UsedLeaseIPs() []string {
 	return out
 }
 
-func (d *DHCPLeases) Start() { d.RefreshNow(); d.poll.start() }
-
-func (d *DHCPLeases) Reconnected() {
-	d.poll.stop()
-	d.RefreshNow()
-	d.poll.start()
+func (d *DHCPLeases) Start() {
+	if !d.sched.scheduling() {
+		d.RefreshNow()
+	}
+	d.sched.begin()
 }
 
-func (d *DHCPLeases) Suspend() { d.poll.stop() }
-func (d *DHCPLeases) Resume()  { d.poll.start() }
-func (d *DHCPLeases) Stop()    { d.poll.stop() }
+func (d *DHCPLeases) Reconnected() {
+	d.sched.end()
+	if !d.sched.scheduling() {
+		d.RefreshNow()
+	}
+	d.sched.begin()
+}
 
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (d *DHCPLeases) UseCache(rc *roscache.Cache) { d.cache = rc }
+func (d *DHCPLeases) Suspend() { d.sched.end() }
+func (d *DHCPLeases) Resume()  { d.sched.begin() }
+func (d *DHCPLeases) Stop()    { d.sched.end() }
+
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+// Same cache, two uses.
+func (d *DHCPLeases) UseCache(rc *roscache.Cache) {
+	d.cache = rc
+	d.sched.useCache(rc)
+}

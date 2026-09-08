@@ -104,6 +104,10 @@ type DHCPNetworks struct {
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
+	// See scheduled.go: subscribes to the DHCP network menu, which is what
+	// defines this payload; the addresses, pools and detect state are read in
+	// `apply`.
+	sched scheduled
 
 	mu       sync.Mutex
 	lanCidrs []string
@@ -124,6 +128,9 @@ func NewDHCPNetworks(ros Reader, emit Emit, leases LeaseIPs, wanIface string, po
 	d := &DHCPNetworks{ros: ros, emit: emit, leases: leases, wanIface: wanIface, pollMs: newPollInterval(ms)}
 	d.poll = newPollLoop(func() { d.Tick() },
 		func() time.Duration { return time.Duration(ms) * time.Millisecond })
+	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
+	d.sched = scheduled{loop: d.poll, menu: dhcpNetCmd.Path, apply: d.apply,
+		cadence: func() time.Duration { return time.Duration(ms) * time.Millisecond }}
 	return d
 }
 
@@ -265,7 +272,16 @@ func (d *DHCPNetworks) Tick() {
 	if !d.ros.Connected() {
 		return
 	}
-	netRows := d.read(dhcpNetCmd)
+	d.apply(d.read(dhcpNetCmd), nil)
+}
+
+// apply is what the scheduler calls with the DHCP network rows -- the menu that
+// defines this payload -- and reads the other three here, as before. See
+// scheduled.go on why a collector subscribes to ONE menu.
+func (d *DHCPNetworks) apply(netRows []routeros.Reply, err error) {
+	if err != nil {
+		return
+	}
 	addrRows := d.read(dhcpAddrCmd)
 	poolRows := d.read(dhcpPoolCmd)
 	detectRows := d.read(dhcpDetectCmd)
@@ -352,12 +368,19 @@ func (d *DHCPNetworks) Last() *LanPayload {
 	return d.last
 }
 
-func (d *DHCPNetworks) Start() { d.Tick(); d.poll.start() }
+func (d *DHCPNetworks) Start() {
+	if !d.sched.scheduling() {
+		d.Tick()
+	}
+	d.sched.begin()
+}
 
 func (d *DHCPNetworks) Reconnected() {
-	d.poll.stop()
-	d.Tick()
-	d.poll.start()
+	d.sched.end()
+	if !d.sched.scheduling() {
+		d.Tick()
+	}
+	d.sched.begin()
 }
 
 // RefreshNow reads now, whatever the poll loop was about to do.
@@ -371,9 +394,9 @@ func (d *DHCPNetworks) Reconnected() {
 // disconnected banner, and the subnets appearing straight after.
 func (d *DHCPNetworks) RefreshNow() { d.Tick() }
 
-func (d *DHCPNetworks) Suspend() { d.poll.stop() }
-func (d *DHCPNetworks) Resume()  { d.poll.start() }
-func (d *DHCPNetworks) Stop()    { d.poll.stop() }
+func (d *DHCPNetworks) Suspend() { d.sched.end() }
+func (d *DHCPNetworks) Resume()  { d.sched.begin() }
+func (d *DHCPNetworks) Stop()    { d.sched.end() }
 
 // SetPollMs applies a new poll period to a running collector.
 // See `System.SetPollMs` for why both halves are needed.
@@ -382,9 +405,12 @@ func (d *DHCPNetworks) SetPollMs(ms int) {
 	d.poll.retime()
 }
 
-// UseCache routes this collector's shareable reads through a per-router cache.
-// Set once, before Start; nil leaves every read direct.
-func (d *DHCPNetworks) UseCache(rc *roscache.Cache) { d.cache = rc }
+// UseCache feeds BOTH halves: the 1.4 shared-read cache and the subscription.
+// Same cache, two uses.
+func (d *DHCPNetworks) UseCache(rc *roscache.Cache) {
+	d.cache = rc
+	d.sched.useCache(rc)
+}
 
 // LanInput is everything BuildLanOverview reads.
 type LanInput struct {

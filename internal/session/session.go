@@ -851,7 +851,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	for _, c := range []interface{ UseCache(*roscache.Cache) }{
 		s.ifStatus, s.wan, // /interface/print
 		s.capsman, s.wifi, s.wireless, s.topology, // the wifi family, 4 menus
-		s.vlans, s.dhcpLeases, // /interface/vlan, with topology
+		s.vlans,        // /interface/vlan, with topology
 		s.dhcpNetworks, // /ip/address with ifStatus+wan, detect-internet with wan
 		s.bridges,      // /interface/bridge/port with vlans, /host with topology
 		s.system,       // /system/routerboard and /system/package/update, with packages
@@ -865,7 +865,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// listing it twice would read as an oversight rather than as the two
 		// distinct uses it is.
 		s.netwatch, s.talkers, s.dns, s.packages, s.rosUsers, s.queues, s.bridges,
-		s.system,
+		s.system, s.conns, s.dhcpLeases, s.dhcpNetworks,
 		s.routing, // /ip/route, with wan
 	} {
 		c.UseCache(s.roscache)
