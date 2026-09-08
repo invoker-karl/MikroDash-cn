@@ -29,6 +29,7 @@ Changes.md
 # statement about what this code IS. If the rewrite happens, what survives it
 # belongs in CLAUDE.md, and this file goes.
 Collectors-Rewrite.md
+Untracked_Collectors.md
 
 # ── Agent tooling ─────────────────────────────────────────────────────────
 #
