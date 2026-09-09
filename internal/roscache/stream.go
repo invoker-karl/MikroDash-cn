@@ -73,9 +73,47 @@ type Streamer interface {
 // still passes -- so the decision belongs somewhere a person has to edit
 // deliberately, next to the reason.
 var unrollable = map[string]string{
+	// ── KIND ONE: THE ROWS ARE NOT READINGS OF ONE VALUE ────────────────────
 	"/tool/ping": "every row is a distinct measurement counted into min/max/avg/loss; " +
 		"a rolling entry keeps only the latest and would report 0% loss for ever",
 	"/log/listen": "every row is a distinct event; a rolling entry drops lines",
+
+	// ── KIND TWO: THE ROWS ARE READINGS, BUT THE MEMBERSHIP CHURNS ──────────
+	//
+	// THE ROLLING MAP NEVER FORGETS. `absorb` adds and replaces; nothing
+	// removes. A re-print simply omits a row that has gone, and with no `!done`
+	// between rounds there is no sweep boundary to detect, so a departed row
+	// stays in the entry for the life of the session.
+	//
+	// On a menu whose membership is CONFIG that is exactly right: interfaces,
+	// VLANs and netwatch hosts change when somebody edits the router, and the
+	// next reading of each replaces the last. On a menu whose membership churns
+	// it is a slow, silent corruption -- the map grows without bound and the
+	// page shows connections that closed, clients that left and leases that
+	// expired, indefinitely. Nothing errors.
+	//
+	// FOUND BEFORE IT SHIPPED, and only because `/ip/firewall/connection/print`
+	// was the next collector to be enabled: it is the heaviest table in the app
+	// AND the fastest-churning, so it would have demonstrated the bug at full
+	// scale. Recorded here as a refusal rather than as a caution, because the
+	// symptom is a page that looks populated and is wrong.
+	//
+	// Lifting this needs sweep detection -- notice a key repeating, and swap
+	// buffers -- which B.1 deliberately does not have. Until then these menus
+	// poll, which costs commands and is correct.
+	"/ip/firewall/connection/print": "membership churns constantly and the rolling map " +
+		"never forgets; closed connections would accumulate for ever",
+	"/interface/wifi/registration-table/print": "clients associate and leave; a departed " +
+		"client would stay on the WiFi Clients page for ever",
+	"/interface/wireless/registration-table/print": "same as the wifi registration table",
+	"/caps-man/registration-table/print":           "same as the wifi registration table",
+	"/interface/bridge/host/print": "a MAC is learned or ages out with no configuration " +
+		"change; aged-out hosts would never leave the topology",
+	"/ip/dhcp-server/lease/print": "dynamic leases expire; an expired lease would stay " +
+		"on the page and in the name lookups for ever",
+	"/ppp/active/print":            "sessions come and go; a closed session would stay active for ever",
+	"/ip/neighbor/print":           "neighbours appear and disappear as devices join and leave",
+	"/ip/kid-control/device/print": "devices come and go",
 }
 
 // streamStale is how long an open channel may deliver nothing before the
@@ -279,6 +317,18 @@ func (f *streamFill) watch(s Streamer, done <-chan struct{}) {
 			_ = f.open(s)
 		}
 	}
+}
+
+// Unrollable reports why a menu may not back a rolling entry, if it may not.
+//
+// EXPORTED SO THE CALLER'S OWN TABLE CAN BE CHECKED AGAINST IT. Without this a
+// line added to `session.streamableMenus` naming a refused menu is SAFE but
+// MISLEADING: `fillIfStreaming` falls back to polling on any refusal, so the
+// commit claims a delivery change, makes none, and nothing fails. The two lists
+// disagreeing quietly is the exact shape `rooms.go` exists to stop.
+func Unrollable(menu string) (string, bool) {
+	why, no := unrollable[menu]
+	return why, no
 }
 
 // StreamWhen installs the decision: for a menu about to be subscribed, may it be

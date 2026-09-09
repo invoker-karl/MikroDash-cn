@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"mikrodash/internal/collection"
+	"mikrodash/internal/roscache"
 )
 
 // TestStreamableMenusAreRealAndOwned.
@@ -38,6 +39,21 @@ func TestStreamableMenusAreRealAndOwned(t *testing.T) {
 	}
 
 	for menu, key := range streamableMenus {
+		// ── AND THE CACHE MUST BE WILLING TO STREAM IT ──────────────────────
+		//
+		// `roscache` refuses two kinds of menu: rows that are not readings of one
+		// value (`ping`, `logs`), and tables whose MEMBERSHIP churns, because the
+		// rolling map never forgets and departed rows would accumulate for ever.
+		//
+		// A line here naming one of those is SAFE -- `fillIfStreaming` falls back
+		// to polling on any refusal -- and MISLEADING, which is worse in a table
+		// whose whole purpose is to record what has been enabled. The commit
+		// would claim a delivery change and make none.
+		if why, no := roscache.Unrollable(menu); no {
+			t.Errorf("streamableMenus lists %q, which roscache refuses: %s.\nThe entry "+
+				"would fall back to polling, so it changes nothing while claiming to.",
+				menu, why)
+		}
 		if !subscribed[menu] {
 			t.Errorf("streamableMenus lists %q, which no collector subscribes to. The "+
 				"entry matches nothing, so the collector goes on polling and the "+

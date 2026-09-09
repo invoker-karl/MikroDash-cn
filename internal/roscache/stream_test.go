@@ -389,3 +389,67 @@ func TestAStreamedMenuStillFiresOnDeliver(t *testing.T) {
 		t.Errorf("the scheduler issued %d read(s) for a streamed menu", reads)
 	}
 }
+
+// TestAChurningTableIsRefused.
+//
+// ── THE SECOND KIND OF MENU A ROLLING MAP CANNOT HOLD ───────────────────────
+//
+// The first kind is rows that are not readings of one value: `ping`, `logs`. The
+// second is rows that ARE readings, of a set whose MEMBERSHIP changes on its own.
+//
+// `absorb` adds and replaces; nothing removes. A re-print omits a row that has
+// gone, and with no `!done` between rounds there is no sweep boundary to detect,
+// so a departed row stays for the life of the session. On config menus that is
+// right. On the connection table it means closed connections accumulate for ever
+// and the map grows without bound, with nothing erroring and a page that looks
+// populated.
+//
+// This was found with `/ip/firewall/connection/print` queued as the next
+// collector to enable — the heaviest table in the app and the fastest-churning,
+// so it would have shown the bug at full scale on live routers.
+func TestAChurningTableIsRefused(t *testing.T) {
+	c := New(&pusher{})
+	churning := []string{
+		"/ip/firewall/connection/print",
+		"/interface/wifi/registration-table/print",
+		"/ip/dhcp-server/lease/print",
+		"/interface/bridge/host/print",
+		"/ppp/active/print",
+	}
+	for _, menu := range churning {
+		stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName)
+		if err == nil {
+			stop()
+			t.Errorf("%s was accepted for stream-filling. Its membership churns and the "+
+				"rolling map never forgets, so departed rows would accumulate for the "+
+				"life of the session — a page that looks populated and is wrong.", menu)
+		}
+	}
+}
+
+// TestTheRollingMapNeverForgets is the property the refusal above exists for,
+// asserted directly so the reason cannot become folklore.
+//
+// If a future change adds sweep detection, THIS TEST SHOULD FAIL — and that is
+// the signal to revisit the refusal list rather than to delete this.
+func TestTheRollingMapNeverForgets(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	defer fill(t, c, "/interface/monitor-traffic")()
+
+	p.push(routeros.Reply{"name": "ether1"}, routeros.Reply{"name": "ether2"})
+	if rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second); len(rows) != 2 {
+		t.Fatalf("%d rows after the first sweep, want 2", len(rows))
+	}
+
+	// A second sweep that no longer mentions ether2, which is what a re-print of
+	// a table a row has left looks like.
+	p.push(routeros.Reply{"name": "ether1"})
+
+	rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second)
+	if len(rows) != 2 {
+		t.Fatalf("%d rows, want 2 — this test asserts the LIMITATION, and if the map "+
+			"has learned to forget then sweep detection has been added and the "+
+			"churning-table refusals in `unrollable` should be revisited.", len(rows))
+	}
+}
