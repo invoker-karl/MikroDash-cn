@@ -54,6 +54,20 @@ var streamableMenus = map[string]string{
 	//
 	// Probed 2026-09-09: streams, 9 rows in 3s, first row 6ms.
 	"/tool/netwatch/print": "netwatch",
+
+	// ── THE LARGEST ITEM IN THE APP ─────────────────────────────────────────
+	//
+	// 111 commands a minute across this fleet -- more than everything else
+	// polled, combined -- because the gauges animate and it runs at a 2s
+	// cadence. A stream costs one channel and no commands.
+	//
+	// It needed a key of its own: a SETTINGS menu, one row, no `.id`. See
+	// `keySingleton` in internal/collect/scheduled.go and the note in system.go,
+	// which records that "one fewer channel held open" was a deliberate decision
+	// against a cost B.0b could not observe.
+	//
+	// Probed 2026-09-09: streams, 3 rows in 3s, first row 41ms.
+	"/system/resource/print": "system",
 }
 
 // streamsMenu answers roscache's question: may this menu be pushed?

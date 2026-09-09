@@ -22,9 +22,29 @@ package collect
 // reading them at the start of the next tick rather than by racing a goroutine:
 // same two-emit sequence, deterministic, and one fewer concurrent channel.
 //
-// The Node original streams /system/resource with `=interval=N`. This side polls
-// it instead — same rows, one fewer channel held open, which is what CLAUDE.md
-// means by more efficient. The payload is identical either way.
+// ── THE NODE ORIGINAL STREAMS /system/resource, AND SO DOES THIS NOW ────────
+//
+// This said: "This side polls it instead — same rows, one fewer channel held
+// open, which is what CLAUDE.md means by more efficient." That was a real
+// decision on a real principle, and the principle stands; what changed is that
+// the quantity it traded against was never measured.
+//
+//	the poll costs    ~30 commands a minute per router at the 2s cadence, and on
+//	                  this fleet /system/resource/print was 111 a minute across
+//	                  four routers -- the single largest item left
+//	the stream costs  ONE channel, and B.0b searched to 24 concurrent channels on
+//	                  live hardware (hAP AX3, RouterOS 7.24, two runs) and found
+//	                  no ceiling, no starvation of the channels already open, and
+//	                  no CPU trend
+//
+// So "one fewer channel" was avoiding a cost nobody has been able to observe, at
+// the price of the largest command load in the app. The trade inverts, and the
+// payload is identical either way -- which the original comment already said.
+//
+// ONE THING THE STREAM NEEDS THAT THE POLL DID NOT: a key. This menu is a
+// SETTINGS menu, one row with no `.id`, so the rolling map is keyed by
+// `keySingleton`. Keyed by the `.id` default it would hold nothing at all and the
+// dashboard gauges would simply stop. See the note there.
 
 import (
 	"math"
@@ -275,7 +295,12 @@ func NewSystem(ros Reader, emit Emit, pollMs int) *System {
 	})
 	// AFTER the loop: `scheduled` holds it as the no-cache fallback.
 	s.sched = scheduled{loop: s.loop, menu: systemResourceCmd.Path, fields: fieldsOf(systemResourceCmd), apply: s.apply,
-		cadence: s.pollMs.duration}
+		cadence: s.pollMs.duration,
+		// A SETTINGS MENU, NOT A TABLE. `/system/resource/print` returns one row
+		// and it carries no `.id`, so the default key would drop it into
+		// `FillFromStream`'s unkeyed counter and leave the entry empty -- which
+		// for this collector means the dashboard's gauges stop. See keySingleton.
+		streamKey: keySingleton}
 	return s
 }
 

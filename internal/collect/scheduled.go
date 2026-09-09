@@ -161,11 +161,28 @@ func (s *scheduled) begin() {
 	s.fillIfStreaming(menu)
 }
 
-// keyByID is the default row key: RouterOS `.id`, which every `/print` row
-// carries and which is stable across re-prints. A menu whose rows have no `.id`
-// -- `monitor-traffic` is the one -- must supply its own, and `FillFromStream`
-// counts the rows it could not name so that is discoverable rather than silent.
+// keyByID is the default row key: RouterOS `.id`, which every `/print` row of a
+// TABLE carries and which is stable across re-prints. A menu whose rows have no
+// `.id` must supply its own, and `FillFromStream` counts the rows it could not
+// name so that is discoverable rather than silent.
 func keyByID(r routeros.Reply) string { return r[".id"] }
+
+// keySingleton is the key for a SETTINGS menu: one row, no `.id`, and each
+// reading replaces the last.
+//
+// ── A CONSTANT IS THE CORRECT SEMANTICS HERE, NOT A SHORTCUT ───────────────
+//
+// A rolling map keyed by a constant holds exactly one entry. For
+// `/system/resource/print` that is precisely right -- the menu returns one row
+// describing the router, and the next reading supersedes it entirely. Keying it
+// by `.id` would drop every row into `FillFromStream`'s unkeyed counter and
+// serve an EMPTY entry, which for `system` means the dashboard's gauges stop.
+//
+// It would be wrong on a table, where it would collapse every row into the last
+// one. That is why it is a named, deliberate choice at each call site rather
+// than a fallback `keyByID` quietly applies when it finds no `.id`: a silent
+// fallback cannot tell a settings menu from a table whose rows lost their ids.
+func keySingleton(routeros.Reply) string { return "one" }
 
 // defaultStreamArgs opens the channel asking for exactly what the polled read
 // asked for: this subscription's proplist, at this subscription's cadence.
