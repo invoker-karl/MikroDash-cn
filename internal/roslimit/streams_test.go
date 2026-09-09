@@ -109,3 +109,56 @@ func TestResetClearsTheLevel(t *testing.T) {
 			"counted against every later test in the package", n)
 	}
 }
+
+// TestADroppedConnectionClearsTheLevel.
+//
+// ── FOUND BY THE INSTRUMENT, SIX MINUTES AFTER IT WAS DEPLOYED ─────────────
+//
+// Every channel is a tag on ONE TCP connection, so a drop takes them all with it
+// whether or not a collector called its stop. Measured on 2026-09-09: three
+// routers reported 3 open channels and the fourth reported 4 — and the fourth
+// was the only one that had reconnected. A forced second reconnect took it to 5.
+//
+// One of the three streaming collectors does not release across a redial, so the
+// level grew by one per outage. A flapping router would have inflated it
+// indefinitely, which is the one thing an instrument about channel pressure must
+// not do: it would have reported the pressure Track B is trying to measure as
+// coming from streams that no longer exist.
+//
+// The fix is authoritative rather than cooperative — fixing the one collector
+// would leave the next one to forget.
+func TestADroppedConnectionClearsTheLevel(t *testing.T) {
+	Reset()
+	late := StreamOpened("r1")
+	StreamOpened("r1")
+	StreamOpened("r1")
+	defer StreamOpened("r2")()
+
+	if n := OpenStreams("r1"); n != 3 {
+		t.Fatalf("r1 holds %d, want 3", n)
+	}
+
+	StreamsGone("r1")
+
+	if n := OpenStreams("r1"); n != 0 {
+		t.Errorf("r1 reports %d channels after its connection dropped; they were tags "+
+			"on that socket and are gone with it", n)
+	}
+	if n := OpenStreams("r2"); n != 1 {
+		t.Errorf("r2 reports %d; one router's drop cleared another's channels", n)
+	}
+
+	// A LATE RELEASE MUST NOT GO NEGATIVE. A collector that does eventually stop
+	// its stream — after the drop — would otherwise take the level below zero and
+	// corrupt the fleet total in the stats line.
+	late()
+	if n := OpenStreams("r1"); n != 0 {
+		t.Errorf("a release arriving after the drop left r1 at %d, want 0", n)
+	}
+
+	// And the router recovers: a new connection counts up from nothing.
+	defer StreamOpened("r1")()
+	if n := OpenStreams("r1"); n != 1 {
+		t.Errorf("after reconnecting, r1 reports %d, want 1", n)
+	}
+}

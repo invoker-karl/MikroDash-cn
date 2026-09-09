@@ -1984,6 +1984,14 @@ func (s *Session) connectLoop() {
 		s.connected = false
 		s.mu.Unlock()
 
+		// EVERY CHANNEL WENT WITH THE SOCKET. They are tags on one TCP
+		// connection, so the router-side channels are gone whether or not a
+		// collector called its stop -- and at least one does not, measured
+		// 2026-09-09: the open-channel level grew by one per outage on a router
+		// that was flapping, so it would have climbed indefinitely. See
+		// roslimit.StreamsGone.
+		roslimit.StreamsGone(s.RouterID)
+
 		// A DROP IS A TRANSITION whether or not anybody is watching. Recorded
 		// here rather than only on the failed redial, so an outage's start is the
 		// moment the link went rather than five seconds later.

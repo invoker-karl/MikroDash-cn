@@ -201,6 +201,35 @@ func StreamOpened(routerID string) func() {
 	}
 }
 
+// StreamsGone drops a router's whole channel level, because its connection has.
+//
+// ── WHY A COLLECTOR'S OWN RELEASE IS NOT ENOUGH ─────────────────────────────
+//
+// Every channel is a tag on ONE TCP connection. When that connection drops, the
+// router-side channels go with it whether or not anything in this process
+// called a stop -- so the level is stale the instant the socket dies, and it
+// stays stale until each collector happens to release.
+//
+// MEASURED, not reasoned: the counter was deployed on 2026-09-09 and reported 3
+// open channels on three routers and 4 on the fourth. The fourth was the only
+// one that had reconnected. Forcing a second reconnect took it to 5. One
+// collector of the three does not release across a redial, and the level grew by
+// one per outage -- so a flapping router would have inflated this number
+// indefinitely, which is precisely the case an instrument about channel
+// pressure must not get wrong.
+//
+// AUTHORITATIVE RATHER THAN COOPERATIVE. Fixing the one collector would leave
+// the next one to forget; a new connection means every old channel is gone by
+// definition, and that fact belongs here rather than in each collector.
+//
+// A late release after this is harmless: it decrements to zero or below and the
+// entry is deleted, and the next stream counts up from nothing.
+func StreamsGone(routerID string) {
+	mu.Lock()
+	delete(streams, routerID)
+	mu.Unlock()
+}
+
 // OpenStreams reports how many channels this process holds on a router. For
 // tests, diagnostics, and the stats line.
 func OpenStreams(routerID string) int {
