@@ -552,6 +552,17 @@ func (c *Cache) fillFor(menu string) *streamFill {
 	return c.fills[menu]
 }
 
+// Streaming reports whether a menu is backed by a channel that has answered.
+//
+// AUTHORITATIVE, NOT MERELY OPEN. A caller asking this is deciding whether to
+// take its own measurement instead, and an open-but-unwarmed channel would send
+// it away with nothing -- the same race that emptied the DHCP page, arriving
+// from the other direction.
+func (c *Cache) Streaming(menu string) bool {
+	f := c.fillFor(menu)
+	return f != nil && f.authoritative()
+}
+
 // StreamedMenus is which menus are currently stream-filled. For a test, and for
 // anything that needs to know a menu is push-backed rather than polled.
 func (c *Cache) StreamedMenus() []string {

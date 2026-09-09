@@ -227,6 +227,18 @@ type IfStatus struct {
 	// cache coalesces reads shared with another collector. Nil outside a live
 	// session, which is every test — see collect/cache.go.
 	cache *roscache.Cache
+	// rateStop releases the monitor-traffic channel, and rateKey is the
+	// interface list it was opened with. See syncRateChannel.
+	//
+	// ── THEIR OWN MUTEX, AND NOT `mu`, WHICH IS A DEADLOCK ──────────────────
+	//
+	// `Tick` holds `mu` for its whole body and `syncRateChannel` is called from
+	// inside it, so sharing the lock deadlocks on the first tick -- which is
+	// exactly what it did: the collect suite hung rather than failed, and a hang
+	// says less about its cause than a failure does.
+	rateMu   sync.Mutex
+	rateStop func()
+	rateKey  string
 	// sched subscribes the METADATA menus and keeps the loop as the residual half
 	// for the rates measurement. Mechanism A; see scheduled.go.
 	sched scheduled
@@ -310,24 +322,37 @@ func (s *IfStatus) read(cmd routeros.Cmd) []routeros.Reply {
 // EVERY interface and rates sat at zero forever. Go has no such trap, but the
 // comparison is spelled out so the next reader does not "simplify" it back.
 func (s *IfStatus) rates(ifaces []routeros.Reply) map[string]Rate {
-	names := make([]string, 0, len(ifaces))
-	for _, i := range ifaces {
-		if i["name"] == "" || i["disabled"] == "true" {
-			continue
-		}
-		names = append(names, i["name"])
-	}
+	names := rateNames(ifaces)
 	out := map[string]Rate{}
 	if len(names) == 0 {
 		return out
 	}
+	// ── B.7: FROM THE CHANNEL WHEN THERE IS ONE ─────────────────────────────
+	//
+	// This measurement is the most expensive single thing the app asks a router:
+	// roughly 52 commands a minute, and after B.4 moved fourteen menus onto
+	// channels it is the largest polled item left by a wide margin.
+	//
+	// `traffic` already holds a channel on this exact menu, and B.0 measured
+	// what widening it to every interface costs: 2.6 KB/s, ONE channel either
+	// way, no measurable router CPU. So the rates can be READ from a channel
+	// somebody is holding anyway, and this command need not be issued at all.
+	//
+	// THE FALLBACK IS NOT A COURTESY. The menu cannot be polled by the cache's
+	// ordinary read path -- a bare `/interface/monitor-traffic` with no `=once=`
+	// and no `=interval=` is not a query, it is a request the router will not
+	// answer. So when no channel is warm this MUST take its own measurement, and
+	// that is the path a session with no cache, a router that refused the
+	// stream, and every tick before the first round all take.
+	if rates, ok := s.ratesFromChannel(names); ok {
+		return rates
+	}
+
 	// ── SET B: A MEASUREMENT, NOT A QUERY ───────────────────────────────────
 	//
 	// See acquisition.go. The once argument makes this a reading taken at an
 	// instant, on a named set of interfaces -- so it has no cacheable answer,
-	// and none of phase 1 applies to it. It is also the most expensive single
-	// thing this app asks a router, at roughly 52 commands a minute, which is
-	// why the second track exists.
+	// and none of phase 1 applies to it.
 	rows, err := s.ros.Do(routeros.Cmd{Path: "/interface/monitor-traffic", Args: []string{
 		"=interface=" + strings.Join(names, ","),
 		"=once=",
@@ -341,10 +366,30 @@ func (s *IfStatus) rates(ifaces []routeros.Reply) map[string]Rate {
 		if r["name"] == "" {
 			continue
 		}
-		rx, tx := bpsToMbps(r["rx-bits-per-second"]), bpsToMbps(r["tx-bits-per-second"])
-		out[r["name"]] = Rate{RxMbps: &rx, TxMbps: &tx}
+		out[r["name"]] = rateOf(r)
 	}
 	return out
+}
+
+// rateNames is the interfaces worth asking about: named, and not administratively
+// disabled. Shared by the measurement, the channel and the channel's own command,
+// so all three cannot disagree about which interfaces are in play.
+func rateNames(ifaces []routeros.Reply) []string {
+	names := make([]string, 0, len(ifaces))
+	for _, i := range ifaces {
+		if i["name"] == "" || i["disabled"] == "true" {
+			continue
+		}
+		names = append(names, i["name"])
+	}
+	return names
+}
+
+// rateOf reads one monitor-traffic row. Shared by the measured path and the
+// channel path so the two cannot render the same row differently.
+func rateOf(r routeros.Reply) Rate {
+	rx, tx := bpsToMbps(r["rx-bits-per-second"]), bpsToMbps(r["tx-bits-per-second"])
+	return Rate{RxMbps: &rx, TxMbps: &tx}
 }
 
 // bpsToMbps matches parseBps + bpsToMbps: bits per second to Mbps, rounded to
@@ -420,7 +465,16 @@ func (s *IfStatus) Tick() {
 		return // nothing to build from; do not publish an empty interface list
 	}
 
-	// The fast half, and on most ticks the ONLY command this collector issues.
+	// ── B.7: KEEP THE CHANNEL POINTED AT THE CURRENT INTERFACE SET ──────────
+	//
+	// Before the rates are wanted, not after: a channel opened for a set that no
+	// longer matches would answer for interfaces that have gone and miss ones
+	// that have arrived, and `rates` would fall back to measuring for the ones it
+	// could not find -- which is correct but is the cost this step removes.
+	s.syncRateChannel(rateNames(s.ifRows))
+
+	// The fast half, and on most ticks it issues NO command at all: the rates
+	// come from a channel. See rates and ratesFromChannel.
 	rateBy := s.rates(s.ifRows)
 
 	// Copied rather than written through, because `base` outlives the tick and
@@ -751,6 +805,7 @@ func (s *IfStatus) Resume() {
 
 func (s *IfStatus) Stop() {
 	s.sched.end()
+	s.stopRateChannel()
 	s.mu.Lock()
 	s.lastFp, s.lastEmitAt = "", time.Time{}
 	s.mu.Unlock()
@@ -788,4 +843,142 @@ func (i *IfStatus) SetPollMs(ms int) {
 func (s *IfStatus) UseCache(c *roscache.Cache) {
 	s.cache = c
 	s.sched.useCache(c)
+}
+
+// monitorTrafficMenu is the menu both this collector and `traffic` want.
+const monitorTrafficMenu = "/interface/monitor-traffic"
+
+// keyByIfaceName keys a monitor-traffic row. These rows carry no `.id` -- they
+// are a measurement per interface, not a table -- so the interface name is the
+// identity, and a later reading of one interface replaces the earlier.
+func keyByIfaceName(r routeros.Reply) string { return r["name"] }
+
+// syncRateChannel keeps a channel open on `monitor-traffic` for every interface
+// this collector knows about, so `rates` can read instead of measure.
+//
+// ── WHY THIS COLLECTOR OPENS IT AND NOT `traffic` ──────────────────────────
+//
+// `traffic` already holds a channel on this menu and is the natural owner: one
+// channel could serve both. It is not the owner YET, and the reason is worth
+// recording rather than leaving as an oddity.
+//
+// `traffic`'s chart is built from a PER-ROW callback as packets arrive, and it
+// carries its own watchdog and its own restart-on-set-change. Making it the
+// filler means giving the fill a row callback and retiring that machinery --
+// real work on the collector whose failure is most visible. B.0b measured a
+// second channel as free (24 concurrent, no ceiling, no starvation), so this
+// takes the additive path and leaves the merge as its own step.
+//
+// SO THERE ARE TWO CHANNELS ON THIS MENU FOR NOW, deliberately, and the win is
+// unaffected: `ifStatus` stops issuing 52 commands a minute either way.
+//
+// ── REOPENED WHEN THE INTERFACE SET CHANGES ────────────────────────────────
+//
+// A channel names its interfaces when it opens, so one opened before a VLAN was
+// created never carries it. Same rule `traffic.syncStream` follows, and the same
+// reason: the list is part of the command, not a filter applied to the answer.
+func (s *IfStatus) syncRateChannel(names []string) {
+	if s.cache == nil || len(names) == 0 {
+		return
+	}
+	key := strings.Join(names, ",")
+
+	s.rateMu.Lock()
+	same := key == s.rateKey && s.rateStop != nil
+	old := s.rateStop
+	if !same {
+		s.rateStop, s.rateKey = nil, ""
+	}
+	s.rateMu.Unlock()
+	if same {
+		return
+	}
+	if old != nil {
+		old()
+	}
+
+	sec := int(s.pollMs.duration() / time.Second)
+	if sec < 1 {
+		sec = 1
+	}
+	stop, err := s.cache.FillFromStream(monitorTrafficMenu, routeros.Cmd{
+		Path: monitorTrafficMenu,
+		Args: []string{
+			"=interface=" + key,
+			"=interval=" + strconv.Itoa(sec),
+			"=.proplist=name,rx-bits-per-second,tx-bits-per-second",
+		},
+	}, keyByIfaceName, s.pollMs.duration())
+	if err != nil {
+		return // measuring, which is what `rates` already does
+	}
+	s.rateMu.Lock()
+	if s.rateStop != nil || s.cache == nil {
+		s.rateMu.Unlock()
+		stop()
+		return
+	}
+	s.rateStop, s.rateKey = stop, key
+	s.rateMu.Unlock()
+}
+
+// stopRateChannel releases the channel with the collector.
+func (s *IfStatus) stopRateChannel() {
+	s.rateMu.Lock()
+	stop := s.rateStop
+	s.rateStop, s.rateKey = nil, ""
+	s.rateMu.Unlock()
+	if stop != nil {
+		stop()
+	}
+}
+
+// ratesFromChannel reads the rates out of a channel somebody is already holding,
+// and reports whether it could.
+//
+// ── WHY THIS IS A READ AND NOT A SECOND STREAM ─────────────────────────────
+//
+// `traffic` holds a channel on this menu for the interfaces somebody is
+// charting. `roscache` can keep an entry current from that channel, and once it
+// does, the rates are a map lookup rather than a command. That is the whole of
+// B.7: 52 commands a minute become zero, on a channel the app was holding
+// anyway.
+//
+// ── IT ASKS FOR A SUPERSET AND TAKES WHAT IT FINDS ─────────────────────────
+//
+// The channel covers whatever interfaces its owner asked for, which is not
+// necessarily every interface. An interface this collector wants and the channel
+// does not carry is simply absent from the result, and the row keeps its
+// previous rate rather than reading zero -- `Tick` copies `base` and stamps only
+// the rates it was given, which is the same behaviour as a router that stopped
+// reporting one.
+//
+// FALSE MEANS "TAKE THE MEASUREMENT", and the caller does. There is no third
+// state: a partial answer is still an answer, because a missing interface costs
+// exactly its own rate rather than the whole reading.
+func (s *IfStatus) ratesFromChannel(names []string) (map[string]Rate, bool) {
+	if s.cache == nil || !s.cache.Streaming(monitorTrafficMenu) {
+		return nil, false
+	}
+	rows, err := s.cache.Get(monitorTrafficMenu, nil, 0)
+	if err != nil || len(rows) == 0 {
+		return nil, false
+	}
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	out := make(map[string]Rate, len(names))
+	for _, r := range rows {
+		if !want[r["name"]] {
+			continue
+		}
+		out[r["name"]] = rateOf(r)
+	}
+	if len(out) == 0 {
+		// The channel is warm and carries none of the interfaces this collector
+		// is asking about, which is not a usable answer.
+		return nil, false
+	}
+	return out, true
 }
