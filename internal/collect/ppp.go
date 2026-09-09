@@ -332,9 +332,24 @@ func (p *PPP) read(cmd routeros.Cmd, flag **bool) []routeros.Reply {
 // Exported because it is the whole of the interesting arithmetic and deserves
 // testing without a router — the same split the Node file makes by hanging
 // parsePppSessions off the class.
-func ParsePPPSessions(rows []routeros.Reply, prev map[string]pppSample, now time.Time) []PPPSession {
+// ── PHASE 4.1: IT RETURNS THE NEXT STATE RATHER THAN MUTATING THE LAST ─────
+//
+// This took `prev` and wrote into it: new samples in, dead keys deleted. That
+// made every caller's map an output parameter, and it made this function -- and
+// `BuildPPP` above it -- impure in a way that only showed up when a caller
+// passed the zero value: a nil map panicked on the first write, which is what a
+// test discovered the moment the builder became callable without a collector.
+//
+// The shape 4.1 asks for is `func(prior, in) (out, prior)`, which
+// `BuildBandwidth(prev, in)` already has. This is that: `prev` is read only, and
+// the next state is BUILT and returned.
+//
+// Dead keys need no delete loop as a result -- a session that has gone is simply
+// not in the map that gets built, which is the same outcome expressed as a
+// consequence rather than as a sweep.
+func ParsePPPSessions(rows []routeros.Reply, prev map[string]pppSample, now time.Time) ([]PPPSession, map[string]pppSample) {
 	out := make([]PPPSession, 0, len(rows))
-	live := map[string]bool{}
+	next := make(map[string]pppSample, len(rows))
 
 	for _, r := range rows {
 		// Drops the {undefined:''} row RouterOS returns for an empty menu.
@@ -347,8 +362,6 @@ func ParsePPPSessions(rows []routeros.Reply, prev map[string]pppSample, now time
 		if key == "" {
 			key = r["name"] + "/" + r["service"]
 		}
-		live[key] = true
-
 		var rxRate, txRate *float64
 		pr, seen := prev[key]
 		if seen && now.After(pr.ts) {
@@ -361,9 +374,13 @@ func ParsePPPSessions(rows []routeros.Reply, prev map[string]pppSample, now time
 			rxRate, txRate = &rr, &tr
 		}
 		// Only advance the timestamp when the bytes actually moved, so the
-		// window always spans a real interval.
+		// window always spans a real interval. An unchanged session carries its
+		// OLD sample forward rather than being re-stamped, which is the same
+		// rule the in-place version expressed by not writing.
 		if !seen || rx != pr.rx || tx != pr.tx {
-			prev[key] = pppSample{rx: rx, tx: tx, ts: now}
+			next[key] = pppSample{rx: rx, tx: tx, ts: now}
+		} else {
+			next[key] = pr
 		}
 
 		limitIn, limitOut := pppLimit(r["limit-bytes-in"]), pppLimit(r["limit-bytes-out"])
@@ -380,15 +397,10 @@ func ParsePPPSessions(rows []routeros.Reply, prev map[string]pppSample, now time
 			RX: rx, TX: tx, RXRate: rxRate, TXRate: txRate,
 		})
 	}
-	for k := range prev {
-		if !live[k] {
-			delete(prev, k)
-		}
-	}
 	// localeCompare, not a byte sort — the same ordering every other table here
 	// uses for a name column.
 	sort.SliceStable(out, func(i, j int) bool { return Collate(out[i].Name, out[j].Name) < 0 })
-	return out
+	return out, next
 }
 
 func (p *PPP) loadConfig() {
@@ -482,25 +494,64 @@ func (p *PPP) apply(rows []routeros.Reply, err error) {
 	p.applyLocked(rows)
 }
 
-// applyLocked builds and emits. The caller holds the lock.
-func (p *PPP) applyLocked(rows []routeros.Reply) {
-	p.sessions = ParsePPPSessions(rows, p.prev, time.Now())
+// PPPInput is one tick's worth of the outside world, for BuildPPP.
+//
+// ── FOUR TABLES ON TWO CADENCES, WHICH IS WHY THIS IS A STRUCT ─────────────
+//
+// Sessions are read every tick; secrets, profiles and servers once every
+// `pppConfigEvery`. So most ticks build a payload from three tables the tick did
+// not fetch, and they arrive here as inputs rather than as receiver state the
+// derivation reaches around for.
+type PPPInput struct {
+	Rows []routeros.Reply
+	// Prev is the previous counter reading per session, which is what makes a
+	// RATE possible: a rate is a difference, and a function of the current rows
+	// alone has nothing to subtract from. Same shape as `BuildBandwidth(prev, in)`.
+	Prev     map[string]pppSample
+	Secrets  []PPPSecret
+	Profiles []PPPProfile
+	Servers  []PPPServer
+	// Available is the active-menu presence latch; nil means not yet known,
+	// which reads as available.
+	Available *bool
+	PollMs    int
+	Now       time.Time
+}
+
+// BuildPPP is the PPP payload, pure.
+//
+// It returns the parsed sessions as well, because the collector keeps them for
+// the fingerprint and parsing the same rows twice could diverge.
+//
+// ── `Connected` IS JOINED HERE, NOT WHERE THE SECRETS WERE READ ────────────
+//
+// The two halves move at different speeds: sessions every tick, secrets once a
+// minute. Setting `Connected` when the secrets are read would freeze the pill for
+// up to a minute -- an account that dialled in four seconds ago would read as
+// offline, which is exactly the question the column exists to answer.
+//
+// A FRESH SLICE each tick, because the caller's `secrets` is a cached read:
+// writing `Connected` into it would leave last tick's answer behind on the next.
+func BuildPPP(in PPPInput) (*PPPPayload, []PPPSession, map[string]pppSample) {
+	sessions, nextPrev := ParsePPPSessions(in.Rows, in.Prev, in.Now)
 
 	byService := map[string]int{}
-	for _, s := range p.sessions {
+	for _, s := range sessions {
 		k := s.Service
 		if k == "" {
 			k = "OTHER"
 		}
 		byService[k]++
 	}
-	// Totals over the sessions that HAVE a rate. All-null means null, not zero:
-	// the distinction between "nothing is flowing" and "we cannot say yet" is
-	// the whole reason the per-session rates are nullable.
+
+	// Totals over the sessions that HAVE a rate. ALL-NULL MEANS NULL, NOT ZERO:
+	// the distinction between "nothing is flowing" and "we cannot say yet" is the
+	// whole reason the per-session rates are nullable, and summing into a plain
+	// float would collapse it on the first tick of every session.
 	var totalRX, totalTX *float64
 	known := 0
 	var sumRX, sumTX float64
-	for _, s := range p.sessions {
+	for _, s := range sessions {
 		if s.RXRate != nil {
 			known++
 			sumRX += *s.RXRate
@@ -511,35 +562,37 @@ func (p *PPP) applyLocked(rows []routeros.Reply) {
 		totalRX, totalTX = &sumRX, &sumTX
 	}
 
-	// ── CONNECTED IS JOINED HERE, NOT WHERE THE SECRETS WERE READ ──────────
-	//
-	// The two halves move at different speeds: sessions every tick, secrets once
-	// every `pppConfigEvery` ticks. Setting `Connected` when the secrets are read
-	// would freeze the pill for up to a minute — an account that dialled in four
-	// seconds ago would read as offline, which is exactly the question the column
-	// exists to answer.
-	//
-	// Joining at emit time costs no extra command and makes the pill as live as
-	// the session table beside it. A FRESH SLICE each tick, because `p.secrets`
-	// is the cached read: writing `Connected` into it would leave last tick's
-	// answer behind on the next one.
-	active := make(map[string]bool, len(p.sessions))
-	for _, s := range p.sessions {
+	active := make(map[string]bool, len(sessions))
+	for _, s := range sessions {
 		active[s.Name] = true
 	}
-	secrets := make([]PPPSecret, len(p.secrets))
-	for i, s := range p.secrets {
+	secrets := make([]PPPSecret, len(in.Secrets))
+	for i, s := range in.Secrets {
 		s.Connected = active[s.Name]
 		secrets[i] = s
 	}
 
-	payload := &PPPPayload{
-		TS: time.Now().UnixMilli(), PollMs: p.pollMs.ms(),
-		Sessions: p.sessions, Secrets: secrets, Profiles: p.profiles, Servers: p.servers,
+	return &PPPPayload{
+		TS: in.Now.UnixMilli(), PollMs: in.PollMs,
+		Sessions: sessions, Secrets: secrets, Profiles: in.Profiles, Servers: in.Servers,
 		ByService: byService, TotalRXRate: totalRX, TotalTXRate: totalTX,
-		Available: p.activeAvail == nil || *p.activeAvail,
-	}
+		Available: in.Available == nil || *in.Available,
+	}, sessions, nextPrev
+}
+
+// applyLocked builds and emits. The caller holds the lock.
+func (p *PPP) applyLocked(rows []routeros.Reply) {
+	payload, sessions, nextPrev := BuildPPP(PPPInput{
+		Rows: rows, Prev: p.prev,
+		Secrets: p.secrets, Profiles: p.profiles, Servers: p.servers,
+		Available: p.activeAvail, PollMs: p.pollMs.ms(), Now: time.Now(),
+	})
+	p.sessions = sessions
+	// THE CARRIED STATE COMES BACK rather than having been written through the
+	// argument. See ParsePPPSessions.
+	p.prev = nextPrev
 	p.last = payload
+	secrets := payload.Secrets
 
 	var fp strings.Builder
 	for _, s := range p.sessions {

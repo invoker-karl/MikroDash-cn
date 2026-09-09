@@ -90,7 +90,8 @@ func TestPPPSessionsMatchTheLiveParser(t *testing.T) {
 				for _, r := range step.Rows {
 					rows = append(rows, routeros.Reply(r))
 				}
-				got := ParsePPPSessions(rows, prev, base.Add(time.Duration(step.AtMs)*time.Millisecond))
+				got, next := ParsePPPSessions(rows, prev, base.Add(time.Duration(step.AtMs)*time.Millisecond))
+				prev = next
 
 				if len(got) != len(step.Want) {
 					t.Fatalf("step %d: %d session(s), want %d", i, len(got), len(step.Want))
@@ -236,5 +237,90 @@ func TestAnUnchangingRouterStillEmitsAHeartbeat(t *testing.T) {
 	if emits != 2 {
 		t.Errorf("%d emits, want 2 — nothing changed and the heartbeat was due, "+
 			"so the card is about to be called stale while the collector is fine", emits)
+	}
+}
+
+// ── PHASE 4.1: THE JOIN AND THE TOTALS, WITHOUT A COLLECTOR ────────────────
+//
+// Two behaviours were only reachable by driving a `*PPP` through a tick, and
+// both are the kind that look right on a healthy router and are wrong on the
+// case that matters.
+
+// TestBuildPPPJoinsConnectedFromTheLiveSessions.
+//
+// Sessions are read every tick and secrets once a minute. Setting `Connected`
+// where the secrets are READ would freeze the pill for up to a minute — an
+// account that dialled in four seconds ago reads as offline, which is exactly
+// the question the column exists to answer.
+func TestBuildPPPJoinsConnectedFromTheLiveSessions(t *testing.T) {
+	in := PPPInput{
+		Rows: []routeros.Reply{{".id": "*1", "name": "alice", "service": "pppoe"}},
+		Secrets: []PPPSecret{
+			{ID: "*a", Name: "alice"},
+			{ID: "*b", Name: "bob"},
+		},
+		Now: time.Unix(100, 0),
+	}
+	got, _, _ := BuildPPP(in)
+
+	byName := map[string]bool{}
+	for _, s := range got.Secrets {
+		byName[s.Name] = s.Connected
+	}
+	if !byName["alice"] {
+		t.Error("alice has a live session and her secret reads as not connected")
+	}
+	if byName["bob"] {
+		t.Error("bob has no session and his secret reads as connected")
+	}
+
+	// THE CALLER'S SLICE MUST NOT BE WRITTEN. `secrets` is a cached read reused
+	// every tick; writing Connected into it leaves last tick's answer behind, so
+	// an account that disconnects stays lit until the next config read.
+	if in.Secrets[0].Connected {
+		t.Error("the input slice was mutated — the cached secrets now carry a " +
+			"Connected flag that will be stale on the next tick")
+	}
+}
+
+// TestBuildPPPTotalsAreNullNotZeroWhenNothingIsKnown.
+//
+// A rate is a difference, so the FIRST reading of a session has nothing to
+// subtract from and its rate is null. Summing those into a plain float would
+// report 0 bps — "nothing is flowing" — when the truth is "we cannot say yet".
+// The distinction is the whole reason the per-session rates are nullable, and it
+// collapses on the first tick of every session, which is when somebody watching
+// a new connection is most likely to be looking.
+func TestBuildPPPTotalsAreNullNotZeroWhenNothingIsKnown(t *testing.T) {
+	first, _, _ := BuildPPP(PPPInput{
+		Rows: []routeros.Reply{{".id": "*1", "name": "alice", "bytes-in": "1000", "bytes-out": "500"}},
+		Prev: nil, // nothing seen before
+		Now:  time.Unix(100, 0),
+	})
+	if first.TotalRXRate != nil || first.TotalTXRate != nil {
+		t.Errorf("totals are %v/%v on a first reading; a rate with nothing to "+
+			"subtract from is UNKNOWN, and reporting zero says the link is idle",
+			first.TotalRXRate, first.TotalTXRate)
+	}
+	if len(first.Sessions) != 1 {
+		t.Fatalf("%d sessions, want 1", len(first.Sessions))
+	}
+}
+
+// TestBuildPPPGroupsUnnamedServicesAsOTHER — a session with no service must not
+// create an empty-string bucket the page would render as a blank row.
+func TestBuildPPPGroupsUnnamedServicesAsOTHER(t *testing.T) {
+	got, _, _ := BuildPPP(PPPInput{
+		Rows: []routeros.Reply{
+			{".id": "*1", "name": "a", "service": "pppoe"},
+			{".id": "*2", "name": "b", "service": ""},
+		},
+		Now: time.Unix(100, 0),
+	})
+	if got.ByService["OTHER"] != 1 {
+		t.Errorf("byService = %v; a session with no service belongs in OTHER", got.ByService)
+	}
+	if _, blank := got.ByService[""]; blank {
+		t.Error("an empty-string service bucket was created; the page renders it as a blank row")
 	}
 }
