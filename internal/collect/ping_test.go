@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"mikrodash/internal/routeros"
@@ -344,3 +345,126 @@ func TestPingTransientErrorDoesNotLatch(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// ── B.5: THE INTERVAL THE STREAM CANNOT EXPRESS ────────────────────────────
+//
+// RouterOS caps `/tool/ping`'s interval at five seconds and does not reject a
+// larger one: it accepts it silently and ignores it. So an operator asking for a
+// ping every thirty seconds got one every five — six times as many as they asked
+// for, with nothing anywhere saying so.
+//
+// `pingIntervalSec` has clamped to [1,5] since the port and its comment says
+// exactly this. What was missing is a path that can honour the setting.
+
+// pollDoer is a Streamer that can also answer a command, and counts both.
+type pollDoer struct {
+	mu      sync.Mutex
+	streams int
+	dos     int
+	rows    []routeros.Reply
+}
+
+func (d *pollDoer) Connected() bool { return true }
+
+func (d *pollDoer) Stream(routeros.Cmd, func(routeros.Reply)) (func(), error) {
+	d.mu.Lock()
+	d.streams++
+	d.mu.Unlock()
+	return func() {}, nil
+}
+
+func (d *pollDoer) Do(routeros.Cmd) ([]routeros.Reply, error) {
+	d.mu.Lock()
+	d.dos++
+	rows := d.rows
+	d.mu.Unlock()
+	return rows, nil
+}
+
+func (d *pollDoer) counts() (streams, dos int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.streams, d.dos
+}
+
+// TestAFastPingStreamsAndASlowOnePolls is the whole of B.5.
+//
+// FIVE SECONDS IS THE LINE, and it is not arbitrary: it is what RouterOS will
+// actually honour. Every default and every install today sits at or below it and
+// keeps streaming, so this changes nothing for them.
+func TestAFastPingStreamsAndASlowOnePolls(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pollMs       int
+		wantStream   bool
+		wantPollPath bool
+	}{
+		{"the default", 5000, true, false},
+		{"faster than the cap", 1000, true, false},
+		{"exactly the cap", 5000, true, false},
+		{"beyond what a stream can carry", 30000, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &pollDoer{}
+			p := NewPing(d, func(string, string, any) {}, tc.pollMs, "1.1.1.1")
+			if got := p.pollsRatherThanStreams(); got != tc.wantPollPath {
+				t.Fatalf("at %dms pollsRatherThanStreams = %v, want %v — the line is "+
+					"five seconds, which is what RouterOS will honour",
+					tc.pollMs, got, tc.wantPollPath)
+			}
+			p.Start()
+			defer p.Stop()
+
+			streams, _ := d.counts()
+			if tc.wantStream && streams != 1 {
+				t.Errorf("%d channel(s) opened, want 1", streams)
+			}
+			if !tc.wantStream && streams != 0 {
+				t.Errorf("%d channel(s) opened for an interval a stream cannot carry; "+
+					"the router would silently ping every 5s instead of every %ds",
+					streams, tc.pollMs/1000)
+			}
+		})
+	}
+}
+
+// TestTheSlowPathTakesReadingsAndSkipsTheSummary.
+//
+// `/tool/ping` ends a run with a summary sentence carrying neither a time nor a
+// status. Feeding one to ProcessRow pushes a LOST result into the history on
+// every successful ping, which is the bug `pingIsResult` exists to prevent — and
+// the polled path had to be given the same guard rather than inheriting it.
+func TestTheSlowPathTakesReadingsAndSkipsTheSummary(t *testing.T) {
+	d := &pollDoer{rows: []routeros.Reply{
+		{"seq": "0", "time": "12ms", "status": ""},
+		{"sent": "1", "received": "1", "packet-loss": "0"}, // the summary
+	}}
+	var emitted int
+	p := NewPing(d, func(string, string, any) { emitted++ }, 30000, "1.1.1.1")
+
+	p.pollOnce()
+
+	if _, dos := d.counts(); dos != 1 {
+		t.Errorf("%d command(s) issued for one reading, want 1", dos)
+	}
+	if emitted != 1 {
+		t.Errorf("%d payload(s) emitted, want 1 — the summary sentence was counted as "+
+			"a result, which pushes a LOST reading into the history on every "+
+			"successful ping", emitted)
+	}
+}
+
+// TestAPollingPingStopsCleanly. Its loop is a goroutine; a collector that leaves
+// one running after Stop keeps pinging a router nobody is watching.
+func TestAPollingPingStopsCleanly(t *testing.T) {
+	d := &pollDoer{}
+	p := NewPing(d, func(string, string, any) {}, 30000, "1.1.1.1")
+	p.Start()
+	p.Stop()
+	p.mu.Lock()
+	loop := p.loop
+	p.mu.Unlock()
+	if loop != nil {
+		t.Error("Stop left the poll loop in place")
+	}
+}

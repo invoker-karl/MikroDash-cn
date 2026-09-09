@@ -128,6 +128,9 @@ type Ping struct {
 	last    *PingPayload
 	denied  bool
 	stop    func()
+	// loop drives the polled path. Nil while streaming, which is every install
+	// whose ping interval is five seconds or less. See Start.
+	loop *pollLoop
 }
 
 func NewPing(ros Streamer, emit Emit, pollMs int, target string) *Ping {
@@ -279,7 +282,108 @@ func (p *Ping) Denied() bool {
 }
 
 func (p *Ping) Start() {
+	// ── B.5: THE INTERVAL DECIDES, BECAUSE THE STREAM CANNOT EXPRESS IT ─────
+	//
+	// RouterOS caps `/tool/ping`'s interval at five seconds. A larger one is not
+	// rejected -- it is silently accepted and ignored -- so an operator asking
+	// for a ping every thirty seconds got one every five, six times as many as
+	// they asked for, with nothing anywhere saying so.
+	//
+	// `pingIntervalSec` has clamped to [1,5] since the port and its comment says
+	// exactly this. What was missing is the other half: a path that CAN honour
+	// the setting.
+	//
+	// ── AND IT IS NOT A VIOLATION OF THE OPERATOR'S RULE ────────────────────
+	//
+	// "Mode switches delivery only and never touches intervals" cuts one way:
+	// choosing Poll must not silently mean slower. This is the converse -- an
+	// INTERVAL the chosen delivery cannot carry -- and there the interval wins,
+	// because it is the thing the operator set explicitly while the mode is a
+	// default they may never have seen.
+	//
+	// So: five seconds or less streams, which is every default and what every
+	// install does today. Above that polls, and the setting is honoured for the
+	// first time.
+	if p.pollsRatherThanStreams() {
+		p.startPolling()
+		return
+	}
 	p.startStream()
+}
+
+// pollsRatherThanStreams reports whether the configured interval is one only a
+// poll can deliver.
+func (p *Ping) pollsRatherThanStreams() bool {
+	return p.pollMs.ms() > pingMaxStreamMs
+}
+
+// pingMaxStreamMs is the longest interval `/tool/ping` will actually honour.
+// See pingIntervalSec, whose clamp this is the other side of.
+const pingMaxStreamMs = 5000
+
+// startPolling issues one bounded ping per interval.
+//
+// ── `=count=1`, WHICH MAKES IT A MEASUREMENT AND NOT A CHANNEL ─────────────
+//
+// The same shape `topology` uses to ping a discovered device, and the same
+// reason `acquisition.KindOf` reads the bound before the interval: a count is
+// what makes this a reading that ends. It costs one command per interval and
+// holds nothing open.
+//
+// ONE RESULT PER RUN, so the loss statistics count the same way they do on the
+// streamed path -- every row is a distinct measurement, which is why `ping` can
+// never back a rolling cache entry either.
+func (p *Ping) startPolling() {
+	p.mu.Lock()
+	if p.loop != nil || p.denied {
+		p.mu.Unlock()
+		return
+	}
+	loop := newPollLoop(p.pollOnce, p.pollMs.duration)
+	p.loop = loop
+	p.mu.Unlock()
+	loop.start()
+}
+
+// pollOnce takes one reading.
+func (p *Ping) pollOnce() {
+	if c, ok := p.ros.(interface{ Connected() bool }); ok && !c.Connected() {
+		return
+	}
+	// ASSERTED, NOT REQUIRED, exactly as `Connected()` is above and for the same
+	// reason: `ros` is a Streamer so a fixture can drive this collector, and a
+	// reader that cannot issue a command simply takes no reading rather than
+	// making the whole collector unconstructable.
+	doer, ok := p.ros.(interface {
+		Do(routeros.Cmd) ([]routeros.Reply, error)
+	})
+	if !ok {
+		return
+	}
+	rows, err := doer.Do(routeros.Cmd{Path: "/tool/ping", Args: []string{
+		"=address=" + p.target,
+		"=count=1",
+		"=.proplist=time,response-time,status,min-rtt,max-rtt",
+	}})
+	if err != nil {
+		if pingDenied.MatchString(err.Error()) {
+			log.Printf("[ping] test policy not granted — ping disabled. Add \"test\" to this API user's group to enable it.")
+			p.emit(pingRooms.Join(), "ping:update", p.noteDenied(time.Now().UnixMilli()))
+		}
+		return
+	}
+	// THE LAST ROW CARRIES THE RESULT. `/tool/ping` ends a run with a summary
+	// sentence that has neither a time nor a status, and `pingIsResult` is what
+	// separates them -- feeding a summary to ProcessRow would push a LOST result
+	// into the history on every successful ping.
+	for _, row := range rows {
+		if !pingIsResult(row) {
+			continue
+		}
+		if payload := p.ProcessRow(row, time.Now().UnixMilli()); payload != nil {
+			p.emit(pingRooms.Join(), "ping:update", payload)
+		}
+	}
 }
 
 func (p *Ping) startStream() {
@@ -347,7 +451,16 @@ func (p *Ping) Resume() {
 	p.startStream()
 }
 
-func (p *Ping) Stop() { p.stopStream() }
+func (p *Ping) Stop() {
+	p.stopStream()
+	p.mu.Lock()
+	loop := p.loop
+	p.loop = nil
+	p.mu.Unlock()
+	if loop != nil {
+		loop.stop()
+	}
+}
 
 // Reconnected clears the latch: a reconnect may be to a router whose API user
 // DOES have the test policy, and a permanent refusal earned on the last one
