@@ -87,6 +87,9 @@ type Cache struct {
 
 	mu      sync.Mutex
 	entries map[string]*entry
+	// fills are the menus kept current by an open channel rather than by a read.
+	// Guarded by `mu`, like `entries`, because `Get` consults both. See stream.go.
+	fills map[string]*streamFill
 
 	// The demand set, on its own lock. SEPARATE FROM `mu` deliberately: `Get`
 	// holds `mu` and must never wait on a page opening or closing, and a
@@ -117,6 +120,16 @@ func New(ros Reader) *Cache {
 // and widens the entry permanently. That is correct but expensive, so callers
 // should name their fields.
 func (c *Cache) Get(menu string, fields []string, ttl time.Duration) ([]routeros.Reply, error) {
+	// ── A STREAM-FILLED MENU IS ALREADY CURRENT ─────────────────────────────
+	//
+	// No read, no TTL, no single-flight: the rows were pushed and the entry is
+	// as fresh as the last thing the router sent. This one branch is what lets
+	// the scheduler stay UNCHANGED -- it still calls Invalidate then Get then
+	// deliver, and for a streamed menu the first is inert and the second
+	// answers from the rolling map. Phase B is additive for that reason.
+	if f := c.fillFor(menu); f != nil {
+		return f.snapshot(), nil
+	}
 	for {
 		e, wait, fresh := c.claim(menu, fields, ttl)
 
