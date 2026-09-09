@@ -647,17 +647,21 @@ func streamed(t *testing.T, c *roscache.Cache) []string {
 }
 
 // TestPollModeOpensNoChannel. The default, and the state every collector is in
-// today: `stream` nil means poll, and nothing must open.
+// today: no decision installed on the cache means poll, and nothing must open.
+//
+// B.3 MOVED WHERE "POLL" IS SPELLED. It used to be a nil `stream` field on the
+// collector; it is now the absence of a `StreamWhen` on the cache, or a decision
+// that says no. One place instead of twenty-two.
 func TestPollModeOpensNoChannel(t *testing.T) {
 	r := &streamReader{}
-	c := roscache.New(r)
+	c := roscache.New(r) // no StreamWhen: nothing may stream
 	s := scheduled{cache: c, menu: "/ip/dns/print",
 		cadence: func() time.Duration { return time.Second }}
 	s.begin()
 	defer s.end()
 
 	if n := r.count(); n != 0 {
-		t.Errorf("%d channel(s) opened for a collector with no stream function", n)
+		t.Errorf("%d channel(s) opened on a cache with no delivery decision", n)
 	}
 	if got := streamed(t, c); len(got) != 0 {
 		t.Errorf("streamed menus = %v, want none", got)
@@ -673,9 +677,9 @@ func TestPollModeOpensNoChannel(t *testing.T) {
 func TestStreamModeOpensOneChannelAndKeepsTheSubscription(t *testing.T) {
 	r := &streamReader{}
 	c := roscache.New(r)
+	c.StreamWhen(func(string) bool { return true })
 	s := scheduled{cache: c, menu: "/ip/dns/print",
 		cadence:    func() time.Duration { return time.Second },
-		stream:     func() bool { return true },
 		streamKey:  func(row routeros.Reply) string { return row[".id"] },
 		streamArgs: func() []string { return []string{"=interval=1"} },
 	}
@@ -697,32 +701,66 @@ func TestStreamModeOpensOneChannelAndKeepsTheSubscription(t *testing.T) {
 	}
 }
 
-// TestAKeylessCollectorWillNotStream. A rolling map with no key holds one row,
-// so a collector that has not said how its rows are identified must stay polled
-// rather than silently answer with the last row the router sent.
+// TestACollectorWithNoKeyTakesTheDefault.
 //
-// THE RULE LIVES IN `roscache.FillFromStream`, NOT HERE, and this asserts the
-// consequence rather than the mechanism: `fillIfStreaming` deliberately carries
-// no `keyOf == nil` check of its own, because the same rule in two places is
-// what `rooms.go` exists to stop. A mutation removing a duplicate guard here
-// would not fail, which is correct -- there is nothing to remove.
-func TestAKeylessCollectorWillNotStream(t *testing.T) {
+// ── THIS TEST USED TO ASSERT THE OPPOSITE, AND B.3 IS WHY ──────────────────
+//
+// It was `TestAKeylessCollectorWillNotStream`: a collector that had not said how
+// its rows are identified stayed polled, because a rolling map with no key holds
+// one row.
+//
+// B.3 gave `scheduled` a DEFAULT key — RouterOS `.id`, which every `/print` row
+// carries and which is stable across re-prints. That is what makes B.4 one line
+// per collector instead of an edit to each, so the default is the feature rather
+// than a convenience.
+//
+// The old assertion is not merely retired: `roscache` still refuses a nil key,
+// and `FillFromStream` still counts rows it cannot name, so a menu whose rows
+// have no `.id` is discoverable rather than silent. What changed is that nobody
+// reaches that path by simply not having said anything.
+func TestACollectorWithNoKeyTakesTheDefault(t *testing.T) {
 	r := &streamReader{}
 	c := roscache.New(r)
+	c.StreamWhen(func(string) bool { return true })
 	s := scheduled{cache: c, menu: "/ip/dns/print",
 		cadence: func() time.Duration { return time.Second },
-		stream:  func() bool { return true }, // asked for, and no key given
 	}
 	s.begin()
 	defer s.end()
 
-	if n := r.count(); n != 0 {
-		t.Errorf("%d channel(s) opened for a collector with no key function — its "+
-			"entry would hold one row and the page would show one interface", n)
+	if n := r.count(); n != 1 {
+		t.Errorf("%d channel(s) opened; a collector with no key of its own should take "+
+			"the `.id` default, which is what makes B.4 one line per collector", n)
 	}
 	if len(c.Demand()) != 1 {
-		t.Error("the collector lost its subscription as well; a refusal must leave a " +
-			"working polled collector, not a broken one")
+		t.Error("the collector lost its subscription; delivery is the only thing that changes")
+	}
+}
+
+// TestTheDefaultStreamArgsMatchThePolledRead.
+//
+// The operator's rule is that mode switches DELIVERY ONLY and never touches
+// intervals. A stream opened without arguments would push at whatever rate the
+// router chose, which is a silent change of the setting — so the interval is the
+// subscription's own cadence and the proplist is the subscription's own fields.
+func TestTheDefaultStreamArgsMatchThePolledRead(t *testing.T) {
+	args := defaultStreamArgs(func() time.Duration { return 5 * time.Second },
+		[]string{"name", "running"})
+	got := strings.Join(args, " ")
+	if !strings.Contains(got, "=interval=5") {
+		t.Errorf("args = %q; the interval must be the collector's own cadence, or "+
+			"choosing Stream silently changes the poll setting", got)
+	}
+	if !strings.Contains(got, "=.proplist=name,running") {
+		t.Errorf("args = %q; a streamed menu must ask for exactly what the polled "+
+			"read asked for", got)
+	}
+
+	// SUB-SECOND FLOORS TO ONE. RouterOS takes seconds, and rounding to zero
+	// would ask for a stream with no interval at all.
+	if got := strings.Join(defaultStreamArgs(
+		func() time.Duration { return 200 * time.Millisecond }, nil), " "); got != "=interval=1" {
+		t.Errorf("a sub-second cadence produced %q, want =interval=1", got)
 	}
 }
 
@@ -732,9 +770,9 @@ func TestAKeylessCollectorWillNotStream(t *testing.T) {
 func TestARefusedStreamFallsBackToPolling(t *testing.T) {
 	r := &streamReader{refuse: true}
 	c := roscache.New(r)
+	c.StreamWhen(func(string) bool { return true })
 	s := scheduled{cache: c, menu: "/ip/dns/print",
 		cadence:   func() time.Duration { return time.Second },
-		stream:    func() bool { return true },
 		streamKey: func(row routeros.Reply) string { return row[".id"] },
 	}
 	s.begin()
@@ -756,10 +794,10 @@ func TestARefusedStreamFallsBackToPolling(t *testing.T) {
 func TestResubscribeMovesTheChannelWithTheMenu(t *testing.T) {
 	r := &streamReader{}
 	c := roscache.New(r)
+	c.StreamWhen(func(string) bool { return true })
 	s := scheduled{cache: c, menu: "/ip/firewall/filter/print",
 		cadence:   func() time.Duration { return time.Second },
 		apply:     func([]routeros.Reply, error) {},
-		stream:    func() bool { return true },
 		streamKey: func(row routeros.Reply) string { return row[".id"] },
 	}
 	s.begin()

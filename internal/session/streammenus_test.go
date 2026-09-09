@@ -1,0 +1,124 @@
+package session
+
+import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+
+	"mikrodash/internal/collection"
+)
+
+// TestStreamableMenusAreRealAndOwned.
+//
+// ── WHAT A CARELESS B.4 LINE LOOKS LIKE ────────────────────────────────────
+//
+// B.4 enables one collector per commit by adding a line to `streamableMenus`.
+// Two ways to get that line wrong, and BOTH FAIL SILENTLY: name a menu with a
+// typo, or a menu nothing actually subscribes to, and the entry matches nothing
+// so the collector keeps polling — the commit claims a delivery change and makes
+// none, and the measurement that follows would be of the unchanged app. Name a
+// collector key the registry does not have, and `eff.Stream[key]` reads false
+// for every router, which is the same outcome by a different route.
+//
+// Neither breaks a page, so nothing else in the suite would notice.
+func TestStreamableMenusAreRealAndOwned(t *testing.T) {
+	if len(streamableMenus) == 0 {
+		// EMPTY IS THE CORRECT STATE UNTIL B.4, and this is not a skip: the
+		// checks below have nothing to say, but the file being present and
+		// parsed is what stops the table being deleted as unused.
+		return
+	}
+
+	subscribed := subscribedMenusInCollect(t)
+	keys := map[string]bool{}
+	for _, c := range collection.Collectors() {
+		keys[c.Key] = true
+	}
+
+	for menu, key := range streamableMenus {
+		if !subscribed[menu] {
+			t.Errorf("streamableMenus lists %q, which no collector subscribes to. The "+
+				"entry matches nothing, so the collector goes on polling and the "+
+				"commit that added it changed no delivery at all.", menu)
+		}
+		if !keys[key] {
+			t.Errorf("streamableMenus maps %q to collector %q, which is not in the "+
+				"registry. eff.Stream[%q] is false for every router, so this menu "+
+				"never streams.", menu, key, key)
+		}
+	}
+}
+
+// subscribedMenusInCollect resolves `scheduled{menu: xxxCmd.Path}` back to the
+// path `xxxCmd` declares, per collector file.
+//
+// The same technique `internal/verify`'s shared-menu ledger uses, and for the
+// same reason: a subscription names its menu through a variable, so the only way
+// to know which menu a collector routes is to resolve the declaration.
+func subscribedMenusInCollect(t *testing.T) map[string]bool {
+	t.Helper()
+	dir := filepath.Join("..", "collect")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	decl := regexp.MustCompile(`(\w+)\s*=\s*routeros\.Cmd\{\s*Path:\s*"(/[^"]+)"`)
+	sub := regexp.MustCompile(`menu:\s*(\w+)\.Path`)
+
+	out := map[string]bool{}
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(b)
+		paths := map[string]string{}
+		for _, m := range decl.FindAllStringSubmatch(src, -1) {
+			paths[m[1]] = m[2]
+		}
+		for _, m := range sub.FindAllStringSubmatch(src, -1) {
+			if p, ok := paths[m[1]]; ok {
+				out[p] = true
+			}
+		}
+	}
+	if len(out) < 10 {
+		t.Fatalf("found only %d subscribed menu(s); the `menu: xxxCmd.Path` pattern "+
+			"has stopped matching and this check is measuring nothing", len(out))
+	}
+	return out
+}
+
+// TestAPinnedPollRouterIsNotOverriddenByTheTable. Enabling a collector in B.4 is
+// this project saying a menu is SAFE to stream. It must not override the
+// operator's own per-router choice, which is the whole point of the toggle the
+// automatic switch was rejected in favour of.
+func TestAPinnedPollRouterIsNotOverriddenByTheTable(t *testing.T) {
+	const menu, key = "/ip/dns/print", "dns"
+	streamableMenus[menu] = key
+	defer delete(streamableMenus, menu)
+
+	s := &Session{}
+	s.eff.Stream = map[string]bool{key: false} // the operator pinned this router
+	if s.streamsMenu(menu) {
+		t.Error("a router with the collector set to Poll streamed anyway. The table " +
+			"says a menu CAN be streamed; eff.Stream says whether this router does.")
+	}
+
+	s.eff.Stream = map[string]bool{key: true}
+	if !s.streamsMenu(menu) {
+		t.Error("a router set to Stream, on a menu the table allows, did not stream")
+	}
+
+	// And the other direction: allowed by the router, absent from the table.
+	if s.streamsMenu("/ip/route/print") {
+		t.Error("a menu absent from the table streamed. The table is the gate that " +
+			"keeps B.4 to one collector at a time.")
+	}
+}

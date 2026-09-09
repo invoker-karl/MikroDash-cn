@@ -90,6 +90,10 @@ type Cache struct {
 	// fills are the menus kept current by an open channel rather than by a read.
 	// Guarded by `mu`, like `entries`, because `Get` consults both. See stream.go.
 	fills map[string]*streamFill
+	// streamWhen answers "may this menu be streamed". Set once per session by
+	// the caller, which is the only thing that knows which collector owns a menu
+	// and what the router's config says about it. See StreamWhen.
+	streamWhen func(menu string) bool
 
 	// The demand set, on its own lock. SEPARATE FROM `mu` deliberately: `Get`
 	// holds `mu` and must never wait on a page opening or closing, and a

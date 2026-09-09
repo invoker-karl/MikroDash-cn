@@ -281,6 +281,37 @@ func (f *streamFill) watch(s Streamer, done <-chan struct{}) {
 	}
 }
 
+// StreamWhen installs the decision: for a menu about to be subscribed, may it be
+// kept current by a channel instead of a read?
+//
+// ── ONE TABLE, NOT TWENTY-TWO COLLECTOR EDITS ───────────────────────────────
+//
+// The obvious plumbing was to give every collector a "should I stream" function
+// at construction. That is twenty-two edits to say one thing, and twenty-two
+// places for it to drift -- the defect `rooms.go` exists to record.
+//
+// The decision is keyed by MENU, which is what this package already speaks, and
+// the caller resolves the rest: it knows which collector owns a menu and what
+// `eff.Stream` says about it. So this is set ONCE per session and `scheduled`
+// asks rather than being told.
+//
+// Nil means "poll everything", which is the state of every session until the
+// caller says otherwise.
+func (c *Cache) StreamWhen(fn func(menu string) bool) {
+	c.mu.Lock()
+	c.streamWhen = fn
+	c.mu.Unlock()
+}
+
+// StreamsMenu is the decision for one menu. Exported because `scheduled` in
+// internal/collect is the caller.
+func (c *Cache) StreamsMenu(menu string) bool {
+	c.mu.Lock()
+	fn := c.streamWhen
+	c.mu.Unlock()
+	return fn != nil && fn(menu)
+}
+
 // fillFor returns the stream backing a menu, or nil.
 func (c *Cache) fillFor(menu string) *streamFill {
 	c.mu.Lock()

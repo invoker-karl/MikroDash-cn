@@ -29,6 +29,8 @@ package collect
 // only ever one.
 
 import (
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,22 +72,24 @@ type scheduled struct {
 	cadence func() time.Duration
 	apply   func([]routeros.Reply, error)
 
-	// ── B.2: THE DELIVERY HALF ──────────────────────────────────────────────
+	// ── B.2/B.3: THE DELIVERY HALF ──────────────────────────────────────────
 	//
-	// `stream` answers "should this collector's menu be pushed rather than
-	// polled", and it is a FUNCTION rather than a bool because the answer comes
-	// from `eff.Stream[key]`, which a collector reads through the session. Nil
-	// means "poll", which is what every collector does today.
+	// WHETHER to stream is NOT a field. It is asked of the cache, which was told
+	// once per session by the only thing that knows which collector owns a menu
+	// and what the router's config says -- see roscache.StreamWhen. A field here
+	// would be the same answer in twenty-two places.
 	//
-	// `streamKey` names a row for the rolling map. Its absence is not a
-	// convenience default: a fill with no key holds ONE row, so a collector that
-	// wants a stream must say how its rows are identified. See
-	// roscache.FillFromStream.
+	// These two are the HOW, and both default:
 	//
-	// `streamArgs` are the arguments the stream is opened with -- the interval
-	// and the proplist. Separate from `fields` because `fields` is the
-	// subscription's union and this is one command's argument list.
-	stream     func() bool
+	//	streamKey   names a row for the rolling map. Defaults to RouterOS `.id`,
+	//	            which every `/print` row carries. `monitor-traffic` is the
+	//	            one that needs its own -- it keys by interface `name`.
+	//	streamArgs  the arguments the channel is opened with. Defaults to the
+	//	            cadence as `=interval=` plus this subscription's proplist, so
+	//	            a streamed menu asks for exactly what the polled one did.
+	//
+	// The defaults are what make B.4 one line per collector rather than an edit
+	// to each.
 	streamKey  func(routeros.Reply) string
 	streamArgs func() []string
 
@@ -157,6 +161,36 @@ func (s *scheduled) begin() {
 	s.fillIfStreaming(menu)
 }
 
+// keyByID is the default row key: RouterOS `.id`, which every `/print` row
+// carries and which is stable across re-prints. A menu whose rows have no `.id`
+// -- `monitor-traffic` is the one -- must supply its own, and `FillFromStream`
+// counts the rows it could not name so that is discoverable rather than silent.
+func keyByID(r routeros.Reply) string { return r[".id"] }
+
+// defaultStreamArgs opens the channel asking for exactly what the polled read
+// asked for: this subscription's proplist, at this subscription's cadence.
+//
+// THE INTERVAL IS THE CADENCE, which is the operator's rule -- "mode switches
+// delivery only and never touches intervals". A stream that pushed faster than
+// the poll would have been a silent change of the setting.
+//
+// RouterOS takes `=interval=` in SECONDS, so a sub-second cadence floors to one:
+// that is the fastest the protocol expresses, and rounding to zero would ask for
+// a stream with no interval at all.
+func defaultStreamArgs(cadence func() time.Duration, fields []string) []string {
+	sec := 1
+	if cadence != nil {
+		if d := cadence(); d >= time.Second {
+			sec = int(d / time.Second)
+		}
+	}
+	args := []string{"=interval=" + strconv.Itoa(sec)}
+	if len(fields) > 0 {
+		args = append(args, "=.proplist="+strings.Join(fields, ","))
+	}
+	return args
+}
+
 // fillIfStreaming asks the cache to keep this menu current from an open channel
 // instead of from a read.
 //
@@ -181,24 +215,33 @@ func (s *scheduled) begin() {
 // The instrument for that is a stream counter in `roslimit`, which does not
 // exist.
 func (s *scheduled) fillIfStreaming(menu string) {
+	if s.cache == nil {
+		return
+	}
 	s.mu.Lock()
-	want, keyOf, args := s.stream, s.streamKey, s.streamArgs
+	keyOf, args := s.streamKey, s.streamArgs
+	cadence, fields := s.cadence, s.fields
 	already := s.unfill != nil
 	s.mu.Unlock()
-	// NO `keyOf == nil` CHECK HERE, DELIBERATELY. `FillFromStream` refuses a nil
-	// key function and this falls back to polling on any refusal, so a check here
-	// would be the same rule in a second place -- and a rule stated twice is what
-	// `rooms.go` exists to stop, after the room lists disagreed five times. The
-	// cost is one call into the cache before the refusal, which happens once per
-	// begin.
-	if already || want == nil || !want() || s.cache == nil {
+	if already || !s.cache.StreamsMenu(menu) {
 		return
+	}
+	// NO `keyOf == nil` CHECK, DELIBERATELY. `FillFromStream` refuses a nil key
+	// and this falls back to polling on any refusal, so a check here would be
+	// the same rule in a second place -- what `rooms.go` exists to stop, after
+	// the room lists disagreed five times. `keyByID` is a DEFAULT rather than a
+	// guard: it is the right key for every `/print` menu.
+	if keyOf == nil {
+		keyOf = keyByID
 	}
 
 	cmd := routeros.Cmd{Path: menu}
 	if args != nil {
 		cmd.Args = args()
+	} else {
+		cmd.Args = defaultStreamArgs(cadence, fields)
 	}
+
 	stop, err := s.cache.FillFromStream(menu, cmd, keyOf)
 	if err != nil {
 		return // polling, which is what the subscription already does

@@ -924,6 +924,14 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	} {
 		c.UseCache(s.roscache)
 	}
+	// ── B.3: AND THE DELIVERY DECISION, ONCE ────────────────────────────────
+	//
+	// The cache asks this before it subscribes a menu. Set here rather than per
+	// collector because this is the only place that knows both halves: which
+	// collector owns a menu, and what this router's resolved config says about
+	// it. See streammenus.go, and note that the table it consults is EMPTY --
+	// B.4 fills it one collector at a time.
+	s.roscache.StreamWhen(s.streamsMenu)
 
 	m.live[routerID] = s
 	go s.connectLoop()
