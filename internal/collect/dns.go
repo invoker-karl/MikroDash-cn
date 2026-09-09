@@ -281,19 +281,60 @@ func (d *DNS) apply(rows []routeros.Reply, err error) {
 	d.applyLocked(rows, err)
 }
 
+// DNSInput is one tick's worth of the outside world, for BuildDNS.
+//
+// A struct rather than five arguments, matching `ConnsInput`: the fields are
+// named at the call site, and one added later does not re-order anything.
+type DNSInput struct {
+	// Rows is the settings menu's reply. Only the first row is read -- the menu
+	// is a singleton -- and an empty slice is an ordinary state rather than an
+	// error: a router asked before it has answered has no rows.
+	Rows []routeros.Reply
+	// Static is the static-entry table, carried between ticks by the collector
+	// because it is read on a slow lane and the payload needs it on every tick.
+	Static []DNSStaticEntry
+	// Available is the menu-presence latch. NIL MEANS "NOT YET KNOWN", which
+	// reads as available -- a router is presumed to have DNS until it says
+	// otherwise, and the alternative would blank the page on the first tick.
+	Available *bool
+	PollMs    int
+	Now       int64
+}
+
+// BuildDNS is the DNS payload, pure: input in, payload out, no receiver and no
+// I/O.
+//
+// ── PHASE 4.1: WHY THIS IS A FUNCTION AND NOT A METHOD ──────────────────────
+//
+// The derivation layer's rule is that turning rows into a payload must be
+// testable without a collector, a session or a router. `BuildBandwidth(prev, in)`
+// and `BuildQueueRows(rows, prev, now)` already have this shape; this follows
+// them rather than inventing a second one.
+//
+// The SETTINGS are parsed here rather than by the caller, so the payload and the
+// collector's own copy cannot come from two different parses of the same row --
+// the caller takes `payload.Settings` back.
+func BuildDNS(in DNSInput) *DNSPayload {
+	var first routeros.Reply
+	if len(in.Rows) > 0 {
+		first = in.Rows[0]
+	}
+	return &DNSPayload{
+		TS: in.Now, PollMs: in.PollMs,
+		Settings: ParseDNSSettings(first), StaticEntries: in.Static,
+		Available: in.Available == nil || *in.Available,
+	}
+}
+
 // applyLocked builds and emits. The caller holds the lock.
 func (d *DNS) applyLocked(rows []routeros.Reply, _ error) {
-	var first routeros.Reply
-	if len(rows) > 0 {
-		first = rows[0]
-	}
-	d.settings = ParseDNSSettings(first)
-
-	payload := &DNSPayload{
-		TS: time.Now().UnixMilli(), PollMs: d.pollMs.ms(),
-		Settings: d.settings, StaticEntries: d.static,
-		Available: d.settingsAvailable == nil || *d.settingsAvailable,
-	}
+	payload := BuildDNS(DNSInput{
+		Rows: rows, Static: d.static, Available: d.settingsAvailable,
+		PollMs: d.pollMs.ms(), Now: time.Now().UnixMilli(),
+	})
+	// TAKEN BACK FROM THE PAYLOAD rather than parsed again, so the collector's
+	// copy and the page's cannot disagree about the same row.
+	d.settings = payload.Settings
 	d.last = payload
 
 	// The WHOLE entry, not a hand-picked tuple, matching the Node side.

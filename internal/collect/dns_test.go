@@ -10,6 +10,7 @@ package collect
 // how the port was told to follow. They now pin the fixed behaviour.
 
 import (
+	"reflect"
 	"testing"
 
 	"mikrodash/internal/routeros"
@@ -109,5 +110,81 @@ func TestRefreshNowRereadsTheStaticTable(t *testing.T) {
 	d.RefreshNow()
 	if got := d.Last().StaticEntries[0].Address; got != "198.51.100.9" {
 		t.Errorf("RefreshNow did not re-read the static table; address = %q", got)
+	}
+}
+
+// ── PHASE 4.1: THE DERIVATION, TESTED WITHOUT A COLLECTOR ──────────────────
+//
+// The point of extracting a builder is that the rows-to-payload step becomes
+// testable without a collector, a session or a router. These cases could not have
+// been written against `applyLocked`: it needs a `*DNS` with a lock, a poll
+// interval, an emit function and carried static entries.
+
+func TestBuildDNSIsPure(t *testing.T) {
+	static := []DNSStaticEntry{{Name: "a.example", Address: "10.0.0.1"}}
+	yes, no := true, false
+
+	for _, tc := range []struct {
+		name      string
+		in        DNSInput
+		available bool
+	}{{
+		// NIL MEANS NOT YET KNOWN, and it must read as available: a router is
+		// presumed to have DNS until it says otherwise, and the alternative
+		// blanks the page on the first tick before anything has answered.
+		name:      "unknown availability reads as available",
+		in:        DNSInput{Rows: []routeros.Reply{{"servers": "1.1.1.1"}}, Available: nil},
+		available: true,
+	}, {
+		name:      "an explicit yes",
+		in:        DNSInput{Rows: []routeros.Reply{{"servers": "1.1.1.1"}}, Available: &yes},
+		available: true,
+	}, {
+		// A router whose DNS menu is missing. The page must be told, not left
+		// looking at an empty table it cannot distinguish from "no servers set".
+		name:      "an explicit no survives",
+		in:        DNSInput{Rows: []routeros.Reply{{"servers": "1.1.1.1"}}, Available: &no},
+		available: false,
+	}, {
+		// NO ROWS IS NOT AN ERROR. A scheduled read that has not answered yet
+		// hands over an empty slice, and building from it must not panic on
+		// rows[0] — which is the one thing a five-argument version of this
+		// would have made easy to get wrong at a second call site.
+		name:      "no rows at all",
+		in:        DNSInput{Rows: nil, Available: &yes},
+		available: true,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := tc.in
+			in.Static, in.PollMs, in.Now = static, 10000, 1234
+			got := BuildDNS(in)
+			if got.Available != tc.available {
+				t.Errorf("Available = %v, want %v", got.Available, tc.available)
+			}
+			if got.PollMs != 10000 || got.TS != 1234 {
+				t.Errorf("pollMs=%d ts=%d; the builder invented a clock or an interval",
+					got.PollMs, got.TS)
+			}
+			if len(got.StaticEntries) != 1 || got.StaticEntries[0].Name != "a.example" {
+				t.Errorf("static entries = %v; they are carried between ticks and must "+
+					"pass through untouched", got.StaticEntries)
+			}
+		})
+	}
+}
+
+// TestBuildDNSTakesNoClockOfItsOwn. A derivation that reads the wall clock is not
+// pure and cannot be replayed against a fixture: the same input would produce a
+// different payload on every run, and the fingerprint that suppresses redundant
+// emits would never match.
+func TestBuildDNSTakesNoClockOfItsOwn(t *testing.T) {
+	in := DNSInput{Rows: []routeros.Reply{{"servers": "9.9.9.9"}}, PollMs: 5000, Now: 42}
+	a, b := BuildDNS(in), BuildDNS(in)
+	if a.TS != 42 || b.TS != 42 {
+		t.Fatalf("ts %d and %d; the builder is reading time.Now rather than its input", a.TS, b.TS)
+	}
+	// DeepEqual: DNSSettings holds a []string, so it is not comparable with ==.
+	if !reflect.DeepEqual(a.Settings, b.Settings) {
+		t.Error("the same rows produced two different settings")
 	}
 }
