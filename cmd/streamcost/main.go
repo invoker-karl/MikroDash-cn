@@ -62,6 +62,8 @@ func main() {
 		rname   = flag.String("router", "", "the router's label, or its host")
 		seconds = flag.Int("seconds", 30, "how long to hold each channel open")
 		few     = flag.Int("few", 2, "how many interfaces stand in for what `traffic` watches today")
+		chans   = flag.Int("channels", 0, "B.0b: instead of the width measurement, open up to N CONCURRENT channels and report the router's ceiling and any starvation")
+		hold    = flag.Int("hold", 4, "B.0b: seconds to hold and measure at each channel width")
 	)
 	flag.Parse()
 
@@ -95,6 +97,19 @@ func main() {
 	small := names
 	if len(small) > *few {
 		small = small[:*few]
+	}
+
+	// ── B.0b: THE CHANNEL BUDGET, WHICH IS A DIFFERENT QUESTION ─────────────
+	//
+	// See channels.go. B.0 costed one WIDE channel; this costs MANY. Track B
+	// depends on the answer, so it is the same tool rather than a second one:
+	// the dial, the credential handling and the CPU sampling are already here.
+	if *chans > 0 {
+		fmt.Printf("  B.0b — up to %d concurrent channels, %ds at each width\n\n", *chans, *hold)
+		control := measure(c, nil, *hold)
+		mean, _ := control.cpuStats()
+		reportChannels(measureChannels(c, names, *chans, *hold), mean)
+		return
 	}
 
 	// THE CONTROL COMES FIRST and it is not optional. A CPU figure with nothing
