@@ -68,6 +68,24 @@ var streamableMenus = map[string]string{
 	//
 	// Probed 2026-09-09: streams, 3 rows in 3s, first row 41ms.
 	"/system/resource/print": "system",
+
+	// ── THE HEAVIEST TABLE IN THE APP, AND IT NEEDED B.6 FIRST ──────────────
+	//
+	// TWO consumers share this entry: `connections` and `bandwidth` subscribe to
+	// it with byte-identical proplists, so ONE channel now serves both -- which
+	// is the coalescing property proved at the delivery layer rather than at the
+	// read.
+	//
+	// It was refused until B.6. Connections open and close constantly, and
+	// without a round boundary the entry could only accumulate: closed
+	// connections would have piled up for the life of the session on a page that
+	// looked populated. It is off that list because a round boundary is found
+	// now, and it is safe from the residual empty-table limitation for a reason
+	// worth stating -- a router with ZERO connections is not a real state, since
+	// the API session reading the table is itself one.
+	//
+	// Probed 2026-09-09: streams, 956 rows in 3s at interval=1.
+	"/ip/firewall/connection/print": "conns",
 }
 
 // streamsMenu answers roscache's question: may this menu be pushed?

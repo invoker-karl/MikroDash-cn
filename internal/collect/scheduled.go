@@ -259,7 +259,16 @@ func (s *scheduled) fillIfStreaming(menu string) {
 		cmd.Args = defaultStreamArgs(cadence, fields)
 	}
 
-	stop, err := s.cache.FillFromStream(menu, cmd, keyOf)
+	// THE BOUNDARY IS THE CADENCE. A round of a `/print =interval=N` ends when
+	// the next one starts, and a quiet gap longer than the interval is what says
+	// so for a table small enough to arrive in a burst. See absorb.
+	boundary := time.Second
+	if cadence != nil {
+		if d := cadence(); d > 0 {
+			boundary = d
+		}
+	}
+	stop, err := s.cache.FillFromStream(menu, cmd, keyOf, boundary)
 	if err != nil {
 		return // polling, which is what the subscription already does
 	}

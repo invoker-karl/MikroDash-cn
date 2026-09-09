@@ -78,42 +78,36 @@ var unrollable = map[string]string{
 		"a rolling entry keeps only the latest and would report 0% loss for ever",
 	"/log/listen": "every row is a distinct event; a rolling entry drops lines",
 
-	// ── KIND TWO: THE ROWS ARE READINGS, BUT THE MEMBERSHIP CHURNS ──────────
+	// ── KIND TWO: THE TABLE CAN BE LEGITIMATELY EMPTY ───────────────────────
 	//
-	// THE ROLLING MAP NEVER FORGETS. `absorb` adds and replaces; nothing
-	// removes. A re-print simply omits a row that has gone, and with no `!done`
-	// between rounds there is no sweep boundary to detect, so a departed row
-	// stays in the entry for the life of the session.
+	// THIS LIST USED TO BE ABOUT CHURN, and B.6 removed that reason. A round
+	// boundary is found now -- a repeated key, or a gap longer than the cadence
+	// -- so a row that LEAVES the table is forgotten and the entry no longer
+	// grows without bound. The connection table came off this list because of it.
 	//
-	// On a menu whose membership is CONFIG that is exactly right: interfaces,
-	// VLANs and netwatch hosts change when somebody edits the router, and the
-	// next reading of each replaces the last. On a menu whose membership churns
-	// it is a slow, silent corruption -- the map grows without bound and the
-	// page shows connections that closed, clients that left and leases that
-	// expired, indefinitely. Nothing errors.
+	// WHAT REMAINS IS NARROWER AND IT IS REAL. A table with NO ROWS sends
+	// nothing, and nothing is indistinguishable from a stream that has died --
+	// which the watchdog, correctly, treats as death and reopens. So an emptied
+	// table holds its last contents instead of emptying.
 	//
-	// FOUND BEFORE IT SHIPPED, and only because `/ip/firewall/connection/print`
-	// was the next collector to be enabled: it is the heaviest table in the app
-	// AND the fastest-churning, so it would have demonstrated the bug at full
-	// scale. Recorded here as a refusal rather than as a caution, because the
-	// symptom is a page that looks populated and is wrong.
+	// That is bounded by the next row rather than by the session, so it is a far
+	// smaller error than the growth it replaced. It is still an error, and these
+	// are the menus where "empty" is an ORDINARY state rather than an exotic one:
+	// a router with no wireless clients associated, no PPP sessions and no
+	// kid-control devices is a completely normal router, and the visible result
+	// would be ghost clients on a page that should read empty.
 	//
-	// Lifting this needs sweep detection -- notice a key repeating, and swap
-	// buffers -- which B.1 deliberately does not have. Until then these menus
-	// poll, which costs commands and is correct.
-	"/ip/firewall/connection/print": "membership churns constantly and the rolling map " +
-		"never forgets; closed connections would accumulate for ever",
-	"/interface/wifi/registration-table/print": "clients associate and leave; a departed " +
-		"client would stay on the WiFi Clients page for ever",
+	// Lifting these needs the empty case solved, not more boundary detection.
+	"/interface/wifi/registration-table/print": "no associated clients is an ordinary " +
+		"state, and an empty table is indistinguishable from a dead stream; departed " +
+		"clients would linger on the WiFi Clients page",
 	"/interface/wireless/registration-table/print": "same as the wifi registration table",
 	"/caps-man/registration-table/print":           "same as the wifi registration table",
-	"/interface/bridge/host/print": "a MAC is learned or ages out with no configuration " +
-		"change; aged-out hosts would never leave the topology",
-	"/ip/dhcp-server/lease/print": "dynamic leases expire; an expired lease would stay " +
-		"on the page and in the name lookups for ever",
-	"/ppp/active/print":            "sessions come and go; a closed session would stay active for ever",
-	"/ip/neighbor/print":           "neighbours appear and disappear as devices join and leave",
-	"/ip/kid-control/device/print": "devices come and go",
+	"/ppp/active/print": "no active sessions is an ordinary state; this fleet's routers " +
+		"all report an empty table today",
+	"/ip/kid-control/device/print": "no devices is an ordinary state",
+	"/ip/dhcp-server/lease/print": "a server with no current leases is an ordinary state, " +
+		"and a lingering lease feeds the name lookups on three other pages",
 }
 
 // streamStale is how long an open channel may deliver nothing before the
@@ -137,9 +131,20 @@ type streamFill struct {
 	cmd   routeros.Cmd
 	keyOf func(routeros.Reply) string
 
-	mu      sync.Mutex
-	rows    map[string]routeros.Reply
-	lastRow time.Time
+	mu sync.Mutex
+	// rows is the last COMPLETE round: what `snapshot` serves.
+	rows map[string]routeros.Reply
+	// round is the round being received. See absorb for how its end is found.
+	round map[string]routeros.Reply
+	// published is false until the first round has completed, and while it is
+	// false `snapshot` serves the ACCUMULATING round instead. Without it a page
+	// would be blank for a whole interval after the channel opens, which is the
+	// hang B.1 exists to remove rather than introduce.
+	published bool
+	// boundary is how long a quiet gap must be to end a round. Derived from the
+	// subscription's cadence by the caller.
+	boundary time.Duration
+	lastRow  time.Time
 	// unkeyed counts rows the key function could not name. A menu that produces
 	// any is one a rolling map cannot represent, and the count is the only way
 	// to find that out from outside.
@@ -156,6 +161,8 @@ type streamFill struct {
 	// a test, and worth having: a channel restarting steadily is a router
 	// problem that would otherwise look like a slow page.
 	restarts int
+	// rounds is how many complete rounds have been published.
+	rounds int
 }
 
 // FillFromStream opens a channel and keeps `menu`'s entry current from it, so
@@ -167,14 +174,14 @@ type streamFill struct {
 //
 // The returned stop closes the channel and drops the fill. It is idempotent.
 func (c *Cache) FillFromStream(menu string, cmd routeros.Cmd,
-	keyOf func(routeros.Reply) string) (func(), error) {
-	return c.fillEvery(menu, cmd, keyOf, streamCheck, streamStale)
+	keyOf func(routeros.Reply) string, boundary time.Duration) (func(), error) {
+	return c.fillEvery(menu, cmd, keyOf, boundary, streamCheck, streamStale)
 }
 
 // fillEvery is FillFromStream with the watchdog's timings injected. Unexported:
 // the intervals are a property of the mechanism, not a caller's choice.
 func (c *Cache) fillEvery(menu string, cmd routeros.Cmd,
-	keyOf func(routeros.Reply) string, check, stale time.Duration) (func(), error) {
+	keyOf func(routeros.Reply) string, boundary, check, stale time.Duration) (func(), error) {
 
 	if why, no := unrollable[menu]; no {
 		return nil, fmt.Errorf("roscache: %s cannot be stream-filled: %s", menu, why)
@@ -196,8 +203,9 @@ func (c *Cache) fillEvery(menu string, cmd routeros.Cmd,
 		c.mu.Unlock()
 		return nil, fmt.Errorf("roscache: %s is already stream-filled", menu)
 	}
-	f := &streamFill{cmd: cmd, keyOf: keyOf, rows: map[string]routeros.Reply{},
-		check: check, stale: stale}
+	f := &streamFill{cmd: cmd, keyOf: keyOf,
+		rows: map[string]routeros.Reply{}, round: map[string]routeros.Reply{},
+		boundary: boundary, check: check, stale: stale}
 	c.fills[menu] = f
 	c.mu.Unlock()
 
@@ -240,12 +248,57 @@ func (f *streamFill) open(s Streamer) error {
 	return nil
 }
 
-// absorb folds one pushed row into the rolling map.
+// absorb folds one pushed row into the round being received.
+//
+// ── FINDING THE END OF A ROUND, WHICH THE PROTOCOL DOES NOT MARK ────────────
+//
+// A `/print =interval=N` re-prints the WHOLE table every interval and sends no
+// `!done` between rounds. Measured 2026-09-09: `/tool/netwatch/print` returned 9
+// rows in 3s for 3 configured hosts, `/ip/dns/print` 4 rows for 1. Three
+// re-prints, no separator.
+//
+// Without a boundary the entry can only ever accumulate, and a row that LEAVES
+// the table never leaves the map -- closed connections, departed clients and
+// expired leases pile up for the life of the session, on a page that looks
+// populated. That is why every churning menu was refused.
+//
+// TWO SIGNALS, because neither is sufficient alone:
+//
+//	A KEY REPEATS   the round has restarted. Reliable precisely because the
+//	                re-print is total: every row still present appears in every
+//	                round, so a repeat is certain unless the entire membership
+//	                turned over at once. This is the signal that works when the
+//	                table is large enough that rounds arrive back to back with no
+//	                gap between them.
+//	A QUIET GAP     nothing for longer than the cadence. This is what ends the
+//	                round for a small table, where the rows arrive in a burst and
+//	                then silence, and a repeat would otherwise be a whole
+//	                interval away.
+//
+// ── WHAT THIS STILL DOES NOT SOLVE, NAMED RATHER THAN GLOSSED ──────────────
+//
+// A table that becomes COMPLETELY EMPTY sends nothing at all, which is
+// indistinguishable from a stream that has died -- and the watchdog, correctly,
+// treats prolonged silence as death and reopens. So an emptied table holds its
+// last contents rather than emptying.
+//
+// That is a far smaller error than the unbounded growth it replaces, and it is
+// bounded by the next row rather than by the session. It is still an error, and
+// it is why the registration tables stay refused: "no wireless clients" is an
+// ordinary state, and ghost clients would be the visible result.
 func (f *streamFill) absorb(r routeros.Reply) {
 	k := f.keyOf(r)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	// A GAP ENDS THE PREVIOUS ROUND, and this is checked before the repeat so a
+	// small table's round closes on time rather than an interval late.
+	if f.boundary > 0 && len(f.round) > 0 && !f.lastRow.IsZero() &&
+		time.Since(f.lastRow) > f.boundary {
+		f.finishRoundLocked()
+	}
 	f.lastRow = time.Now()
+
 	if k == "" {
 		// NOT DROPPED SILENTLY. A menu whose rows this cannot name is one a
 		// rolling map cannot represent, and the count is what makes that
@@ -253,7 +306,24 @@ func (f *streamFill) absorb(r routeros.Reply) {
 		f.unkeyed++
 		return
 	}
-	f.rows[k] = r
+	if _, repeat := f.round[k]; repeat {
+		f.finishRoundLocked()
+	}
+	if f.round == nil {
+		f.round = map[string]routeros.Reply{}
+	}
+	f.round[k] = r
+}
+
+// finishRoundLocked publishes the round just received. Caller holds f.mu.
+func (f *streamFill) finishRoundLocked() {
+	if len(f.round) == 0 {
+		return
+	}
+	f.rows = f.round
+	f.round = map[string]routeros.Reply{}
+	f.published = true
+	f.rounds++
 }
 
 // snapshot is the current value of every key, sorted. See the header on why the
@@ -261,14 +331,21 @@ func (f *streamFill) absorb(r routeros.Reply) {
 func (f *streamFill) snapshot() []routeros.Reply {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	keys := make([]string, 0, len(f.rows))
-	for k := range f.rows {
+	src := f.rows
+	if !f.published {
+		// The first round is still arriving. Serving it partially fills the page
+		// a whole interval sooner than waiting, and the next round replaces it
+		// wholesale.
+		src = f.round
+	}
+	keys := make([]string, 0, len(src))
+	for k := range src {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	out := make([]routeros.Reply, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, f.rows[k])
+		out = append(out, src[k])
 	}
 	return out
 }
@@ -293,6 +370,14 @@ func (f *streamFill) watch(s Streamer, done <-chan struct{}) {
 			return
 		case <-t.C:
 			f.mu.Lock()
+			// A ROUND THAT HAS GONE QUIET IS OVER. `absorb` can only notice a
+			// gap when the NEXT row arrives, which for a table read once a
+			// minute is a minute late; this closes it on time. Same rule, the
+			// other side of the silence.
+			if f.boundary > 0 && len(f.round) > 0 && !f.lastRow.IsZero() &&
+				time.Since(f.lastRow) > f.boundary {
+				f.finishRoundLocked()
+			}
 			quiet := time.Since(f.lastRow)
 			shut := f.closed
 			stop := f.stop

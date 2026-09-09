@@ -60,7 +60,7 @@ func byName(r routeros.Reply) string { return r["name"] }
 
 func fill(t *testing.T, c *Cache, menu string) func() {
 	t.Helper()
-	stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName)
+	stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName, time.Hour)
 	if err != nil {
 		t.Fatalf("FillFromStream(%s): %v", menu, err)
 	}
@@ -89,10 +89,21 @@ func TestAStreamedMenuAnswersGetWithoutReading(t *testing.T) {
 	}
 }
 
-// TestARowReplacesItsOwnKeyAndOnlyThat is the rolling map. A second reading of
-// ether1 must REPLACE the first and leave ether2 alone; a map that appended
-// would grow without bound and serve stale rates beside live ones.
-func TestARowReplacesItsOwnKeyAndOnlyThat(t *testing.T) {
+// TestAKeyRepeatEndsTheRound.
+//
+// ── THIS TEST USED TO ASSERT A ROLLING MAP, AND B.6 IS WHY IT CHANGED ───────
+//
+// It was `TestARowReplacesItsOwnKeyAndOnlyThat`: three pushes of two names left
+// two rows, with the second `ether1` replacing the first. That was right for a
+// map that only ever accumulates, and it is wrong now.
+//
+// A `/print =interval=N` re-prints the WHOLE table each round with no separator,
+// so a repeated key means the round has RESTARTED. The second `ether1` therefore
+// belongs to the next round, and serving it would publish a table missing
+// `ether2` — a page that flickers a row out and back on every interval.
+//
+// So the completed round is served whole, and the new one accumulates unseen.
+func TestAKeyRepeatEndsTheRound(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
 	defer fill(t, c, "/interface/monitor-traffic")()
@@ -100,18 +111,94 @@ func TestARowReplacesItsOwnKeyAndOnlyThat(t *testing.T) {
 	p.push(
 		routeros.Reply{"name": "ether1", "rx-bits-per-second": "100"},
 		routeros.Reply{"name": "ether2", "rx-bits-per-second": "200"},
-		routeros.Reply{"name": "ether1", "rx-bits-per-second": "999"},
+		routeros.Reply{"name": "ether1", "rx-bits-per-second": "999"}, // round 2 begins
 	)
 
 	rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second)
 	if len(rows) != 2 {
-		t.Fatalf("%d rows after three pushes, want 2 — the map is appending, not rolling", len(rows))
+		t.Fatalf("%d rows, want the 2 of the completed round", len(rows))
 	}
-	if rows[0]["name"] != "ether1" || rows[0]["rx-bits-per-second"] != "999" {
-		t.Errorf("ether1 = %v, want the LATEST reading", rows[0])
+	if rows[0]["rx-bits-per-second"] != "100" || rows[1]["rx-bits-per-second"] != "200" {
+		t.Errorf("served %v; a partial round was published, so the page would lose a "+
+			"row and get it back on every interval", rows)
 	}
-	if rows[1]["name"] != "ether2" || rows[1]["rx-bits-per-second"] != "200" {
-		t.Errorf("ether2 = %v; replacing ether1 disturbed it", rows[1])
+
+	// Round two completes: now the newer reading is the one served.
+	p.push(
+		routeros.Reply{"name": "ether2", "rx-bits-per-second": "888"},
+		routeros.Reply{"name": "ether1"}, // round 3 begins, publishing round 2
+	)
+	rows, _ = c.Get("/interface/monitor-traffic", nil, time.Second)
+	if len(rows) != 2 || rows[0]["rx-bits-per-second"] != "999" {
+		t.Errorf("after the second round completed, served %v — want the newer readings", rows)
+	}
+}
+
+// TestARowThatLEAVESTheTableIsForgotten is the whole point of B.6, and the
+// property whose ABSENCE kept nine menus refused.
+//
+// Without a round boundary the entry can only accumulate: a closed connection, a
+// departed client or an expired lease stays for the life of the session, on a
+// page that looks populated and is wrong.
+func TestARowThatLeavesTheTableIsForgotten(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	defer fill(t, c, "/interface/monitor-traffic")()
+
+	// Round one: three rows.
+	p.push(routeros.Reply{"name": "a"}, routeros.Reply{"name": "b"}, routeros.Reply{"name": "c"})
+	// Round two: `b` has gone. The repeat of `a` closes round one.
+	p.push(routeros.Reply{"name": "a"}, routeros.Reply{"name": "c"})
+	// Round three begins, publishing round two.
+	p.push(routeros.Reply{"name": "a"})
+
+	rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second)
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, r["name"])
+	}
+	if len(names) != 2 || names[0] != "a" || names[1] != "c" {
+		t.Errorf("served %v, want [a c] — the row that left the table was not "+
+			"forgotten, which is the unbounded growth that kept the connection "+
+			"table, the registration tables and the lease table on the polled path", names)
+	}
+}
+
+// TestAQuietGapEndsTheRound. A repeat is a whole interval away for a small
+// table, so silence is the other signal: rows arrive in a burst and stop.
+func TestAQuietGapEndsTheRound(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
+		20*time.Millisecond, 5*time.Millisecond, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	p.push(routeros.Reply{"name": "a"}, routeros.Reply{"name": "b"})
+	// No repeat is coming; the watchdog tick must close the round on the gap.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		f := c.fillFor("/interface/monitor-traffic")
+		f.mu.Lock()
+		done := f.rounds > 0
+		f.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	f := c.fillFor("/interface/monitor-traffic")
+	f.mu.Lock()
+	rounds := f.rounds
+	f.mu.Unlock()
+	if rounds == 0 {
+		t.Error("a round that went quiet was never closed. For a table read once a " +
+			"minute the next repeat is a minute away, so silence has to end it.")
+	}
+	if rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second); len(rows) != 2 {
+		t.Errorf("%d rows after the quiet round closed, want 2", len(rows))
 	}
 }
 
@@ -153,7 +240,7 @@ func TestTheSnapshotOrderIsStable(t *testing.T) {
 func TestARowsAreEventsMenuIsRefused(t *testing.T) {
 	c := New(&pusher{})
 	for _, menu := range []string{"/tool/ping", "/log/listen"} {
-		stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName)
+		stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName, time.Hour)
 		if err == nil {
 			stop()
 			t.Errorf("%s was accepted for stream-filling. Its rows are distinct "+
@@ -167,7 +254,7 @@ func TestARowsAreEventsMenuIsRefused(t *testing.T) {
 // bucket and the entry quietly becomes "the last row the router sent".
 func TestAFillNeedsAKeyFunction(t *testing.T) {
 	c := New(&pusher{})
-	if _, err := c.FillFromStream("/interface/print", routeros.Cmd{}, nil); err == nil {
+	if _, err := c.FillFromStream("/interface/print", routeros.Cmd{}, nil, time.Hour); err == nil {
 		t.Error("a fill with no key function was accepted")
 	}
 }
@@ -227,7 +314,7 @@ func TestStoppingAFillReleasesTheChannelAndFallsBackToReading(t *testing.T) {
 func TestARefusedStreamIsNotLeftRegistered(t *testing.T) {
 	p := &pusher{refuse: errors.New("no")}
 	c := New(p)
-	if _, err := c.FillFromStream("/x", routeros.Cmd{}, byName); err == nil {
+	if _, err := c.FillFromStream("/x", routeros.Cmd{}, byName, time.Hour); err == nil {
 		t.Fatal("a refused stream reported success")
 	}
 	if got := c.StreamedMenus(); len(got) != 0 {
@@ -241,7 +328,7 @@ func TestTheSameMenuIsNotFilledTwice(t *testing.T) {
 	c := New(&pusher{})
 	stop := fill(t, c, "/interface/monitor-traffic")
 	defer stop()
-	if _, err := c.FillFromStream("/interface/monitor-traffic", routeros.Cmd{}, byName); err == nil {
+	if _, err := c.FillFromStream("/interface/monitor-traffic", routeros.Cmd{}, byName, time.Hour); err == nil {
 		t.Error("a second fill of the same menu was accepted — two channels, one answer")
 	}
 }
@@ -256,7 +343,7 @@ func TestTheSameMenuIsNotFilledTwice(t *testing.T) {
 func TestASilentChannelIsRestarted(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
+	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName, time.Hour,
 		5*time.Millisecond, 20*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +385,7 @@ func TestASilentChannelIsRestarted(t *testing.T) {
 func TestAHealthyChannelIsNotRestarted(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
+	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName, time.Hour,
 		5*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
@@ -390,66 +477,39 @@ func TestAStreamedMenuStillFiresOnDeliver(t *testing.T) {
 	}
 }
 
-// TestAChurningTableIsRefused.
+// TestATableThatCanBeEmptyIsRefused.
 //
-// ── THE SECOND KIND OF MENU A ROLLING MAP CANNOT HOLD ───────────────────────
+// ── THE SECOND KIND, NARROWED BY B.6 ───────────────────────────────────────
 //
-// The first kind is rows that are not readings of one value: `ping`, `logs`. The
-// second is rows that ARE readings, of a set whose MEMBERSHIP changes on its own.
+// The first kind is rows that are not readings of one value: `ping`, `logs`.
 //
-// `absorb` adds and replaces; nothing removes. A re-print omits a row that has
-// gone, and with no `!done` between rounds there is no sweep boundary to detect,
-// so a departed row stays for the life of the session. On config menus that is
-// right. On the connection table it means closed connections accumulate for ever
-// and the map grows without bound, with nothing erroring and a page that looks
-// populated.
+// The second USED TO BE churn, because the entry could only accumulate and a row
+// that left the table never left the map. B.6 found the round boundary, so that
+// reason is gone and the connection table came off this list.
 //
-// This was found with `/ip/firewall/connection/print` queued as the next
-// collector to enable — the heaviest table in the app and the fastest-churning,
-// so it would have shown the bug at full scale on live routers.
-func TestAChurningTableIsRefused(t *testing.T) {
+// What remains is narrower and real: a table with NO ROWS sends nothing, and
+// nothing is indistinguishable from a dead stream — which the watchdog treats as
+// death and reopens. So an EMPTIED table holds its last contents. Bounded by the
+// next row rather than by the session, but still wrong, and these are the menus
+// where empty is an ORDINARY state: a router with no associated clients and no
+// PPP sessions is a completely normal router.
+func TestATableThatCanBeEmptyIsRefused(t *testing.T) {
 	c := New(&pusher{})
 	churning := []string{
-		"/ip/firewall/connection/print",
 		"/interface/wifi/registration-table/print",
+		"/interface/wireless/registration-table/print",
 		"/ip/dhcp-server/lease/print",
-		"/interface/bridge/host/print",
 		"/ppp/active/print",
+		"/ip/kid-control/device/print",
 	}
 	for _, menu := range churning {
-		stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName)
+		stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName, time.Hour)
 		if err == nil {
 			stop()
-			t.Errorf("%s was accepted for stream-filling. Its membership churns and the "+
-				"rolling map never forgets, so departed rows would accumulate for the "+
-				"life of the session — a page that looks populated and is wrong.", menu)
+			t.Errorf("%s was accepted for stream-filling. It can be legitimately EMPTY, "+
+				"and an empty table sends nothing — which is indistinguishable from a "+
+				"dead stream, so the entry would hold its last contents and the page "+
+				"would show rows that have gone.", menu)
 		}
-	}
-}
-
-// TestTheRollingMapNeverForgets is the property the refusal above exists for,
-// asserted directly so the reason cannot become folklore.
-//
-// If a future change adds sweep detection, THIS TEST SHOULD FAIL — and that is
-// the signal to revisit the refusal list rather than to delete this.
-func TestTheRollingMapNeverForgets(t *testing.T) {
-	p := &pusher{}
-	c := New(p)
-	defer fill(t, c, "/interface/monitor-traffic")()
-
-	p.push(routeros.Reply{"name": "ether1"}, routeros.Reply{"name": "ether2"})
-	if rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second); len(rows) != 2 {
-		t.Fatalf("%d rows after the first sweep, want 2", len(rows))
-	}
-
-	// A second sweep that no longer mentions ether2, which is what a re-print of
-	// a table a row has left looks like.
-	p.push(routeros.Reply{"name": "ether1"})
-
-	rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second)
-	if len(rows) != 2 {
-		t.Fatalf("%d rows, want 2 — this test asserts the LIMITATION, and if the map "+
-			"has learned to forget then sweep detection has been added and the "+
-			"churning-table refusals in `unrollable` should be revisited.", len(rows))
 	}
 }
