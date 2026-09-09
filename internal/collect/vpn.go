@@ -307,19 +307,37 @@ func sliceUTF16(s string, n int) string {
 
 // buildTunnels turns the peer rows into the payload's array. Caller holds the
 // lock.
-func (v *VPN) buildTunnels() []Tunnel {
-	now := time.Now()
-	out := make([]Tunnel, 0, len(v.order))
-	live := map[string]bool{}
+// BuildTunnels turns WireGuard peer rows into tunnels with derived rates, pure.
+//
+// ── PHASE 4.1: IT RETURNS THE NEXT STATE RATHER THAN MUTATING THE LAST ─────
+//
+// This was a method that read `v.peers`, `v.order` and `v.prev`, wrote new
+// samples into `prev` and swept dead keys out of it. That made the collector's
+// map an output parameter and the derivation impure -- the same defect
+// `ParsePPPSessions` had, found the same way and fixed the same way, because the
+// two collectors do the same job on different menus.
+//
+// `rows` arrives ALREADY ORDERED. The collector keeps peers keyed with an order
+// slice beside them so a peer can be updated in place; the derivation only ever
+// walks them, so it takes the walk.
+//
+// The dead-key sweep disappears as a consequence: a peer that has gone is simply
+// not in the map that gets built.
+func BuildTunnels(rows []routeros.Reply, prev map[string]vpnSample, now time.Time) ([]Tunnel, map[string]vpnSample) {
+	out := make([]Tunnel, 0, len(rows))
+	next := make(map[string]vpnSample, len(rows))
 
-	for _, key := range v.order {
-		p, ok := v.peers[key]
-		if !ok {
-			continue
+	for _, p := range rows {
+		key := p["public-key"]
+		if key == "" {
+			key = peerName(p)
 		}
 		lh := p["last-handshake"]
 		name := peerName(p)
 
+		// RouterOS reports these under two names depending on the build, and a
+		// tunnel whose counters read zero because the other spelling was used
+		// looks exactly like an idle one.
 		rx := p["rx"]
 		if rx == "" {
 			rx = p["rx-bytes"]
@@ -329,10 +347,10 @@ func (v *VPN) buildTunnels() []Tunnel {
 			tx = p["tx-bytes"]
 		}
 		rxBytes, txBytes := vpnInt(rx), vpnInt(tx)
-		live[key] = true
 
 		rxRate, txRate := 0.0, 0.0
-		if pr, seen := v.prev[key]; seen && now.After(pr.ts) {
+		pr, seen := prev[key]
+		if seen && now.After(pr.ts) {
 			dtSec := now.Sub(pr.ts).Seconds()
 			rxRate = max(0, float64(rxBytes-pr.rx)/dtSec)
 			txRate = max(0, float64(txBytes-pr.tx)/dtSec)
@@ -341,10 +359,13 @@ func (v *VPN) buildTunnels() []Tunnel {
 			}
 		}
 		// Only advance the timestamp when the bytes actually moved, so the
-		// window always spans a real interval even when the counter stream
-		// fires between counter updates.
-		if pr, seen := v.prev[key]; !seen || rxBytes != pr.rx || txBytes != pr.tx {
-			v.prev[key] = vpnSample{rx: rxBytes, tx: txBytes, ts: now}
+		// window always spans a real interval even when the counter stream fires
+		// between counter updates. An unchanged peer carries its OLD sample
+		// forward rather than being re-stamped.
+		if !seen || rxBytes != pr.rx || txBytes != pr.tx {
+			next[key] = vpnSample{rx: rxBytes, tx: txBytes, ts: now}
+		} else {
+			next[key] = pr
 		}
 
 		endpoint := p["endpoint-address"]
@@ -364,12 +385,44 @@ func (v *VPN) buildTunnels() []Tunnel {
 			RX:            rxBytes, TX: txBytes, RXRate: rxRate, TXRate: txRate,
 		})
 	}
-	for k := range v.prev {
-		if !live[k] {
-			delete(v.prev, k)
+	return out, next
+}
+
+// VPNInput is one tick's worth of the outside world, for BuildVPN.
+type VPNInput struct {
+	// Peers are the WireGuard rows, already in display order.
+	Peers []routeros.Reply
+	// Prev is the previous counter reading per peer, read only. See BuildTunnels.
+	Prev map[string]vpnSample
+	// Ppp and Ipsec are the other two tunnel kinds, each read on its own path
+	// and carried between ticks by the collector.
+	Ppp   []PppTunnel
+	Ipsec []IpsecTunnel
+	Now   time.Time
+}
+
+// BuildVPN is the VPN payload, pure. It returns the next counter state too.
+func BuildVPN(in VPNInput) (*VPNPayload, map[string]vpnSample) {
+	tunnels, next := BuildTunnels(in.Peers, in.Prev, in.Now)
+	return &VPNPayload{
+		TS: in.Now.UnixMilli(), Tunnels: tunnels,
+		Ppp: in.Ppp, Ipsec: in.Ipsec,
+		// Zero in the original too — this collector is stream-driven and the
+		// page does not use the field.
+		PollMs: 0,
+	}, next
+}
+
+// orderedPeersLocked is the collector's storage rendered as the walk the
+// derivation takes. Caller holds the lock.
+func (v *VPN) orderedPeersLocked() []routeros.Reply {
+	rows := make([]routeros.Reply, 0, len(v.order))
+	for _, key := range v.order {
+		if p, ok := v.peers[key]; ok {
+			rows = append(rows, p)
 		}
 	}
-	return out
+	return rows
 }
 
 // RefreshNow re-reads the peers and emits. This is what a write calls, and what
@@ -402,14 +455,14 @@ func (v *VPN) RefreshNow() {
 // build assembles and emits, suppressing an unchanged payload.
 func (v *VPN) build() {
 	v.mu.Lock()
-	tunnels := v.buildTunnels()
-	payload := &VPNPayload{
-		TS: time.Now().UnixMilli(), Tunnels: tunnels,
-		Ppp: v.ppp, Ipsec: v.ipsec,
-		// Zero in the original too — this collector is stream-driven and the
-		// page does not use the field.
-		PollMs: 0,
-	}
+	payload, next := BuildVPN(VPNInput{
+		Peers: v.orderedPeersLocked(), Prev: v.prev,
+		Ppp: v.ppp, Ipsec: v.ipsec, Now: time.Now(),
+	})
+	// THE CARRIED STATE COMES BACK rather than having been written through the
+	// argument. See BuildTunnels.
+	v.prev = next
+	tunnels := payload.Tunnels
 	v.last = payload
 
 	// The fingerprint covers structural state, cumulative bytes and rates
