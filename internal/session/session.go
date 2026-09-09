@@ -948,16 +948,19 @@ func (m *Manager) Release(routerID string) {
 		}
 		s.linger = time.AfterFunc(m.grace(), func() { m.idleOut(routerID, s) })
 	}
-	held := len(s.holds) > 0
 	s.mu.Unlock()
 	m.mu.Unlock()
-	// A VIEWER LEFT A SESSION SOMETHING ELSE IS HOLDING. The session survives,
-	// and must now run the HOLDERS' set rather than the viewer's -- otherwise one
-	// browser visit permanently upgrades an alerting router to fifteen
-	// collectors. Outside both locks, because applyReasons takes s.mu.
-	if held {
-		s.applyReasons()
-	}
+	// NO PRUNE HERE, and that is deliberate.
+	//
+	// A viewer leaving starts the GRACE; it does not mean nobody is coming back.
+	// A page refresh, a router switch and a closed tab all look identical from
+	// here, and the first two return within seconds. Pruning now would suspend
+	// every collector the moment a browser blinked, and the viewer would come
+	// back to a page waiting for data -- the exact churn the grace exists to
+	// prevent, moved from the connection to the collectors.
+	//
+	// So the prune waits out the grace with the teardown, in `idleOut`. See
+	// there for what happens at the end of it.
 }
 
 // AlertFeeds names the collectors whose payloads the alert rules consume.
@@ -1284,8 +1287,23 @@ func (m *Manager) idleOut(routerID string, s *Session) {
 	// spoken for.
 	if s.spokenForLocked() {
 		s.linger = nil
+		viewer := s.refs > 0
 		s.mu.Unlock()
 		m.mu.Unlock()
+		// ── THE IDLE GATE, AT THE END OF THE GRACE ──────────────────────
+		//
+		// Two minutes have passed with nobody watching and something still
+		// wants this session -- alerting, or history recording. It survives,
+		// and NOW it drops to what those actually need: six collectors instead
+		// of fifteen, on a connection that stays up because alerts cannot be
+		// evaluated without one.
+		//
+		// A viewer who came back inside the grace is the other case, and it
+		// takes nothing away: `refs > 0` means the browser is here and the full
+		// set is right.
+		if !viewer {
+			s.applyReasons()
+		}
 		return
 	}
 	s.closed = true

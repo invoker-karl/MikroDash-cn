@@ -3,6 +3,7 @@ package session
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // The decision that keeps 4.3 from being a regression.
@@ -148,19 +149,45 @@ func TestRetainPrunesAfterGivingBackItsViewerReference(t *testing.T) {
 	}
 }
 
-// TestAViewerLeavingAHeldSessionPrunes. Without it, one browser visit
-// permanently upgrades an alerting router to the full viewer set.
-func TestAViewerLeavingAHeldSessionPrunes(t *testing.T) {
+// TestTheIdleGatePrunesAtTheEndOfTheGrace, not the moment a viewer leaves.
+//
+// ── WHY THE TIMING IS THE WHOLE POINT ───────────────────────────────────────
+//
+// The first version pruned in `Release`. That is wrong, and the operator said so
+// on 2026-09-09: a viewer leaving starts the GRACE, it does not mean nobody is
+// coming back. A page refresh, a router switch and a closed tab are
+// indistinguishable from there, and the first two return within seconds.
+//
+// Pruning immediately suspended every collector the moment a browser blinked,
+// and the viewer came back to a page waiting for data — the exact churn the
+// two-minute grace exists to prevent, moved from the connection to the
+// collectors.
+//
+// So the prune waits out the grace alongside the teardown: two minutes with
+// nobody watching, and then a held session drops to what alerting and history
+// need while keeping its connection, because alerts cannot be evaluated without
+// one.
+func TestTheIdleGatePrunesAtTheEndOfTheGrace(t *testing.T) {
 	src := readSource(t, "session.go")
-	if !contains(src, "held := len(s.holds) > 0") || !contains(src, "if held { s.applyReasons() }") {
-		t.Error("Release no longer prunes a held session when its last viewer leaves, so " +
-			"visiting a router once leaves it running the viewer's collector set for ever")
-	}
-}
 
-// indexOf is strings.Index over the flattened source the two checks above read.
-func indexOf(src, want string) int {
-	return strings.Index(src, strings.Join(strings.Fields(want), " "))
+	// Release must NOT prune: it only arms the timer.
+	rel := src[indexOf(src, "func (m *Manager) Release(routerID string) {"):]
+	rel = rel[:min(len(rel), 900)]
+	if contains(rel, "s.applyReasons()") {
+		t.Error("Release prunes when the last viewer leaves. A refresh or a router " +
+			"switch then suspends every collector for the two minutes the grace was " +
+			"meant to cover, and the viewer returns to a page waiting for data.")
+	}
+	// idleOut must, and only when no viewer came back.
+	if !contains(src, "viewer := s.refs > 0") || !contains(src, "if !viewer { s.applyReasons() }") {
+		t.Error("idleOut no longer prunes a held session at the end of the grace, so a " +
+			"router held for alerting keeps the full viewer collector set indefinitely")
+	}
+	// And the grace is the operator's two minutes.
+	if DefaultIdleGrace != 2*time.Minute {
+		t.Errorf("the idle grace is %v; the operator asked for two minutes with nobody "+
+			"watching before the collectors go quiet", DefaultIdleGrace)
+	}
 }
 
 // TestTheConnectPruneIsNotDeferred.
@@ -251,4 +278,10 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// indexOf is strings.Index over the flattened, comment-stripped source that
+// `readSource` returns.
+func indexOf(src, want string) int {
+	return strings.Index(src, strings.Join(strings.Fields(want), " "))
 }
