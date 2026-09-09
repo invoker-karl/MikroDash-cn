@@ -341,7 +341,7 @@ type Wireless struct {
 	ros    Reader
 	emit   Emit
 	pollMs *pollInterval
-	leases *DHCPLeases
+	leases LeaseSource
 
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
@@ -391,7 +391,7 @@ type Wireless struct {
 
 const wlNoStack = "-"
 
-func NewWireless(ros Reader, emit Emit, leases *DHCPLeases, pollMs int) *Wireless {
+func NewWireless(ros Reader, emit Emit, leases LeaseSource, pollMs int) *Wireless {
 	w := &Wireless{
 		ros: ros, emit: emit, leases: leases,
 		pollMs: newPollInterval(clampPoll(pollMs, 5000, 2000, 60000)),

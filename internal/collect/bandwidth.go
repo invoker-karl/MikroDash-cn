@@ -365,8 +365,8 @@ type Bandwidth struct {
 	cache *roscache.Cache
 
 	rates  RateSource
-	leases *DHCPLeases
-	nets   *DHCPNetworks
+	leases LeaseSource
+	nets   NetworkSource
 	geo    GeoLookup
 	org    OrgLookup
 
@@ -390,8 +390,8 @@ type Bandwidth struct {
 // enough that the page can tell an idle link from a dead collector.
 const bandwidthHeartbeat = 10 * time.Second
 
-func NewBandwidth(ros Reader, emit Emit, rates RateSource, leases *DHCPLeases,
-	nets *DHCPNetworks, pollMs int) *Bandwidth {
+func NewBandwidth(ros Reader, emit Emit, rates RateSource, leases LeaseSource,
+	nets NetworkSource, pollMs int) *Bandwidth {
 	b := &Bandwidth{
 		ros: ros, emit: emit, rates: rates, leases: leases, nets: nets,
 		pollMs: newPollInterval(clampPoll(pollMs, 5000, 3000, 60000)),

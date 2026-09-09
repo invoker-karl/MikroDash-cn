@@ -294,3 +294,61 @@ func parseJSNumber(s string) (float64, bool) {
 	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	return f, err == nil
 }
+
+// ── PHASE 4.1: THE IN-PROCESS EDGES, DECLARED ───────────────────────────────
+//
+// Fourteen collectors read another collector's output in memory. That is not
+// debt -- it is the shared-derivation structure the three-layer split is for,
+// and phase 2 was skipped partly because deleting it would have been wrong.
+//
+// What was wrong was how it was SPELLED. A consumer held a pointer to the
+// PRODUCER -- `*DHCPLeases`, `*System` -- so the edge said "I need the leases
+// collector" when what it means is "I need the lease payload". The difference is
+// not cosmetic:
+//
+//	the consumer cannot be tested without building the whole producer
+//	the edge is invisible from the consumer's own type, and lives only in
+//	  `internal/verify/collectoredges_test.go`, read out of session.go
+//	swapping where a derivation comes from means changing every consumer
+//
+// Four consumers already had it right -- `RateSource`, `LeaseIPs`,
+// `FilterRowSource`, `LeaseCounts` all name a CAPABILITY. These three complete
+// the set, and every one of the seven remaining call sites used exactly one
+// method: `Last()`.
+//
+// NIL IS ALWAYS ALLOWED, and that is the existing convention rather than a new
+// one: a collector the operator has disabled is absent, and a consumer costs
+// exactly the field that edge fed. See each consumer's own note.
+//
+// ── AND NIL MEANS AN UNTYPED NIL, WHICH IS A REAL TRAP HERE ────────────────
+//
+// A caller holding a `*DHCPLeases` that happens to be nil and passing it as a
+// `LeaseSource` produces an interface that is NOT nil: it carries the type. Every
+// `if x == nil` guard in the consumers would then be false, and the first call
+// would dereference a nil receiver.
+//
+// It cannot happen from `internal/session`, which constructs every collector
+// before wiring any of them, and a caller passing a literal `nil` is fine
+// because that is an untyped nil. It is written down because the failure is a
+// panic in a collector that has a nil check right there and looks correct, and
+// because this is exactly the moment the hazard was introduced: the fields were
+// concrete pointers until now, where a nil pointer really was nil.
+
+// LeaseSource supplies the current DHCP lease table. Consumed by `bandwidth`,
+// `connections`, `wireless` and `topology`, each to put a NAME on an address.
+type LeaseSource interface {
+	Last() *LeasesPayload
+}
+
+// NetworkSource supplies the DHCP networks, which is where the LAN ranges come
+// from. Consumed by `bandwidth` and `connections` to tell local traffic from
+// internet traffic -- the direction split both pages are built on.
+type NetworkSource interface {
+	Last() *LanPayload
+}
+
+// SystemSource supplies the router's own identity and gauges. Consumed by
+// `topology` to fill the node at the centre of the map.
+type SystemSource interface {
+	Last() *SystemPayload
+}

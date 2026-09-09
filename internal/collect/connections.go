@@ -545,8 +545,8 @@ type Connections struct {
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
 
-	leases *DHCPLeases
-	nets   *DHCPNetworks
+	leases LeaseSource
+	nets   NetworkSource
 	// detailed reports whether anyone has the Connections page open. The heavy
 	// per-country and per-source indexes are built only then.
 	detailed func() bool
@@ -568,8 +568,8 @@ type Connections struct {
 // worst-case gap is this plus one poll, which has to stay inside it.
 const connsHeartbeat = 10 * time.Second
 
-func NewConnections(ros Reader, emit Emit, leases *DHCPLeases,
-	nets *DHCPNetworks, pollMs int) *Connections {
+func NewConnections(ros Reader, emit Emit, leases LeaseSource,
+	nets NetworkSource, pollMs int) *Connections {
 	c := &Connections{
 		ros: ros, emit: emit, leases: leases, nets: nets,
 		pollMs: newPollInterval(clampPoll(pollMs, 3000, 1000, 60000)),

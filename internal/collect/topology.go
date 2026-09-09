@@ -1251,8 +1251,8 @@ type Topology struct {
 
 	// leases and core are the optional joins, held as interfaces so this
 	// collector depends on neither type. A nil one degrades one field.
-	leases *DHCPLeases
-	sys    *System
+	leases LeaseSource
+	sys    SystemSource
 
 	loop     *pollLoop
 	pingLoop *pollLoop
@@ -1298,7 +1298,7 @@ func NewTopology(ros Reader, emit Emit, rates RateSource, routerID, label string
 // WithSources attaches the optional joins: DHCP leases name the clients, and the
 // system collector fills the core's identity and gauges. Both are optional, and
 // a missing one costs exactly the fields it feeds.
-func (t *Topology) WithSources(leases *DHCPLeases, sys *System) *Topology {
+func (t *Topology) WithSources(leases LeaseSource, sys SystemSource) *Topology {
 	t.leases = leases
 	t.sys = sys
 	return t
