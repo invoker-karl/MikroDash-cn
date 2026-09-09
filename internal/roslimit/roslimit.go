@@ -79,6 +79,29 @@ var (
 	// per-minute cost at all, because the duplicated menus are read at very
 	// different cadences. Optimising the static count optimises the wrong thing.
 	menus = map[string]int64{}
+
+	// streams is how many channels this process holds OPEN per router, right
+	// now. A LEVEL, not a counter, and that is the whole distinction from the
+	// two above.
+	//
+	// ── WHY THIS EXISTS, AND WHY IT IS NOT A GATE ───────────────────────────
+	//
+	// `Acquire` caps in-flight COMMANDS at eight, and a stream takes no slot:
+	// `reader.Do` calls Acquire and `reader.Stream` does not. So until now this
+	// process could hold any number of channels on a router and report nothing
+	// about it -- against the bottleneck this project documents as concurrent
+	// channels.
+	//
+	// Track B makes that a live question rather than a theoretical one, and B.4
+	// enables collectors one at a time and MEASURES each. There was nothing to
+	// measure: the number did not exist anywhere.
+	//
+	// IT IS AN INSTRUMENT, NOT A LIMIT, and deliberately so. B.0b searched to 24
+	// concurrent channels on live hardware and found no ceiling, no starvation
+	// and no CPU trend, so capping would enforce a bound nobody has observed. A
+	// number that is reported and not enforced is the honest state of the
+	// evidence.
+	streams = map[string]int{}
 )
 
 // max reads the override once. An unparseable or non-positive value falls back
@@ -137,6 +160,53 @@ func Note(routerID, menu string) {
 	mu.Lock()
 	menus[menu]++
 	mu.Unlock()
+}
+
+// StreamOpened records that a channel is now open on this router, and returns
+// the release.
+//
+// SHAPED LIKE `Acquire` ON PURPOSE, so a caller cannot tell them apart at the
+// call site and cannot forget which one takes a release. It blocks on nothing:
+// see the note on `streams` for why this counts rather than caps.
+//
+// An empty id is not counted, matching Acquire: a router with no id is a test
+// fixture or a session being torn down.
+func StreamOpened(routerID string) func() {
+	if routerID == "" {
+		return func() {}
+	}
+	mu.Lock()
+	streams[routerID]++
+	mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		// `once` OWNS IDEMPOTENCY, and there is deliberately no `> 0` guard
+		// below. A collector torn down on both a blur and a disconnect releases
+		// twice -- this app does that routinely -- and `once.Do` is what makes
+		// the second call do nothing. A second guard inside it could never fire,
+		// and a defence that cannot fire reads as though the invariant needs
+		// two, which is how the next reader ends up preserving the wrong one.
+		once.Do(func() {
+			mu.Lock()
+			streams[routerID]--
+			if streams[routerID] <= 0 {
+				// Removed rather than left at zero, so the report shows the
+				// routers that HOLD channels rather than every router that ever
+				// did. Same reason `Subscribe` deletes an empty menu.
+				delete(streams, routerID)
+			}
+			mu.Unlock()
+		})
+	}
+}
+
+// OpenStreams reports how many channels this process holds on a router. For
+// tests, diagnostics, and the stats line.
+func OpenStreams(routerID string) int {
+	mu.Lock()
+	defer mu.Unlock()
+	return streams[routerID]
 }
 
 // InFlight reports how many commands hold a slot for this router. For tests and
@@ -204,9 +274,37 @@ func StartStats(every time.Duration) {
 				tops = append(tops, fmt.Sprintf("%s=%d", x.m, x.n))
 			}
 			top := strings.Join(tops, " ")
+			// ── THE OPEN CHANNELS, WHICH ARE A LEVEL AND ARE NOT CLEARED ─────
+			//
+			// `counts` and `menus` are reset each period because they measure
+			// what happened during it. This measures what is TRUE NOW, so
+			// clearing it would report zero for every router that opened its
+			// channels before the tick.
+			//
+			// Read here rather than logged separately, so a reader sees commands
+			// and channels for the same period on adjacent lines: Track B trades
+			// one for the other, and the trade is unreadable if the two numbers
+			// come from different minutes.
+			held := make([]string, 0, len(streams))
+			open := 0
+			for id, n := range streams {
+				open += n
+				held = append(held, fmt.Sprintf("%s=%d", short(id), n))
+			}
 			clear(counts)
 			clear(menus)
 			mu.Unlock()
+
+			// STREAMS ARE REPORTED EVEN IN A QUIET MINUTE, which commands are
+			// not. Zero commands and twelve open channels is the state Track B
+			// is aiming at, and the early-return below would have hidden exactly
+			// that -- reporting nothing at the moment the app finally costs
+			// nothing to poll.
+			if open > 0 {
+				sort.Strings(held)
+				log.Printf("[roslimit] %d open stream(s) across %d router(s): %s",
+					open, len(held), strings.Join(held, " "))
+			}
 
 			if total == 0 {
 				continue // a quiet minute is not worth a line
@@ -239,5 +337,10 @@ func Reset() {
 	gates = map[string]chan struct{}{}
 	counts = map[string]int64{}
 	menus = map[string]int64{}
+	// AND THE OPEN-CHANNEL LEVEL. Left out, one test's streams would be counted
+	// against the next one's router -- and unlike the counters above this is a
+	// LEVEL, so a leaked entry never decays and every later assertion in the
+	// package would be measuring the leak.
+	streams = map[string]int{}
 	maxOne = -1
 }

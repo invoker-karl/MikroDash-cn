@@ -404,7 +404,27 @@ func (r reader) Stream(cmd routeros.Cmd, onRow func(routeros.Reply)) (func(), er
 	if c == nil {
 		return nil, errNotConnected
 	}
-	return c.Stream(cmd, onRow)
+	// ── COUNTED, THOUGH NOT GATED ───────────────────────────────────────
+	//
+	// `Do` takes one of `roslimit`'s eight in-flight slots and this takes none,
+	// which is correct -- a held channel is not an outstanding command, and
+	// gating streams on the command budget would let a page's chart block a
+	// collector's read. But it left the app unable to say how many channels it
+	// holds on a router, against the bottleneck it documents as concurrent
+	// channels.
+	//
+	// B.4 enables streaming collectors one at a time and measures each. This is
+	// the number it reads. An instrument, not a limit: B.0b searched to 24
+	// concurrent channels on live hardware and found no ceiling.
+	stop, err := c.Stream(cmd, onRow)
+	if err != nil {
+		return nil, err
+	}
+	done := roslimit.StreamOpened(r.s.RouterID)
+	return func() {
+		stop()
+		done()
+	}, nil
 }
 
 // StreamUntilDone is Stream plus notification that the stream ENDED BY ITSELF.
