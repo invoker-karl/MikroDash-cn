@@ -175,12 +175,44 @@ func pingIsResult(row routeros.Reply) bool {
 	return row["time"] != "" || row["response-time"] != "" || row["status"] != ""
 }
 
-// ProcessRow folds one /tool/ping reply into the history and returns the
-// payload it produced, or nil when nothing should be emitted.
+// PingFold is the carried state of a ping series: the loss window and the
+// history ring.
 //
-// Exported and pure-ish for the gate: everything above it is plumbing, and this
-// is where the port can disagree with the original.
-func (p *Ping) ProcessRow(row routeros.Reply, now int64) *PingPayload {
+// ── PHASE 4.1: A SEQUENCE DERIVATION IS A FOLD, NOT A MAP ──────────────────
+//
+// The five set-A derivations are `func(prior, ROWS) (payload, prior)` -- they map
+// over a whole table, because a table IS the current state. `ping`, `traffic` and
+// `logs` are not tables: their rows are a SEQUENCE, each element of which matters
+// once, and the plan left them "blocked behind set B" as though they needed a
+// different layer.
+//
+// They do not. They need the same signature with a different arity:
+//
+//	table     func(prior, []Reply) (payload, prior)   map over the current state
+//	sequence  func(prior,   Reply) (payload, prior)   fold one element in
+//
+// That is the whole difference, and `ProcessRow` was already the fold -- it just
+// carried its state on a receiver, which is what made it untestable without a
+// collector and what hid the fact that the shape was already right.
+type PingFold struct {
+	// Window is the rolling replied/lost record the loss percentage is computed
+	// from. Bounded at pingLossWindow.
+	Window []bool
+	// History is the series the chart draws, bounded at pingMaxHistory.
+	History []PingPoint
+	// LastFP suppresses an unchanged result. Carried because the decision to
+	// emit belongs to the series, not to one reading.
+	LastFP string
+}
+
+// FoldPing folds one /tool/ping reply into the series and returns the payload it
+// produced, the next state, and whether anything should be emitted.
+//
+// PURE: no receiver, no lock, no clock. `now` arrives as an argument for the
+// reason every other builder here takes one -- a derivation that reads the wall
+// clock cannot be replayed against a fixture, and the fingerprint that suppresses
+// redundant emits would never match twice.
+func FoldPing(prior PingFold, target string, pollMs int, row routeros.Reply, now int64) (*PingPayload, PingFold, bool) {
 	status := row["status"]
 	replied := status == "" || status == "replied"
 	var rtt *float64
@@ -194,13 +226,16 @@ func (p *Ping) ProcessRow(row routeros.Reply, now int64) *PingPayload {
 	minRTT := ParsePingRTT(row["min-rtt"])
 	maxRTT := ParsePingRTT(row["max-rtt"])
 
-	p.mu.Lock()
-	p.window = append(p.window, replied)
-	if len(p.window) > pingLossWindow {
-		p.window = p.window[1:]
+	next := PingFold{
+		Window:  append(append([]bool(nil), prior.Window...), replied),
+		History: append([]PingPoint(nil), prior.History...),
+		LastFP:  prior.LastFP,
+	}
+	if len(next.Window) > pingLossWindow {
+		next.Window = next.Window[1:]
 	}
 	lost := 0
-	for _, ok := range p.window {
+	for _, ok := range next.Window {
 		if !ok {
 			lost++
 		}
@@ -208,24 +243,38 @@ func (p *Ping) ProcessRow(row routeros.Reply, now int64) *PingPayload {
 	// The original's `length > 0 ? ... : 100` — unreachable, since a value was
 	// just pushed, and reproduced so the two read the same.
 	loss := 100
-	if len(p.window) > 0 {
-		loss = int(math.Round(float64(lost) / float64(len(p.window)) * 100))
+	if len(next.Window) > 0 {
+		loss = int(math.Round(float64(lost) / float64(len(next.Window)) * 100))
 	}
 
-	p.history = append(p.history, PingPoint{TS: now, RTT: rtt, Loss: &loss})
-	if len(p.history) > pingMaxHistory {
-		p.history = p.history[1:]
+	next.History = append(next.History, PingPoint{TS: now, RTT: rtt, Loss: &loss})
+	if len(next.History) > pingMaxHistory {
+		next.History = next.History[1:]
 	}
 	payload := &PingPayload{
-		Target: p.target, RTT: rtt, Loss: &loss,
-		MinRTT: minRTT, MaxRTT: maxRTT, TS: now, PollMs: p.pollMs.ms(),
+		Target: target, RTT: rtt, Loss: &loss,
+		MinRTT: minRTT, MaxRTT: maxRTT, TS: now, PollMs: pollMs,
 	}
-	p.last = payload
 	// FINGERPRINTED on target, rtt and loss — not on min/max, which drift on
 	// their own and would make every result an update.
-	fp := fmt.Sprintf("%s|%s|%d", p.target, fmtPingRTT(rtt), loss)
-	changed := fp != p.lastFP
-	p.lastFP = fp
+	fp := fmt.Sprintf("%s|%s|%d", target, fmtPingRTT(rtt), loss)
+	changed := fp != prior.LastFP
+	next.LastFP = fp
+	return payload, next, changed
+}
+
+// ProcessRow folds one /tool/ping reply into the history and returns the
+// payload it produced, or nil when nothing should be emitted.
+//
+// The collector's half: take the lock, hand the carried state to the fold, put
+// what comes back. Everything that can be got wrong lives in FoldPing.
+func (p *Ping) ProcessRow(row routeros.Reply, now int64) *PingPayload {
+	p.mu.Lock()
+	payload, next, changed := FoldPing(
+		PingFold{Window: p.window, History: p.history, LastFP: p.lastFP},
+		p.target, p.pollMs.ms(), row, now)
+	p.window, p.history, p.lastFP = next.Window, next.History, next.LastFP
+	p.last = payload
 	p.mu.Unlock()
 
 	if !changed {

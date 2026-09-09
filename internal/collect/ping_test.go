@@ -468,3 +468,120 @@ func TestAPollingPingStopsCleanly(t *testing.T) {
 		t.Error("Stop left the poll loop in place")
 	}
 }
+
+// ── PHASE 4.1: A SEQUENCE DERIVATION IS A FOLD ─────────────────────────────
+//
+// The five set-A derivations map over a whole table, because a table IS the
+// current state. `ping`'s rows are a SEQUENCE — each element matters once — and
+// the plan left it "blocked behind set B" as though it needed a different layer.
+//
+// It needs the same signature with a different arity:
+//
+//	table     func(prior, []Reply) (payload, prior)
+//	sequence  func(prior,   Reply) (payload, prior)
+//
+// `ProcessRow` was already the fold; it carried its state on a receiver, which is
+// what made these cases unreachable.
+
+func TestFoldPingIsPureInItsPriorState(t *testing.T) {
+	// ── SPARE CAPACITY IS THE WHOLE TEST, AND THE FIRST VERSION HAD NONE ────
+	//
+	// Written with slice literals this passed even against `append(prior.Window,
+	// …)`: a literal's capacity equals its length, so append reallocates and the
+	// caller's array is untouched by accident. The mutation survived.
+	//
+	// A ring that has been sliced down — which is exactly what these are after
+	// the first `[1:]` — carries spare capacity, so append writes THROUGH into
+	// the state the caller still holds. That is the case that occurs in
+	// production and the only one that distinguishes a copy from a write.
+	prior := PingFold{
+		Window:  append(make([]bool, 0, 8), true, true),
+		History: append(make([]PingPoint, 0, 8), PingPoint{TS: 1}),
+	}
+	priorWin := append([]bool(nil), prior.Window...)
+	_, next, _ := FoldPing(prior, "1.1.1.1", 5000, routeros.Reply{"time": "10ms"}, 99)
+
+	// THE PRIOR MUST NOT HAVE BEEN WRITTEN. `append` on a slice with spare
+	// capacity writes THROUGH to the caller's backing array, which is how a fold
+	// that looks pure corrupts the state it was handed — the same class of defect
+	// as ParsePPPSessions and buildTunnels, arriving by a different route.
+	if len(prior.Window) != 2 || len(prior.History) != 1 {
+		t.Errorf("the prior was mutated: window=%d history=%d, want 2 and 1",
+			len(prior.Window), len(prior.History))
+	}
+	// AND ITS CONTENTS, not just its length. An append into spare capacity
+	// leaves the length alone and overwrites the element past it, so a
+	// length-only check misses precisely the case this exists for.
+	full := prior.Window[:cap(prior.Window)]
+	for i := range priorWin {
+		if full[i] != priorWin[i] {
+			t.Errorf("the prior's window contents changed at %d", i)
+		}
+	}
+	if len(full) > 2 && full[2] {
+		t.Error("the fold appended into the prior's spare capacity — the caller's " +
+			"state was written through, which is the impurity this extraction " +
+			"exists to remove")
+	}
+	if len(next.Window) != 3 || len(next.History) != 2 {
+		t.Errorf("next window=%d history=%d, want 3 and 2", len(next.Window), len(next.History))
+	}
+}
+
+// TestFoldPingSuppressesAnUnchangedResult, and says so through its third return
+// rather than by handing back nil — which is what let the collector keep `last`
+// current while emitting nothing.
+func TestFoldPingSuppressesAnUnchangedResult(t *testing.T) {
+	row := routeros.Reply{"time": "10ms"}
+	p1, s1, changed1 := FoldPing(PingFold{}, "1.1.1.1", 5000, row, 100)
+	if !changed1 {
+		t.Fatal("the first result was suppressed")
+	}
+	p2, _, changed2 := FoldPing(s1, "1.1.1.1", 5000, row, 200)
+	if changed2 {
+		t.Error("an identical reading was reported as changed; every result would " +
+			"wake every subscribed browser")
+	}
+	// AND THE PAYLOAD IS STILL BUILT. Suppression is about whether to SEND, not
+	// about whether the series advanced — `Last()` must stay current or a page
+	// opening mid-silence replays a stale reading.
+	if p2 == nil || p2.TS != 200 {
+		t.Errorf("payload = %+v; a suppressed result must still produce a current "+
+			"payload for replay", p2)
+	}
+	if p1.TS != 100 {
+		t.Errorf("the first payload's ts changed to %d", p1.TS)
+	}
+}
+
+// TestFoldPingBoundsBothRings. Unbounded growth in a fold is invisible until a
+// session has been up for days — the history is per-router and the window feeds
+// every loss percentage.
+func TestFoldPingBoundsBothRings(t *testing.T) {
+	state := PingFold{}
+	for i := 0; i < pingMaxHistory+pingLossWindow+50; i++ {
+		_, state, _ = FoldPing(state, "1.1.1.1", 5000, routeros.Reply{"time": "1ms"}, int64(i))
+	}
+	if len(state.Window) != pingLossWindow {
+		t.Errorf("window = %d, want %d", len(state.Window), pingLossWindow)
+	}
+	if len(state.History) != pingMaxHistory {
+		t.Errorf("history = %d, want %d", len(state.History), pingMaxHistory)
+	}
+}
+
+// TestFoldPingLossIsOverTheWindowNotAllTime. A router that dropped packets an
+// hour ago and is fine now must read 0%, not carry the outage for ever.
+func TestFoldPingLossIsOverTheWindowNotAllTime(t *testing.T) {
+	state := PingFold{}
+	// One timeout, then a full window of replies.
+	_, state, _ = FoldPing(state, "t", 5000, routeros.Reply{"status": "timeout"}, 0)
+	for i := 0; i < pingLossWindow; i++ {
+		var pl *PingPayload
+		pl, state, _ = FoldPing(state, "t", 5000, routeros.Reply{"time": "1ms"}, int64(i+1))
+		if i == pingLossWindow-1 && (pl.Loss == nil || *pl.Loss != 0) {
+			t.Errorf("loss = %v after a full window of replies; the old timeout is "+
+				"still being counted", pl.Loss)
+		}
+	}
+}
