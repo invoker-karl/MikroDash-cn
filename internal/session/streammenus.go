@@ -38,10 +38,22 @@ package session
 var streamableMenus = map[string]string{
 	// menu -> the registry key of the collector that owns it.
 	//
-	// EMPTY ON PURPOSE. B.4 fills it. See TestStreamableMenusAreRealAndOwned,
-	// which fails on an entry naming a menu nothing subscribes to or a collector
-	// the registry does not have -- so a line added here carelessly does not
-	// silently do nothing.
+	// Each line is one B.4 commit: enabled, then measured on an unwatched router
+	// against `roslimit`'s open-channel level. `TestStreamableMenusAreRealAndOwned`
+	// fails on an entry naming a menu nothing subscribes to or a collector the
+	// registry does not have, so a line added carelessly does not silently do
+	// nothing.
+
+	// ── FIRST, AND CHOSEN FOR BEING BORING ──────────────────────────────────
+	//
+	// Real `.id` rows, a table of three, one page, a 30s cadence. It proves the
+	// path end to end and saves almost nothing, which is the right trade for the
+	// first one: the biggest prize is `system` at 111 commands a minute across
+	// this fleet, and that is a SINGLE ROW WITH NO `.id` -- it needs a key of its
+	// own, so it is not the collector to learn the mechanism on.
+	//
+	// Probed 2026-09-09: streams, 9 rows in 3s, first row 6ms.
+	"/tool/netwatch/print": "netwatch",
 }
 
 // streamsMenu answers roscache's question: may this menu be pushed?
