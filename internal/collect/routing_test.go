@@ -416,3 +416,78 @@ func (r *recordingReader) Do(c routeros.Cmd) ([]routeros.Reply, error) {
 	}
 	return nil, nil
 }
+
+// ── PHASE 4.1: NIL PEERS AND EMPTY PEERS ARE DIFFERENT ANSWERS ─────────────
+//
+// This collector refreshes routes and peers on separate paths, so a tick can
+// produce routes with nothing new to say about BGP. Nil means exactly that;
+// an empty slice means the router reports no peers.
+//
+// Collapsing them makes a route-only refresh blank the BGP card, which shows up
+// as a card going empty and refilling on a rhythm nobody can explain from the
+// page. It was inline in `emitPayload` and needed a collector and a tick to test.
+
+func TestBuildRoutingCarriesPeersThroughARouteOnlyRefresh(t *testing.T) {
+	established := []Peer{{Key: "a", State: "established"}, {Key: "b", State: "idle"}}
+
+	// A tick that learned nothing new about peers.
+	got := BuildRouting(RoutingInput{
+		Routes: []Route{{Type: "static"}}, Peers: nil, LastPeers: established, Now: 1,
+	})
+	if len(got.Peers) != 2 {
+		t.Errorf("%d peers after a route-only refresh, want the 2 carried forward — "+
+			"the BGP card would blank and refill on a rhythm nothing on the page "+
+			"explains", len(got.Peers))
+	}
+	if got.Summary.Established != 1 || got.Summary.Down != 1 {
+		t.Errorf("summary = %+v, want 1 established and 1 down", got.Summary)
+	}
+
+	// AND AN EMPTY SLICE IS AN ANSWER. A router that reports no peers must read
+	// as zero, not inherit the last non-empty reading for ever.
+	got = BuildRouting(RoutingInput{
+		Routes: []Route{{Type: "static"}}, Peers: []Peer{}, LastPeers: established, Now: 1,
+	})
+	if len(got.Peers) != 0 || got.Summary.Total != 0 {
+		t.Errorf("peers=%d total=%d; an explicit empty reading was overridden by the "+
+			"previous one, so a peer that goes away never leaves the page",
+			len(got.Peers), got.Summary.Total)
+	}
+}
+
+// TestBuildRoutingCountsEveryRouteButShowsOnlySome.
+//
+// The page displays a filtered, capped list; the counters describe the WHOLE
+// table. Counting the shown slice instead would make a router past `routeCap`
+// report the size of what it happened to send.
+func TestBuildRoutingCountsEveryRouteButShowsOnlySome(t *testing.T) {
+	routes := []Route{
+		{Type: "connect", Flags: RouteFlags{Connect: true}},
+		{Type: "static", Flags: RouteFlags{Static: true}},
+		{Type: "dynamic", Flags: RouteFlags{Dynamic: true, BGP: true}},
+	}
+	got := BuildRouting(RoutingInput{Routes: routes, Peers: []Peer{}, Now: 1})
+
+	if got.RouteCounts.Total != 3 {
+		t.Errorf("total=%d, want 3 — the counters describe the whole table, not the "+
+			"filtered list the page renders", got.RouteCounts.Total)
+	}
+	if len(got.Routes) != 2 {
+		t.Errorf("%d shown, want 2 — a connected route is a property of an interface "+
+			"and belongs on the Interfaces page", len(got.Routes))
+	}
+	// A route can carry several flags at once, and each counter is independent.
+	if got.RouteCounts.Dynamic != 1 || got.RouteCounts.BGP != 1 {
+		t.Errorf("counts = %+v; a route that is both dynamic and BGP must count in "+
+			"each", got.RouteCounts)
+	}
+}
+
+// TestBuildRoutingTakesNoClockOfItsOwn — a derivation that reads the wall clock
+// cannot be replayed, and every tick would look like a change.
+func TestBuildRoutingTakesNoClockOfItsOwn(t *testing.T) {
+	in := RoutingInput{Routes: []Route{{Type: "static"}}, Peers: []Peer{}, Now: 99}
+	if a, b := BuildRouting(in), BuildRouting(in); a.TS != 99 || b.TS != 99 {
+		t.Errorf("ts %d and %d, want 99 both times", a.TS, b.TS)
+	}
+}

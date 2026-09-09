@@ -682,16 +682,46 @@ func firstNonEmpty(vs ...string) string {
 	return ""
 }
 
-func (r *Routing) emitPayload(peers []Peer) {
-	all := make([]Route, 0, len(r.order))
-	for _, k := range r.order {
-		all = append(all, r.routes[k])
-	}
+// RoutingInput is one tick's worth of the outside world, for BuildRouting.
+//
+// ROUTES ARRIVE AS A SLICE, NOT AS THE COLLECTOR'S MAP-AND-ORDER PAIR. The
+// collector keeps `routes` keyed and `order` alongside it so a route can be
+// updated in place; the derivation only ever walks them in order, so it takes
+// the walk rather than the storage.
+type RoutingInput struct {
+	Routes []Route
+	// Peers may be NIL, which means "this tick learned nothing new about peers"
+	// -- a route-only refresh. It is not the same as an empty slice, which means
+	// "there are no peers". See BuildRouting.
+	Peers []Peer
+	// LastPeers is what the previous payload carried, used only to fill a nil
+	// Peers. The carried half of `func(prior, in) (out, prior)`.
+	LastPeers []Peer
+	Now       int64
+}
 
+// BuildRouting is the Routing payload, pure.
+//
+// ── NIL PEERS AND EMPTY PEERS ARE DIFFERENT ANSWERS ────────────────────────
+//
+// This collector refreshes routes and peers on separate paths, so a tick can
+// produce routes with nothing new to say about BGP. Nil means exactly that, and
+// the previous payload's peers are carried forward; an empty slice means the
+// router reports no peers and the summary must read zero.
+//
+// Collapsing the two would make a route refresh blank the BGP card, which is a
+// card going empty and refilling on a rhythm nobody could explain from the page.
+//
+// ── THE COUNTS AND THE SUMMARY ARE FUNCTIONS OF THE ROWS ───────────────────
+//
+// Both were computed inline, so "a route that is both BGP and dynamic counts in
+// each" and "a peer that is not established counts as down" needed a collector
+// and a tick to test. They need neither.
+func BuildRouting(in RoutingInput) *RoutingPayload {
 	// Only static and dynamic rows reach the page: a connected route is a
 	// property of an interface, and the Interfaces page is where it belongs.
-	shown := make([]Route, 0, len(all))
-	for _, rt := range all {
+	shown := make([]Route, 0, len(in.Routes))
+	for _, rt := range in.Routes {
 		if rt.Type == "static" || rt.Type == "dynamic" {
 			shown = append(shown, rt)
 			if len(shown) == routeCap {
@@ -700,8 +730,12 @@ func (r *Routing) emitPayload(peers []Peer) {
 		}
 	}
 
-	counts := RouteCounts{Total: len(all)}
-	for _, rt := range all {
+	// THE COUNTS ARE OVER EVERY ROUTE, NOT THE SHOWN ONES. The page displays a
+	// filtered, capped list and the counters describe the whole table -- so a
+	// router past `routeCap` still reports its real totals rather than the size
+	// of the slice it happened to send.
+	counts := RouteCounts{Total: len(in.Routes)}
+	for _, rt := range in.Routes {
 		if rt.Flags.Connect {
 			counts.Connect++
 		}
@@ -719,12 +753,12 @@ func (r *Routing) emitPayload(peers []Peer) {
 		}
 	}
 
+	peers := in.Peers
 	if peers == nil {
-		if r.last != nil {
-			peers = r.last.Peers
-		} else {
-			peers = []Peer{}
-		}
+		peers = in.LastPeers
+	}
+	if peers == nil {
+		peers = []Peer{}
 	}
 	sum := PeerSummary{Total: len(peers)}
 	for _, p := range peers {
@@ -735,8 +769,8 @@ func (r *Routing) emitPayload(peers []Peer) {
 		}
 	}
 
-	payload := &RoutingPayload{
-		TS: r.now(),
+	return &RoutingPayload{
+		TS: in.Now,
 		// Zero on the Node side too: that page is stream-driven there, so there
 		// is no poll interval to report.
 		PollMs:      0,
@@ -745,6 +779,20 @@ func (r *Routing) emitPayload(peers []Peer) {
 		Routes:      shown,
 		Summary:     sum,
 	}
+}
+
+func (r *Routing) emitPayload(peers []Peer) {
+	all := make([]Route, 0, len(r.order))
+	for _, k := range r.order {
+		all = append(all, r.routes[k])
+	}
+	var lastPeers []Peer
+	if r.last != nil {
+		lastPeers = r.last.Peers
+	}
+	payload := BuildRouting(RoutingInput{
+		Routes: all, Peers: peers, LastPeers: lastPeers, Now: r.now(),
+	})
 	r.last = payload
 	// ── ALSO THE DASHBOARD, WHICH IS A DELIBERATE DEPARTURE ─────────────────
 	//
