@@ -112,3 +112,23 @@ func KindOf(cmd routeros.Cmd) Kind {
 	}
 	return Query
 }
+
+// ── THE AVAILABILITY LATCH, IN ONE PLACE ────────────────────────────────────
+//
+// Ten call sites across eight collectors spelled this out: `x == nil || *x`.
+// It is one rule stated ten times, and this repository has already paid for that
+// shape once -- `internal/collect/rooms.go` exists because the room lists were
+// written twice and disagreed five times.
+//
+// THE RULE: a menu's presence is a THREE-STATE, and nil is not "absent".
+//
+//	nil    NOT YET KNOWN -- nothing has asked, or nothing has answered
+//	true   the router has the menu
+//	false  the router answered and does not have it
+//
+// Nil must read as AVAILABLE. A router is presumed to have a menu until it says
+// otherwise, and the alternative blanks the page on the first tick before
+// anything has come back -- which looks exactly like a router that lacks the
+// feature. That asymmetry is the whole reason the field is a pointer rather than
+// a bool, and it is the half a reader is most likely to get backwards.
+func MenuAvailable(latch *bool) bool { return latch == nil || *latch }

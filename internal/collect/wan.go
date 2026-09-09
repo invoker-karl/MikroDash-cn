@@ -470,7 +470,7 @@ func (w *Wan) applyLocked(detect []routeros.Reply) {
 	built.TS = time.Now().UnixMilli()
 	built.PollMs = w.pollMs.ms()
 	built.DetectionEnabled = len(detect) > 0
-	built.Available = w.detectAvailable == nil || *w.detectAvailable
+	built.Available = MenuAvailable(w.detectAvailable)
 	built.Denied = w.denied
 	w.last = &built
 

@@ -446,7 +446,7 @@ func (r *RosUsers) applyLocked(userRows []routeros.Reply) {
 		TS: time.Now().UnixMilli(), PollMs: r.pollMs.ms(),
 		Users: users, Groups: groups, Sessions: sessions, Self: self,
 		PasswordPolicy: policy, Policies: Policies,
-		Available: r.userAvail == nil || *r.userAvail,
+		Available: MenuAvailable(r.userAvail),
 		Denied:    r.denied,
 	}
 	r.last = payload

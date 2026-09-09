@@ -576,7 +576,7 @@ func BuildPPP(in PPPInput) (*PPPPayload, []PPPSession, map[string]pppSample) {
 		TS: in.Now.UnixMilli(), PollMs: in.PollMs,
 		Sessions: sessions, Secrets: secrets, Profiles: in.Profiles, Servers: in.Servers,
 		ByService: byService, TotalRXRate: totalRX, TotalTXRate: totalTX,
-		Available: in.Available == nil || *in.Available,
+		Available: MenuAvailable(in.Available),
 	}, sessions, nextPrev
 }
 

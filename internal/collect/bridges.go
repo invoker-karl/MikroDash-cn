@@ -368,8 +368,8 @@ func (b *Bridges) applyLocked(hostRows []routeros.Reply) {
 		Bridges: built.bridges, Ports: built.ports, Hosts: built.hosts,
 		HostTotal: built.hostTotal, HostCap: bridgeHostCap,
 		RatesAvailable: built.ratesAvailable,
-		Available:      b.bridgeAvailable == nil || *b.bridgeAvailable,
-		HostsAvailable: b.hostAvailable == nil || *b.hostAvailable,
+		Available:      MenuAvailable(b.bridgeAvailable),
+		HostsAvailable: MenuAvailable(b.hostAvailable),
 	}
 	// Assigned unconditionally: a socket that connects during a quiet spell is
 	// replayed this, so it must be current even when nothing is emitted.

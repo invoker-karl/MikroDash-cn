@@ -586,25 +586,57 @@ func (t *Traffic) emitHealth(degraded bool, restarts int) {
 }
 
 // onPacket is the whole delivery path for one reading.
-func (t *Traffic) onPacket(row routeros.Reply) {
+// FoldTraffic folds one monitor-traffic packet into the per-interface history
+// and returns the sample it made and the ring that interface now holds.
+//
+// ── PHASE 4.1: THE THIRD SEQUENCE DERIVATION, AND THE STATE HAS A KEY ──────
+//
+//	table     func(prior, []Reply) (payload, prior)   map over the current state
+//	sequence  func(prior,   Reply) (payload, prior)   fold one element in
+//
+// `ping` and `logs` fold into ONE ring. This folds into one ring PER INTERFACE,
+// so the carried state is keyed -- but the signature is the same, because the
+// fold only ever touches the ring the packet belongs to. Handing it the whole
+// map would make the derivation responsible for storage it does not use.
+//
+// PURE, AND THE COPY IS LOAD-BEARING for the reason `FoldPing` and `FoldLog`
+// record: `append` into a slice with spare capacity writes THROUGH to the
+// caller's backing array, and a ring that has been trimmed always has spare
+// capacity.
+//
+// A ROW WITH NO NAME YIELDS NOTHING. RouterOS sends one for an empty interface
+// list, and folding it in would file a point against an interface called "".
+func FoldTraffic(prior []TrafficPoint, maxPoints int, row routeros.Reply, now int64) (TrafficSample, []TrafficPoint, bool) {
 	if row["name"] == "" {
+		return TrafficSample{}, prior, false
+	}
+	sample := parseTrafficSample(row, now)
+
+	next := append(append(make([]TrafficPoint, 0, len(prior)+1), prior...),
+		TrafficPoint{TS: sample.TS, RxMbps: sample.RxMbps, TxMbps: sample.TxMbps})
+	if maxPoints > 0 && len(next) > maxPoints {
+		// THE LAST `maxPoints`: a chart that trimmed from the back would freeze
+		// on its oldest window and never move, which is the same rule the log
+		// ring follows and for the same reason.
+		next = next[len(next)-maxPoints:]
+	}
+	return sample, next, true
+}
+
+func (t *Traffic) onPacket(row routeros.Reply) {
+	t.mu.Lock()
+	sample, next, ok := FoldTraffic(t.hist[row["name"]], t.maxPoints, row, time.Now().UnixMilli())
+	if !ok {
+		t.mu.Unlock()
 		return
 	}
-	sample := parseTrafficSample(row, time.Now().UnixMilli())
-
-	t.mu.Lock()
 	// THE WATCHDOG'S EVIDENCE THAT THE STREAM IS ALIVE. Set for every row, not
 	// only the WAN interface's: the stream carries them all, and one interface
 	// going quiet is not the stream stalling.
 	t.lastData = sample.TS
 	// The ring is filled whether anyone is watching or not, so a browser that
 	// connects gets history immediately instead of a blank chart.
-	h := append(t.hist[sample.IfName], TrafficPoint{
-		TS: sample.TS, RxMbps: sample.RxMbps, TxMbps: sample.TxMbps})
-	if len(h) > t.maxPoints {
-		h = h[len(h)-t.maxPoints:]
-	}
-	t.hist[sample.IfName] = h
+	t.hist[sample.IfName] = next
 	isWan := sample.IfName == t.defaultIf
 	if isWan {
 		t.lastWan = &WanStatus{IfName: sample.IfName, TS: sample.TS,

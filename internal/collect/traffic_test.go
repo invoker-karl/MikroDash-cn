@@ -232,3 +232,88 @@ func TestTheHistoryPayloadCarriesItsWindow(t *testing.T) {
 		t.Errorf("the marshalled payload is %s", b)
 	}
 }
+
+// ── PHASE 4.1: THE THIRD SEQUENCE DERIVATION, AND THE STATE HAS A KEY ──────
+//
+// `ping` and `logs` fold into one ring; this folds into one ring PER INTERFACE.
+// The signature is the same, because the fold only ever touches the ring the
+// packet belongs to — handing it the whole map would make the derivation
+// responsible for storage it does not use.
+
+func TestFoldTrafficDropsARowWithNoName(t *testing.T) {
+	prior := []TrafficPoint{{TS: 1}}
+	_, next, ok := FoldTraffic(prior, 10, routeros.Reply{"rx-bits-per-second": "100"}, 5)
+	if ok {
+		t.Error("a nameless row was folded in; RouterOS sends one for an empty " +
+			"interface list, and it would file a point against an interface called \"\"")
+	}
+	if len(next) != 1 {
+		t.Errorf("the ring changed to %d entries on a dropped row", len(next))
+	}
+}
+
+// TestFoldTrafficKeepsTheMostRecentPoints. A chart that trimmed from the back
+// would freeze on its oldest window and never move — the same rule the log ring
+// follows, and the same failure.
+func TestFoldTrafficKeepsTheMostRecentPoints(t *testing.T) {
+	var ring []TrafficPoint
+	for i := 0; i < 10; i++ {
+		_, ring, _ = FoldTraffic(ring, 3, routeros.Reply{
+			"name": "ether1", "rx-bits-per-second": "1000000",
+		}, int64(i))
+	}
+	if len(ring) != 3 {
+		t.Fatalf("ring holds %d, want 3", len(ring))
+	}
+	if ring[0].TS != 7 || ring[2].TS != 9 {
+		t.Errorf("ring spans ts %d..%d, want 7..9 — the chart is trimming from the "+
+			"wrong end and would freeze on its oldest window", ring[0].TS, ring[2].TS)
+	}
+}
+
+// TestFoldTrafficDoesNotWriteThroughToThePrior. Built with spare capacity on
+// purpose: `FoldPing`'s equivalent passed a mutation for a whole round because
+// slice literals have capacity equal to their length, so append reallocates by
+// accident and the caller's array survives for the wrong reason.
+func TestFoldTrafficDoesNotWriteThroughToThePrior(t *testing.T) {
+	prior := append(make([]TrafficPoint, 0, 8), TrafficPoint{TS: 1}, TrafficPoint{TS: 2})
+	_, _, ok := FoldTraffic(prior, 10, routeros.Reply{"name": "ether1"}, 3)
+	if !ok {
+		t.Fatal("a named row was dropped")
+	}
+	if len(prior) != 2 {
+		t.Fatalf("the prior grew to %d", len(prior))
+	}
+	// The element past the prior's length is where an in-place append lands.
+	if full := prior[:cap(prior)]; full[2].TS != 0 {
+		t.Errorf("the fold appended into the prior's spare capacity (ts %d); the "+
+			"caller's ring was written through", full[2].TS)
+	}
+}
+
+// TestFoldTrafficTouchesOnlyItsOwnRing — the state is keyed, and a packet for
+// one interface must not disturb another's history. That is the whole reason the
+// fold takes ONE ring rather than the map.
+func TestFoldTrafficTouchesOnlyItsOwnRing(t *testing.T) {
+	rings := map[string][]TrafficPoint{
+		"ether1": {{TS: 1}},
+		"ether2": {{TS: 1}, {TS: 2}},
+	}
+	sample, next, ok := FoldTraffic(rings["ether1"], 10,
+		routeros.Reply{"name": "ether1", "rx-bits-per-second": "8000000"}, 9)
+	if !ok || sample.IfName != "ether1" {
+		t.Fatalf("sample = %+v, ok=%v", sample, ok)
+	}
+	rings["ether1"] = next
+
+	if len(rings["ether1"]) != 2 {
+		t.Errorf("ether1 holds %d points, want 2", len(rings["ether1"]))
+	}
+	if len(rings["ether2"]) != 2 || rings["ether2"][1].TS != 2 {
+		t.Errorf("ether2's ring changed to %v; a packet for one interface disturbed "+
+			"another's history", rings["ether2"])
+	}
+	if sample.RxMbps != 8 {
+		t.Errorf("rxMbps = %v, want 8 — the sample's own conversion changed", sample.RxMbps)
+	}
+}

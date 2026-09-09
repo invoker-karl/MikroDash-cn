@@ -575,7 +575,7 @@ func (q *Queues) apply(simpleRows []routeros.Reply, err error) {
 		Simple: simple, Tree: tree,
 		Fasttrack: q.fasttrack(),
 		Stats:     statsLevel(statsRows),
-		Available: q.simpleAvail == nil || *q.simpleAvail,
+		Available: MenuAvailable(q.simpleAvail),
 		Denied:    q.denied,
 	}
 	q.last = payload

@@ -632,8 +632,9 @@ func (c *Capsman) applyRest(reg []routeros.Reply) {
 	built.TS = time.Now().UnixMilli()
 	built.PollMs = c.pollMs.ms()
 	built.Profiles = c.projectProfiles()
-	built.Available = c.managerAvail == nil || *c.managerAvail ||
-		c.capAvail == nil || *c.capAvail
+	// EITHER menu present is enough: a router may run the manager, the CAP side,
+	// or both, and the page has something to show in all three cases.
+	built.Available = MenuAvailable(c.managerAvail) || MenuAvailable(c.capAvail)
 	c.last = &built
 	fp := capsFingerprintOf(&built)
 	changed := fp != c.lastFP

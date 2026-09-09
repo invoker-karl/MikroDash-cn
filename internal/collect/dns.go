@@ -322,7 +322,7 @@ func BuildDNS(in DNSInput) *DNSPayload {
 	return &DNSPayload{
 		TS: in.Now, PollMs: in.PollMs,
 		Settings: ParseDNSSettings(first), StaticEntries: in.Static,
-		Available: in.Available == nil || *in.Available,
+		Available: MenuAvailable(in.Available),
 	}
 }
 

@@ -489,7 +489,7 @@ func BuildPackages(in PackagesInput) (*PackagesPayload, []Package) {
 		Update:        in.Update,
 		Counts:        counts,
 		PendingReboot: scheduled > 0,
-		Available:     in.Available == nil || *in.Available,
+		Available:     MenuAvailable(in.Available),
 	}, pkgs
 }
 
