@@ -1915,6 +1915,21 @@ func (s *Session) connectLoop() {
 			if s.eff.Enabled["conns"] {
 				s.conns.Reconnected()
 			}
+			// ── AND PRUNE, EXACTLY AS THE FIRST CONNECT DOES ────────────
+			//
+			// The reconnect branch restarts every collector, so a session held
+			// only for alerting comes back running all fifteen. This was in the
+			// `if first` branch alone, and the consequence was measured rather
+			// than reasoned: the router dropped for five seconds at 02:01 and the
+			// command rate went from 129 a minute to ~300, where it stayed.
+			//
+			// Reconnects are not rare -- a RouterOS upgrade causes one, and so
+			// does any brief network blip -- so a prune that only runs on the
+			// FIRST connect is a prune that stops working the first time anything
+			// goes wrong. `TestBothConnectPathsPrune` is the guard, in the shape
+			// `TestBothTeardownPathsStopEveryCollector` already uses for the
+			// mirror-image mistake.
+			s.applyReasons()
 		}
 
 		s.waitUntilDown(c)

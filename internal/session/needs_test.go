@@ -210,3 +210,45 @@ func TestResumeCollectorRefusesWhatTheSessionHasNoReasonToRun(t *testing.T) {
 			"still remembered and replayed when the link comes up")
 	}
 }
+
+// TestBothConnectPathsPrune.
+//
+// ── THE BUG, AND WHY IT SURVIVED EVERY OTHER CHECK ──────────────────────────
+//
+// The connect loop has two branches: `if first` builds and starts the
+// collectors, and the `else` restarts them after a reconnect. The 4.3c prune was
+// added to the first and not the second, so a session held only for alerting
+// came back from any blip running all fifteen collectors.
+//
+// Nothing caught it. The unit tests assert the prune exists and it did; the live
+// measurement was taken at 129 commands a minute and the reconnect had not
+// happened yet. The router dropped for five seconds forty minutes later and the
+// rate went to ~300 and stayed there — found only because the loop kept
+// watching after the work looked finished.
+//
+// This is the same shape as `TestBothTeardownPathsStopEveryCollector`, which
+// exists because the mirror-image mistake was made on the way down.
+func TestBothConnectPathsPrune(t *testing.T) {
+	src := readSource(t, "session.go")
+	if n := strings.Count(src, "s.applyReasons()"); n < 4 {
+		t.Errorf("session.go calls applyReasons %d times; expected at least four — the "+
+			"first connect, the reconnect, Retain and Drop. A branch without it leaves a "+
+			"held session running the viewer's collector set until something else "+
+			"happens to touch it.", n)
+	}
+	// The reconnect branch specifically: it restarts every collector, so it is
+	// the one where a missing prune is invisible AND expensive.
+	recon := src[indexOf(src, "if s.eff.Enabled[\"conns\"] { s.conns.Reconnected() }"):]
+	if !contains(recon[:min(len(recon), 200)], "s.applyReasons()") {
+		t.Error("the reconnect branch no longer prunes. A held session comes back from " +
+			"any blip running every collector, which is what took this install from 129 " +
+			"commands a minute to 300.")
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
