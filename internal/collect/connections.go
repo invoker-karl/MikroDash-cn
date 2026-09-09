@@ -501,41 +501,27 @@ func orgCatOf(orgOf map[string][2]string, org string) string {
 
 // ── the shared snapshot ──────────────────────────────────────────────────────
 
-// ConnTable is one reading of the connection table, shared between the two
-// collectors that need it.
+// ── ConnTable WAS HERE, AND WHAT REPLACED IT IS THE SUBSCRIPTION ────────────
 //
-// THIS IS THE POINT OF THE WHOLE ARRANGEMENT. The connection table is the
-// heaviest read this app makes, and TWO collectors want it: connections
-// aggregates who is talking to whom, bandwidth differences the byte counters.
-// Reading it twice would double the cost of the most expensive thing here, on
-// hardware whose documented limit is exactly this kind of concurrency. So it is
-// read once and deposited, and the second consumer takes the snapshot.
+// It held one reading of the connection table so `bandwidth` could take a
+// snapshot instead of issuing the heaviest read in the app a second time. The
+// mechanism was sound and it is simply no longer the cheapest one: since 3.2d
+// BOTH collectors subscribe to `/ip/firewall/connection/print` with
+// byte-identical proplists, so the demand set coalesces them into one read with
+// two deliveries -- which is what the snapshot existed to achieve, done by the
+// mechanism every other shared menu uses.
 //
-// The TIMESTAMP is as load-bearing as the rows: bandwidth's rates are bytes over
-// elapsed time, and an unchanged timestamp means "you have already seen this",
-// not "nothing moved".
-type ConnTable struct {
-	mu   sync.Mutex
-	rows []routeros.Reply
-	ts   int64
-}
-
-func NewConnTable() *ConnTable { return &ConnTable{} }
-
-func (t *ConnTable) Set(rows []routeros.Reply, ts int64) {
-	t.mu.Lock()
-	t.rows, t.ts = rows, ts
-	t.mu.Unlock()
-}
-
-// Latest returns the snapshot and when it was taken. The rows are NOT copied:
-// they are read-only to every consumer, and copying a table of thousands on
-// every tick would give back the saving this cache exists for.
-func (t *ConnTable) Latest() ([]routeros.Reply, int64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.rows, t.ts
-}
+// Two things went with it and both were costs, not features:
+//
+//	the "same snapshot twice" guard   `bandwidth` had to detect re-reading one
+//	                                  reading, because differencing it against
+//	                                  itself yields zeros and overwrites a live
+//	                                  table with an idle-looking one. Every
+//	                                  delivery being a fresh read removes the
+//	                                  hazard rather than guarding it.
+//	a separate fallback read          for a session with no `conns` collector.
+//	                                  `bandwidth` drives the menu itself when it
+//	                                  is the only subscriber.
 
 // ── the collector ────────────────────────────────────────────────────────────
 
@@ -559,7 +545,6 @@ type Connections struct {
 	// session, which is every test. See collect/cache.go.
 	cache *roscache.Cache
 
-	table  *ConnTable
 	leases *DHCPLeases
 	nets   *DHCPNetworks
 	// detailed reports whether anyone has the Connections page open. The heavy
@@ -583,10 +568,10 @@ type Connections struct {
 // worst-case gap is this plus one poll, which has to stay inside it.
 const connsHeartbeat = 10 * time.Second
 
-func NewConnections(ros Reader, emit Emit, table *ConnTable, leases *DHCPLeases,
+func NewConnections(ros Reader, emit Emit, leases *DHCPLeases,
 	nets *DHCPNetworks, pollMs int) *Connections {
 	c := &Connections{
-		ros: ros, emit: emit, table: table, leases: leases, nets: nets,
+		ros: ros, emit: emit, leases: leases, nets: nets,
 		pollMs: newPollInterval(clampPoll(pollMs, 3000, 1000, 60000)),
 		// FIVE, which is `topN`'s generated default — not ten, which is what this
 		// said until 2026-08-29 and which no live default ever was. See WithTopN.
@@ -735,11 +720,6 @@ func (c *Connections) apply(rows []routeros.Reply, err error) {
 		return
 	}
 	now := time.Now().UnixMilli()
-	// Deposited BEFORE the aggregation, so the other consumer is not waiting on
-	// this collector's own work to see the rows.
-	if c.table != nil {
-		c.table.Set(rows, now)
-	}
 
 	detailed := c.detailed()
 	payload := BuildConns(ConnsInput{

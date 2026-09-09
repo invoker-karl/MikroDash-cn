@@ -161,29 +161,27 @@ func RoomsOf(key string) Rooms {
 // keepAliveFor is rooms where a collector must keep RUNNING for another
 // collector's sake, and which are not part of its own audience.
 //
-// ── AN AUDIENCE AND A DEPENDENCY ARE DIFFERENT THINGS ───────────────────────
+// ── IT IS EMPTY, AND THE ONE ENTRY IT HELD IS WHY IT STAYS ─────────────────
 //
 // `conns` emits to the Connections page and its dashboard card, and to nothing
-// else. But `bandwidth` reads the connection table `conns` deposits in
-// `ConnTable`, so suspending `conns` while somebody is on the BANDWIDTH page
-// starves a page `conns` never sends to.
+// else. But `bandwidth` used to read the connection table `conns` deposited in
+// `ConnTable`, so suspending `conns` while somebody was on the BANDWIDTH page
+// starved a page `conns` never sends to. That was the entry, and modelling it as
+// an audience would have been wrong: nothing is ever emitted there.
 //
-// That is why `suspendConnsIfIdle` waited on `page-bandwidth`, and it is the one
-// entry here. Modelling it as an audience would have been wrong -- nothing is
-// ever emitted there by this collector -- and dropping it in the move to
-// declarations would have starved the Bandwidth page silently.
+// `ConnTable` is gone. Both collectors SUBSCRIBE to
+// `/ip/firewall/connection/print` now, so `bandwidth` holds its own demand on
+// the menu and a suspended `conns` starves nothing. The comment here recorded
+// this as "probably safe" and deliberately did not act on it; removing the
+// snapshot is what turned probably into provably, and
+// `TestBothConnectionConsumersShareOneRead` is the proof -- it stops
+// `connections` and asserts the menu still has a subscriber.
 //
-// ── IT MAY NOW BE REMOVABLE, AND IS DELIBERATELY NOT REMOVED ────────────────
-//
-// Since 3.2c `bandwidth` subscribes to `/ip/firewall/connection` itself and takes
-// its rows from the scheduler, so on a live session it no longer needs
-// `ConnTable` at all. The dependency survives only on the POLLED path, which a
-// Session never takes. Removing this is therefore probably safe and is a
-// behaviour change resting on that "probably", so it is recorded rather than
-// made in a refactor whose whole point is to change nothing.
-var keepAliveFor = map[string]Rooms{
-	"conns": {"page-bandwidth"},
-}
+// THE MAP STAYS, EMPTY. The distinction it encodes is real and the next
+// cross-collector dependency will need it; deleting the mechanism because its
+// only instance closed would mean rediscovering the distinction the hard way,
+// which is how the Bandwidth page was starved in the first place.
+var keepAliveFor = map[string]Rooms{}
 
 // Others is the rooms a collector feeds APART from one page: what `pageBlur`
 // must find empty before it may suspend.

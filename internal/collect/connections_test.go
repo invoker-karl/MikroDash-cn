@@ -185,7 +185,7 @@ func TestConnsIgnoresInternalDestinations(t *testing.T) {
 // overrides it" is precisely the assumption that broke when the operator changed
 // the setting and nothing happened.
 func TestTheConnectionsTopNDefaultMatchesLive(t *testing.T) {
-	c := NewConnections(fakeReader{}, func(string, string, any) {}, nil, nil, nil, 3000)
+	c := NewConnections(fakeReader{}, func(string, string, any) {}, nil, nil, 3000)
 	if c.topN != 5 {
 		t.Errorf("the default topN is %d, want 5 — the live default from src/settings.js", c.topN)
 	}

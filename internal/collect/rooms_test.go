@@ -96,9 +96,18 @@ func TestOthersDropsTheBlurredPageAndNothingElse(t *testing.T) {
 		{"routing", "dashboard", []string{"page-routing"}},
 		{"dhcpNetworks", "dhcp", []string{"dash-card-network"}},
 		{"wireless", "wifi-clients", []string{"dash-card-wireless"}},
-		// No page blurred: the whole audience, plus the keep-alive bandwidth
-		// needs because it reads this collector's table rather than its emits.
-		{"conns", "", []string{"dash-card-connections", "page-bandwidth", "page-connections"}},
+		// No page blurred: the whole audience, AND NOTHING ELSE.
+		//
+		// `page-bandwidth` was here until 2026-09-09, as the one `keepAliveFor`
+		// entry: `bandwidth` read the connection table `conns` deposited in
+		// `ConnTable`, so suspending `conns` starved a page it never emits to.
+		// Both collectors subscribe to the menu now and `bandwidth` holds its own
+		// demand, so a suspended `conns` starves nothing.
+		//
+		// THIS IS A BEHAVIOUR CHANGE AND IT IS THE POINT: `conns` may now suspend
+		// on a Connections blur while somebody is on Bandwidth, which is a
+		// collector that stops asking a router about a page nobody is looking at.
+		{"conns", "", []string{"dash-card-connections", "page-connections"}},
 		// A page that this collector does not feed changes nothing.
 		{"vpn", "dns", []string{"dash-card-vpn", "page-vpn"}},
 	}

@@ -32,9 +32,7 @@ import (
 
 // Not a collector: a shared lookup table that `conns` and `bandwidth` both hold
 // by reference. It has no reader, no poll and nothing to start.
-var notPolled = map[string]string{
-	"connTable": "a shared lookup table passed to conns and bandwidth, not a poller",
-}
+var notPolled = map[string]string{}
 
 // dormancyKeyFor maps a session FIELD name onto the registry KEY the funnel is
 // called with. They are the same word for every collector but two, and those two
@@ -312,9 +310,8 @@ func TestEveryCollectorHonoursTheResolvedConfig(t *testing.T) {
 	//
 	// EXEMPT, each because it has no poll interval to resolve:
 	exempt := map[string]string{
-		"collect.NewLogs":      "streams /log/listen; no interval in its signature",
-		"collect.NewConnTable": "a shared table, not a collector",
-		"collect.NewTraffic":   "streams monitor-traffic; its trailing 5 is a sample window, not a poll",
+		"collect.NewLogs":    "streams /log/listen; no interval in its signature",
+		"collect.NewTraffic": "streams monitor-traffic; its trailing 5 is a sample window, not a poll",
 	}
 	for _, m := range regexp.MustCompile(`s\.\w+ = (collect\.New\w+)\([^\n]*`).FindAllStringSubmatch(sess, -1) {
 		if _, ok := exempt[m[1]]; ok {

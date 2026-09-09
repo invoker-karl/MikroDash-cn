@@ -520,7 +520,7 @@ func (r *Routing) applyLocked() {
 // BGPOnly stops this collector reading the route tables. See Tick.
 //
 // A SETTER RATHER THAN A CONSTRUCTOR ARGUMENT, matching how `WithDetailed`,
-// `WithGeo` and `WithTable` are done on the other collectors: the page path
+// `WithGeo` and `WithOrg` are done on the other collectors: the page path
 // constructs it plainly and only the pool asks for the narrow mode.
 func (r *Routing) BGPOnly() *Routing { r.bgpOnly = true; return r }
 

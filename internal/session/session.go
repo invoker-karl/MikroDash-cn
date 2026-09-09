@@ -178,7 +178,6 @@ type Session struct {
 	bandwidth    *collect.Bandwidth
 	traffic      *collect.Traffic
 	conns        *collect.Connections
-	connTable    *collect.ConnTable
 
 	// pendingResume holds page-focus resumes that arrived BEFORE the router
 	// connection came up. Guarded by mu. See ResumeCollector and replayResumes.
@@ -832,10 +831,11 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// device, and dhcpNetworks supplies the LAN ranges the source filter uses.
 	// Each is optional and costs exactly the field it feeds.
 	// ONE READ OF THE CONNECTION TABLE, TWO CONSUMERS. It is the heaviest read
-	// this app makes and both of these want it, so connections reads it and
-	// deposits the snapshot, and bandwidth differences the counters from there.
-	s.connTable = collect.NewConnTable()
-	s.conns = collect.NewConnections(reader{s}, emit, s.connTable, s.dhcpLeases, s.dhcpNetworks, s.eff.Poll["conns"]).
+	// this app makes and both of these want it -- and they get one read because
+	// they SUBSCRIBE TO THE SAME MENU with identical proplists, so the demand set
+	// coalesces them. `ConnTable`, the hand-built snapshot that used to do this,
+	// is gone: it was the right mechanism before there was a general one.
+	s.conns = collect.NewConnections(reader{s}, emit, s.dhcpLeases, s.dhcpNetworks, s.eff.Poll["conns"]).
 		// The heavy per-country and per-source indexes are built only when
 		// somebody is on the Connections page. The hub's room occupancy is the
 		// same question the Node side asks its adapter.
@@ -846,7 +846,6 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		WithGeo(geoLookup()).
 		WithOrg(asn.Lookup)
 	s.bandwidth = collect.NewBandwidth(reader{s}, emit, s.ifStatus, s.dhcpLeases, s.dhcpNetworks, s.eff.Poll["bandwidth"]).
-		WithTable(s.connTable).
 		WithGeo(geoLookup()).
 		WithOrg(asn.Lookup)
 	// The default interface is what the WAN badge watches, so it is always in

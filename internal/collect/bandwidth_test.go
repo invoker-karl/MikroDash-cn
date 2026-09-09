@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"testing"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -242,52 +243,102 @@ func TestBandwidthRecordsCountersBeforeFiltering(t *testing.T) {
 	}
 }
 
-// The shared snapshot, and the guard that makes it safe.
+// ONE READ, TWO CONSUMERS — through the subscription that replaced the snapshot.
 //
-// Two collectors read one table: connections deposits it, bandwidth takes it.
-// The timestamp is what tells the second consumer whether it is looking at
-// something new — and re-differencing one reading against itself would report a
-// busy network as idle, which is a wrong answer rather than a missing one.
-func TestBandwidthUsesSharedSnapshotOnce(t *testing.T) {
-	table := NewConnTable()
-	emitted := 0
-	b := NewBandwidth(fakeReader{}, func(string, string, any) { emitted++ }, nil, nil, nil, 3000).
-		WithTable(table)
+// ── WHAT THIS TEST USED TO BE, AND WHY IT HAD TO CHANGE ────────────────────
+//
+// It was `TestBandwidthUsesSharedSnapshotOnce`, and it drove `ConnTable`: the
+// connections collector deposited a reading, this one took it, and a timestamp
+// guard stopped the same reading being differenced against itself (which yields
+// zeros and reports a busy network as idle).
+//
+// `ConnTable` is gone. Both collectors subscribe to
+// `/ip/firewall/connection/print` with byte-identical proplists, so the demand
+// set coalesces them: ONE read, two deliveries. That is what the snapshot
+// existed to achieve, by the mechanism every other shared menu uses.
+//
+// THE PROPERTY IS THE SAME AND THE HAZARD IS GONE. There is no same-snapshot
+// guard to test any more because every delivery is a fresh read. What is left to
+// pin is the part that would silently double the heaviest read in the app: two
+// subscribers must produce ONE demand on ONE menu, not two.
+func TestBothConnectionConsumersShareOneRead(t *testing.T) {
+	rec := &menuRecorder{}
+	cache := roscache.New(rec)
 
-	rows := func(orig string) []routeros.Reply {
-		return []routeros.Reply{{
-			".id": "*1", "src-address": "10.0.0.5", "dst-address": "10.0.0.9",
-			"dst-port": "443", "protocol": "tcp", "orig-bytes": orig, "repl-bytes": "0",
-		}}
+	conns := NewConnections(rec, func(string, string, any) {}, nil, nil, 3000)
+	bw := NewBandwidth(rec, func(string, string, any) {}, nil, nil, nil, 3000)
+	conns.UseCache(cache)
+	bw.UseCache(cache)
+
+	conns.Start()
+	bw.Start()
+
+	demandsFor := func(menu string) int {
+		n := 0
+		for _, d := range cache.Demand() {
+			if d.Menu == menu {
+				n++
+			}
+		}
+		return n
 	}
 
-	// NOTHING DEPOSITED YET: the collector must not invent a reading.
-	b.Tick()
-	if b.Last() != nil {
-		t.Fatal("a payload was built before the table had ever been read")
+	// ONE DEMAND FOR THE MENU. Two would mean two reads of a table this app
+	// calls its heaviest, and nothing anywhere would fail — the Connections and
+	// Bandwidth pages would both look perfectly correct.
+	if n := demandsFor(connsCmd.Path); n != 1 {
+		t.Fatalf("%s carries %d demand(s), want exactly 1 — the two consumers are "+
+			"no longer coalesced and the heaviest read in the app is issued twice.",
+			connsCmd.Path, n)
 	}
 
-	table.Set(rows("1000000"), 1000)
-	b.Tick()
-	first := b.Last()
-	if first == nil {
-		t.Fatal("no payload from the first snapshot")
+	// ── AND BOTH OF THEM MUST BE ON IT, WHICH THE COUNT ALONE CANNOT SHOW ───
+	//
+	// The check above passed a mutation that pointed `bandwidth` at a DIFFERENT
+	// menu: one demand from `connections` alone still counts as one. Stopping
+	// `connections` and finding the demand STILL THERE is what proves the second
+	// subscriber exists and is on this menu.
+	// BOTH DIRECTIONS, because one is not enough. Stopping only `connections`
+	// proves `bandwidth` is on the menu and says nothing about `connections`;
+	// mutating EITHER collector onto a different menu left this test green until
+	// the mirror was added.
+	for _, c := range []struct {
+		name string
+		stop func()
+		then string
+	}{
+		{"connections", conns.Stop, "bandwidth"},
+		{"bandwidth", bw.Stop, "connections"},
+	} {
+		c.stop()
+		if n := demandsFor(connsCmd.Path); n != 1 {
+			t.Fatalf("with %s stopped, %s carries %d demand(s), want 1 — %s is not "+
+				"subscribed to this menu, so the two are not sharing a read at all "+
+				"and this test was measuring one collector.",
+				c.name, connsCmd.Path, n, c.then)
+		}
+		// Restarted, so the next case starts from both subscribed again.
+		switch c.name {
+		case "connections":
+			conns.Start()
+		case "bandwidth":
+			bw.Start()
+		}
 	}
 
-	// The SAME snapshot again: no new payload, because there is no new reading.
-	b.Tick()
-	if b.Last() != first {
-		t.Error("the same snapshot was differenced twice — rates would read as zero")
+	// And released cleanly, or a menu nobody wants keeps a router busy.
+	conns.Stop()
+	bw.Stop()
+	if n := demandsFor(connsCmd.Path); n != 0 {
+		t.Errorf("both collectors stopped and %s still carries %d demand(s)",
+			connsCmd.Path, n)
 	}
 
-	// A new snapshot, five seconds later: now there is something to measure.
-	table.Set(rows("2000000"), 6000)
-	b.Tick()
-	second := b.Last()
-	if second == first {
-		t.Fatal("a new snapshot produced no new payload")
-	}
-	if len(second.Devices) != 1 || second.Devices[0].TxMbps == 0 {
-		t.Errorf("no rate from two snapshots: %+v", second.Devices)
+	// AND THE PROPLISTS MUST STAY IDENTICAL, or the union widens and both
+	// consumers start paying for fields neither asked for.
+	if connsCmd.Args[0] != bandwidthConnCmd.Args[0] {
+		t.Errorf("the two proplists have diverged, so the union is now wider than "+
+			"either consumer asked for:\n  conns:     %s\n  bandwidth: %s",
+			connsCmd.Args[0], bandwidthConnCmd.Args[0])
 	}
 }

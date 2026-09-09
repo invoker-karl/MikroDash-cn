@@ -125,7 +125,7 @@ func tickEmit(t *testing.T) (emitted any, replay *ConnsPayload) {
 			seen++
 		}
 	}
-	c := NewConnections(ros, emit, nil, nil, nil, 3000)
+	c := NewConnections(ros, emit, nil, nil, 3000)
 	c.Tick()
 	if seen != 1 {
 		t.Fatalf("Tick emitted conn:update %d times, want 1 — the probe is not exercising "+

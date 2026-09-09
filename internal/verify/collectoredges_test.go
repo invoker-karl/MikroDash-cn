@@ -69,18 +69,23 @@ func TestCollectorEdgesAreDeclared(t *testing.T) {
 		},
 		"system":   {"topology": "identity and gauges, via WithSources"},
 		"firewall": {"queues": "the FastTrack summary, via FilterRowSource"},
-		// NOT A COLLECTOR, and declared anyway because it is the same shape of
-		// coupling and the ledger is worthless if it is selective. `connTable` is
-		// a shared value object: connections reads the connection table -- the
-		// heaviest read this app makes -- and deposits the parsed snapshot for
-		// bandwidth to difference. THIS ONE MUST NOT BE REMOVED by phase 2. Step
-		// 1.4 measured the alternative and found it strictly worse: routing that
-		// menu through the cache would share the READ, while this shares the
-		// PARSE, and bandwidth never issues the command at all.
-		"connTable": {
-			"conns":     "the connection table it fills",
-			"bandwidth": "the parsed snapshot, so it never reads that menu",
-		},
+		// ── `connTable` WAS HERE, AND ITS REMOVAL IS THE POINT ──────────────
+		//
+		// It was declared as a non-collector because it was the same shape of
+		// coupling and a selective ledger is worthless: `connections` read the
+		// heaviest table in the app and deposited the snapshot for `bandwidth`
+		// to difference, so `bandwidth` never issued the command at all.
+		//
+		// The entry also carried an instruction -- "THIS ONE MUST NOT BE REMOVED
+		// by phase 2. Step 1.4 measured the alternative and found it strictly
+		// worse: routing that menu through the cache would share the READ, while
+		// this shares the PARSE." THAT WAS WRONG IN ITS PREMISE. `ConnTable`
+		// shared raw rows, not a parse, so the alternative shared exactly the
+		// same thing by the mechanism every other menu uses. 3.2d subscribed both
+		// collectors and 2026-09-09 deleted the table.
+		//
+		// Recorded here rather than silently dropped, because the instruction it
+		// carried was repeated to an operator as fact twice.
 	}
 
 	found := collectorEdges(t, src)

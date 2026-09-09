@@ -350,12 +350,12 @@ var bandwidthConnCmd = routeros.Cmd{Path: "/ip/firewall/connection/print", Args:
 
 // Bandwidth is the collector.
 //
-// IT NO LONGER OWNS THE READ. The connections collector reads the table and
-// deposits it in a shared ConnTable; this one takes the snapshot — one read
+// IT NO LONGER OWNS THE READ, AND IT NO LONGER TAKES A SNAPSHOT EITHER. It
+// SUBSCRIBES to `/ip/firewall/connection/print` with the same proplist the
+// connections collector uses, so the demand set coalesces the two — one read
 // serving two consumers, which is the channel economy this port is organised
-// around. It keeps its own read as a fallback for a session that has no
-// connections collector, and the transform is unchanged either way because it
-// takes its rows as an argument.
+// around. Unscheduled it reads for itself, and the transform is unchanged either
+// way because it takes its rows as an argument.
 type Bandwidth struct {
 	ros    Reader
 	emit   Emit
@@ -367,7 +367,6 @@ type Bandwidth struct {
 	rates  RateSource
 	leases *DHCPLeases
 	nets   *DHCPNetworks
-	table  *ConnTable
 	geo    GeoLookup
 	org    OrgLookup
 
@@ -430,13 +429,6 @@ func (b *Bandwidth) apply(rows []routeros.Reply, err error) {
 		return
 	}
 	b.build(rows, time.Now().UnixMilli())
-}
-
-// WithTable points this collector at the shared connection-table snapshot. With
-// one, it stops reading the table itself.
-func (b *Bandwidth) WithTable(t *ConnTable) *Bandwidth {
-	b.table = t
-	return b
 }
 
 // WithGeo attaches the country lookup. A nil one leaves the fields empty, which
@@ -552,36 +544,23 @@ func (b *Bandwidth) Tick() {
 		return
 	}
 
-	var rows []routeros.Reply
-	var now int64
-	if b.table != nil {
-		rows, now = b.table.Latest()
-		if now == 0 {
-			return // the connections collector has not read yet
-		}
-		// THE SAME SNAPSHOT TWICE IS NOT A MEASUREMENT. This collector's rates
-		// are byte deltas over elapsed time, so re-differencing one reading
-		// against itself yields zeros — which would overwrite good data with an
-		// idle-looking table whenever this tick outruns the one that reads.
-		b.mu.Lock()
-		seen := now == b.lastSnapshot
-		if !seen {
-			b.lastSnapshot = now
-		}
-		b.mu.Unlock()
-		if seen {
-			return
-		}
-	} else {
-		// No connections collector in this session: read the table directly.
-		var err error
-		rows, err = b.ros.Do(bandwidthConnCmd)
-		if err != nil {
-			return
-		}
-		now = time.Now().UnixMilli()
+	// ── ONE PATH, BECAUSE `ConnTable` IS GONE ───────────────────────────────
+	//
+	// This used to branch: take the shared snapshot when a `conns` collector had
+	// deposited one, and otherwise read the menu directly. The snapshot half
+	// carried a guard against differencing ONE reading against ITSELF -- which
+	// yields zeros and overwrites a live table with an idle-looking one --
+	// because this tick could outrun the one that read.
+	//
+	// Both are gone. On a scheduled session `apply` builds from rows the
+	// scheduler delivered and this function is not the path; unscheduled, it
+	// reads for itself. Either way every reading is fresh, so there is no
+	// same-snapshot hazard left to guard against.
+	rows, err := b.ros.Do(bandwidthConnCmd)
+	if err != nil {
+		return
 	}
-	b.build(rows, now)
+	b.build(rows, time.Now().UnixMilli())
 }
 
 // build turns one reading into a payload and emits when it says something new.
