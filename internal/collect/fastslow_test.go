@@ -1,7 +1,9 @@
 package collect
 
 import (
+	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -604,5 +606,180 @@ func TestVpnSlowMenusAreOnTheSlowLane(t *testing.T) {
 	if got := fast.poll.bounded(); got > vpnSlowTarget {
 		t.Errorf("the residual loop runs at %v; WireGuard handshake ages are the one "+
 			"thing here that moves, and slowing them is the opposite of the fix", got)
+	}
+}
+
+// ── B.2: THE DELIVERY BRANCH ────────────────────────────────────────────────
+//
+// `scheduled` gained one job: ask the cache to keep its menu current from an
+// open channel instead of a read, when `eff.Stream` says so. Everything else is
+// unchanged, which is what these pin — the subscription, the cadence and the
+// `apply` callback must be identical either way, because the operator's rule is
+// that mode switches DELIVERY ONLY and never touches intervals.
+
+// streamReader is a schedReader that can also stream.
+type streamReader struct {
+	schedReader
+	mu     sync.Mutex
+	opens  int
+	refuse bool
+}
+
+func (r *streamReader) Stream(_ routeros.Cmd, _ func(routeros.Reply)) (func(), error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.refuse {
+		return nil, errors.New("this router will not stream that")
+	}
+	r.opens++
+	return func() {}, nil
+}
+
+func (r *streamReader) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.opens
+}
+
+func streamed(t *testing.T, c *roscache.Cache) []string {
+	t.Helper()
+	return c.StreamedMenus()
+}
+
+// TestPollModeOpensNoChannel. The default, and the state every collector is in
+// today: `stream` nil means poll, and nothing must open.
+func TestPollModeOpensNoChannel(t *testing.T) {
+	r := &streamReader{}
+	c := roscache.New(r)
+	s := scheduled{cache: c, menu: "/ip/dns/print",
+		cadence: func() time.Duration { return time.Second }}
+	s.begin()
+	defer s.end()
+
+	if n := r.count(); n != 0 {
+		t.Errorf("%d channel(s) opened for a collector with no stream function", n)
+	}
+	if got := streamed(t, c); len(got) != 0 {
+		t.Errorf("streamed menus = %v, want none", got)
+	}
+	if len(c.Demand()) != 1 {
+		t.Error("poll mode did not subscribe; delivery is not the only thing that changed")
+	}
+}
+
+// TestStreamModeOpensOneChannelAndKeepsTheSubscription is the property the whole
+// design rests on: the menu is still in the demand set, still at its declared
+// cadence, and only the FILLER differs.
+func TestStreamModeOpensOneChannelAndKeepsTheSubscription(t *testing.T) {
+	r := &streamReader{}
+	c := roscache.New(r)
+	s := scheduled{cache: c, menu: "/ip/dns/print",
+		cadence:    func() time.Duration { return time.Second },
+		stream:     func() bool { return true },
+		streamKey:  func(row routeros.Reply) string { return row[".id"] },
+		streamArgs: func() []string { return []string{"=interval=1"} },
+	}
+	s.begin()
+
+	if n := r.count(); n != 1 {
+		t.Fatalf("%d channel(s) opened, want 1", n)
+	}
+	d := c.Demand()
+	if len(d) != 1 || d[0].Menu != "/ip/dns/print" || d[0].Cadence != time.Second {
+		t.Errorf("demand = %v; streaming must not disturb the subscription or its cadence", d)
+	}
+
+	// AND THE CHANNEL GOES WITH THE SUBSCRIPTION. A fill outliving its collector
+	// is an open channel on a router nobody is reading.
+	s.end()
+	if got := streamed(t, c); len(got) != 0 {
+		t.Errorf("still streaming %v after end()", got)
+	}
+}
+
+// TestAKeylessCollectorWillNotStream. A rolling map with no key holds one row,
+// so a collector that has not said how its rows are identified must stay polled
+// rather than silently answer with the last row the router sent.
+//
+// THE RULE LIVES IN `roscache.FillFromStream`, NOT HERE, and this asserts the
+// consequence rather than the mechanism: `fillIfStreaming` deliberately carries
+// no `keyOf == nil` check of its own, because the same rule in two places is
+// what `rooms.go` exists to stop. A mutation removing a duplicate guard here
+// would not fail, which is correct -- there is nothing to remove.
+func TestAKeylessCollectorWillNotStream(t *testing.T) {
+	r := &streamReader{}
+	c := roscache.New(r)
+	s := scheduled{cache: c, menu: "/ip/dns/print",
+		cadence: func() time.Duration { return time.Second },
+		stream:  func() bool { return true }, // asked for, and no key given
+	}
+	s.begin()
+	defer s.end()
+
+	if n := r.count(); n != 0 {
+		t.Errorf("%d channel(s) opened for a collector with no key function — its "+
+			"entry would hold one row and the page would show one interface", n)
+	}
+	if len(c.Demand()) != 1 {
+		t.Error("the collector lost its subscription as well; a refusal must leave a " +
+			"working polled collector, not a broken one")
+	}
+}
+
+// TestARefusedStreamFallsBackToPolling. A router that will not stream a menu
+// must leave a working polled collector, not an error on a page that is
+// rendering correctly.
+func TestARefusedStreamFallsBackToPolling(t *testing.T) {
+	r := &streamReader{refuse: true}
+	c := roscache.New(r)
+	s := scheduled{cache: c, menu: "/ip/dns/print",
+		cadence:   func() time.Duration { return time.Second },
+		stream:    func() bool { return true },
+		streamKey: func(row routeros.Reply) string { return row[".id"] },
+	}
+	s.begin()
+	defer s.end()
+
+	if got := streamed(t, c); len(got) != 0 {
+		t.Errorf("a refused stream left %v registered", got)
+	}
+	if len(c.Demand()) != 1 {
+		t.Fatal("a refused stream cost the collector its subscription")
+	}
+}
+
+// TestResubscribeMovesTheChannelWithTheMenu. Mechanism B moves menus routinely —
+// `firewall` follows the table on screen, `wifi`/`wireless` follow whichever
+// stack the router has. A fill is per-menu, so a move that left the old channel
+// open would leak it AND, because a menu cannot be filled twice, would stop the
+// collector ever streaming that menu again if it moved back.
+func TestResubscribeMovesTheChannelWithTheMenu(t *testing.T) {
+	r := &streamReader{}
+	c := roscache.New(r)
+	s := scheduled{cache: c, menu: "/ip/firewall/filter/print",
+		cadence:   func() time.Duration { return time.Second },
+		apply:     func([]routeros.Reply, error) {},
+		stream:    func() bool { return true },
+		streamKey: func(row routeros.Reply) string { return row[".id"] },
+	}
+	s.begin()
+	defer s.end()
+
+	if got := streamed(t, c); len(got) != 1 || got[0] != "/ip/firewall/filter/print" {
+		t.Fatalf("streamed = %v after begin", got)
+	}
+
+	s.resubscribe("/ip/firewall/nat/print", func([]routeros.Reply, error) {})
+
+	got := streamed(t, c)
+	if len(got) != 1 || got[0] != "/ip/firewall/nat/print" {
+		t.Errorf("streamed = %v after resubscribe, want only the new menu — the old "+
+			"channel leaked, and the old menu can now never be filled again", got)
+	}
+	// AND BACK, which is the case the leak would have broken permanently.
+	s.resubscribe("/ip/firewall/filter/print", func([]routeros.Reply, error) {})
+	if got := streamed(t, c); len(got) != 1 || got[0] != "/ip/firewall/filter/print" {
+		t.Errorf("streamed = %v after moving back; the first menu could not be "+
+			"re-filled, which is what a leaked fill does", got)
 	}
 }

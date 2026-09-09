@@ -70,8 +70,29 @@ type scheduled struct {
 	cadence func() time.Duration
 	apply   func([]routeros.Reply, error)
 
+	// ── B.2: THE DELIVERY HALF ──────────────────────────────────────────────
+	//
+	// `stream` answers "should this collector's menu be pushed rather than
+	// polled", and it is a FUNCTION rather than a bool because the answer comes
+	// from `eff.Stream[key]`, which a collector reads through the session. Nil
+	// means "poll", which is what every collector does today.
+	//
+	// `streamKey` names a row for the rolling map. Its absence is not a
+	// convenience default: a fill with no key holds ONE row, so a collector that
+	// wants a stream must say how its rows are identified. See
+	// roscache.FillFromStream.
+	//
+	// `streamArgs` are the arguments the stream is opened with -- the interval
+	// and the proplist. Separate from `fields` because `fields` is the
+	// subscription's union and this is one command's argument list.
+	stream     func() bool
+	streamKey  func(routeros.Reply) string
+	streamArgs func() []string
+
 	mu      sync.Mutex
 	release func()
+	// unfill closes the stream backing this menu, when there is one.
+	unfill func()
 }
 
 // useCache moves the collector onto the scheduler. Set once, before start.
@@ -132,6 +153,67 @@ func (s *scheduled) begin() {
 	}
 	s.release = rel
 	s.mu.Unlock()
+
+	s.fillIfStreaming(menu)
+}
+
+// fillIfStreaming asks the cache to keep this menu current from an open channel
+// instead of from a read.
+//
+// ── DELIVERY IS THE ONLY THING THAT CHANGES ─────────────────────────────────
+//
+// The subscription above is untouched: the menu is still in the demand set, the
+// scheduler still delivers at the declared cadence, and `apply` still receives
+// rows it cannot tell apart. Only the FILLER differs, which is the operator's
+// own framing of the two modes -- "mode switches delivery only and never touches
+// intervals".
+//
+// ── EVERY REFUSAL FALLS BACK TO POLLING, SILENTLY AND ON PURPOSE ────────────
+//
+// A menu that will not stream, a reader that cannot, a collector with no key
+// function, a router that refuses `=interval=` -- each leaves the subscription
+// exactly as it was, which is a working polled collector. The alternative is
+// surfacing an error for a delivery mechanism the operator asked for and the
+// hardware declined, on a page that is rendering correctly.
+//
+// It is logged nowhere YET, and that is a gap rather than a decision: B.4
+// enables collectors one at a time and needs to see which ones took the stream.
+// The instrument for that is a stream counter in `roslimit`, which does not
+// exist.
+func (s *scheduled) fillIfStreaming(menu string) {
+	s.mu.Lock()
+	want, keyOf, args := s.stream, s.streamKey, s.streamArgs
+	already := s.unfill != nil
+	s.mu.Unlock()
+	// NO `keyOf == nil` CHECK HERE, DELIBERATELY. `FillFromStream` refuses a nil
+	// key function and this falls back to polling on any refusal, so a check here
+	// would be the same rule in a second place -- and a rule stated twice is what
+	// `rooms.go` exists to stop, after the room lists disagreed five times. The
+	// cost is one call into the cache before the refusal, which happens once per
+	// begin.
+	if already || want == nil || !want() || s.cache == nil {
+		return
+	}
+
+	cmd := routeros.Cmd{Path: menu}
+	if args != nil {
+		cmd.Args = args()
+	}
+	stop, err := s.cache.FillFromStream(menu, cmd, keyOf)
+	if err != nil {
+		return // polling, which is what the subscription already does
+	}
+
+	s.mu.Lock()
+	if s.unfill != nil || s.menu != menu {
+		// Raced with another begin, or a resubscribe moved the menu. Give this
+		// one up rather than leaking a channel the collector cannot reach.
+		s.mu.Unlock()
+		stop()
+		return
+	}
+	s.unfill = stop
+	s.mu.Unlock()
 }
 
 // resubscribe points the collector at a different menu, with the callback that
@@ -181,12 +263,23 @@ func (s *scheduled) resubscribe(menu string, apply func([]routeros.Reply, error)
 	}
 	s.menu, s.apply = menu, apply
 	old := s.release
-	s.release = nil
+	// AND THE OLD MENU'S CHANNEL. A fill is per-MENU, so moving the menu without
+	// releasing it leaves a stream open on a menu this collector no longer reads
+	// -- and `FillFromStream` refuses a second fill of one menu, so the leak
+	// would also stop the collector ever streaming that menu again if it moved
+	// back. Mechanism B moves menus routinely: `firewall` follows the table the
+	// operator is looking at, and `wifi`/`wireless` follow whichever stack the
+	// router turned out to have.
+	oldFill := s.unfill
+	s.release, s.unfill = nil, nil
 	fields, cadence := s.fields, s.cadence
 	s.mu.Unlock()
 
 	if old != nil {
 		old()
+	}
+	if oldFill != nil {
+		oldFill()
 	}
 	// Nothing to move: either this collector is polled, or it is suspended and
 	// `begin` will subscribe to the menu just recorded.
@@ -208,6 +301,8 @@ func (s *scheduled) resubscribe(menu string, apply func([]routeros.Reply, error)
 	}
 	s.release = rel
 	s.mu.Unlock()
+
+	s.fillIfStreaming(menu)
 }
 
 // end gives up the demand, or stops the loop.
@@ -227,9 +322,16 @@ func (s *scheduled) end() {
 	}
 	s.mu.Lock()
 	rel := s.release
-	s.release = nil
+	fill := s.unfill
+	s.release, s.unfill = nil, nil
 	s.mu.Unlock()
 	if rel != nil {
 		rel()
+	}
+	// THE CHANNEL GOES WITH THE SUBSCRIPTION. A fill outliving its collector is
+	// an open channel on a router nobody is reading -- the exact cost this whole
+	// rewrite is organised around, and invisible because the page it fed is gone.
+	if fill != nil {
+		fill()
 	}
 }
