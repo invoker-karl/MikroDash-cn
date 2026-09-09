@@ -111,20 +111,63 @@ func NewLogs(ros Reader, emit Emit) *Logs {
 	return &Logs{ros: ros, emit: emit, size: logHistorySize()}
 }
 
-// push appends one entry, dropping the oldest when the ring is full.
-func (l *Logs) push(e LogEntry) {
-	l.history = append(l.history, e)
-	if len(l.history) > l.size {
-		l.history = l.history[len(l.history)-l.size:]
-	}
-}
-
-func entryOf(row routeros.Reply, now int64) LogEntry {
+// FoldLog folds one log row into the history ring and returns the entry it made
+// and the next state.
+//
+// ── PHASE 4.1: THE SECOND SEQUENCE DERIVATION, SAME SHAPE AS THE FIRST ─────
+//
+//	table     func(prior, []Reply) (payload, prior)   map over the current state
+//	sequence  func(prior,   Reply) (payload, prior)   fold one element in
+//
+// A log line is the clearest case of the second: each row is an EVENT, it
+// matters once, and there is no "current value of the log" to map over. That is
+// also why this menu can never back a rolling cache entry -- see
+// `roscache.unrollable`, where it is refused for exactly this reason.
+//
+// PURE, AND THE COPY IS NOT DEFENSIVE. `append` into a slice with spare capacity
+// writes THROUGH to the caller's backing array, and these rings always have
+// spare capacity once they have been sliced down. `FoldPing`'s own test passed a
+// mutation for a whole round because it was written with slice literals, whose
+// capacity equals their length; this avoids the same trap by construction.
+func FoldLog(prior []LogEntry, size int, row routeros.Reply, now int64) (LogEntry, []LogEntry) {
 	topics := row["topics"]
-	return LogEntry{
+	e := LogEntry{
 		TS: now, Time: row["time"], Topics: topics,
 		Message: row["message"], Severity: classifyLog(topics),
 	}
+	return e, appendCapped(prior, e, size)
+}
+
+// appendCapped is the ring rule, in one place.
+//
+// THE LAST `size`, not the first: a ring that has overflowed must yield its most
+// RECENT lines. Trimming from the front is what makes it a ring rather than a
+// buffer that stops accepting, and it is the same rule `LoadInitial` applies to
+// the backlog -- `/log/print` answers oldest first, so a router with more history
+// than the ring holds must give up its oldest.
+//
+// It COPIES rather than appending in place. A slice with spare capacity -- which
+// every one of these has once it has been trimmed -- would otherwise be written
+// through, and the caller's view of its own history would change under it.
+func appendCapped(prior []LogEntry, e LogEntry, size int) []LogEntry {
+	next := append(append(make([]LogEntry, 0, len(prior)+1), prior...), e)
+	if size > 0 && len(next) > size {
+		next = next[len(next)-size:]
+	}
+	return next
+}
+
+// push appends one entry, dropping the oldest when the ring is full.
+//
+// The collector's half: hand the carried ring to the fold and keep what comes
+// back. Everything that can be got wrong lives in FoldLog.
+func (l *Logs) push(e LogEntry) {
+	l.history = appendCapped(l.history, e, l.size)
+}
+
+func entryOf(row routeros.Reply, now int64) LogEntry {
+	e, _ := FoldLog(nil, 0, row, now)
+	return e
 }
 
 // LoadInitial reads the backlog and emits it whole.

@@ -1,6 +1,10 @@
 package collect
 
-import "testing"
+import (
+	"testing"
+
+	"mikrodash/internal/routeros"
+)
 
 // The severity classification, including the two branches no fixture reaches.
 //
@@ -45,5 +49,87 @@ func TestLogRingDropsOldest(t *testing.T) {
 	}
 	if n := logHistorySize(); n != 500 {
 		t.Errorf("default history size is %d, want 500", n)
+	}
+}
+
+// ── PHASE 4.1: THE SECOND SEQUENCE DERIVATION ──────────────────────────────
+//
+// A log line is the clearest case of a fold: each row is an EVENT, it matters
+// once, and there is no "current value of the log" to map over. That is also why
+// this menu can never back a rolling cache entry — `roscache.unrollable` refuses
+// it for exactly this reason.
+
+func TestFoldLogKeepsTheMostRecentLines(t *testing.T) {
+	var ring []LogEntry
+	for i := 0; i < 10; i++ {
+		_, ring = FoldLog(ring, 3, routeros.Reply{
+			"message": string(rune('a' + i)), "topics": "info",
+		}, int64(i))
+	}
+	if len(ring) != 3 {
+		t.Fatalf("ring holds %d, want 3", len(ring))
+	}
+	// THE LAST THREE, NOT THE FIRST. A ring that trimmed from the back would
+	// freeze on the oldest lines and never show anything that just happened,
+	// which is the entire purpose of a log tail.
+	want := []string{"h", "i", "j"}
+	for i, w := range want {
+		if ring[i].Message != w {
+			t.Errorf("ring[%d] = %q, want %q — the ring is trimming from the wrong "+
+				"end, so the page shows the oldest lines for ever", i, ring[i].Message, w)
+		}
+	}
+}
+
+// TestFoldLogDoesNotWriteThroughToThePrior.
+//
+// `append` into a slice with spare capacity writes THROUGH to the caller's
+// backing array, and these rings always have spare capacity once trimmed. The
+// equivalent test for `FoldPing` passed a mutation for a whole round because it
+// was written with slice literals, whose capacity equals their length — so this
+// one is built with room to spare on purpose.
+func TestFoldLogDoesNotWriteThroughToThePrior(t *testing.T) {
+	prior := append(make([]LogEntry, 0, 8),
+		LogEntry{Message: "one"}, LogEntry{Message: "two"})
+	_, next := FoldLog(prior, 10, routeros.Reply{"message": "three"}, 1)
+
+	if len(prior) != 2 {
+		t.Errorf("the prior grew to %d", len(prior))
+	}
+	// The element PAST the prior's length is where an in-place append lands, and
+	// a length check alone would miss it.
+	if full := prior[:cap(prior)]; full[2].Message != "" {
+		t.Errorf("the fold appended into the prior's spare capacity (found %q); the "+
+			"caller's history was written through", full[2].Message)
+	}
+	if len(next) != 3 || next[2].Message != "three" {
+		t.Errorf("next = %d entries ending %q", len(next), next[len(next)-1].Message)
+	}
+}
+
+// TestFoldLogClassifiesFromTopics — the severity is derived, not carried, so a
+// line's colour cannot disagree with its topics.
+func TestFoldLogClassifiesFromTopics(t *testing.T) {
+	e, _ := FoldLog(nil, 10, routeros.Reply{
+		"message": "login failure", "topics": "system,error,critical", "time": "12:00:00",
+	}, 42)
+	if e.Severity == "" {
+		t.Error("no severity derived from the topics")
+	}
+	if e.TS != 42 || e.Time != "12:00:00" || e.Message != "login failure" {
+		t.Errorf("entry = %+v; the fold altered fields it should pass through", e)
+	}
+}
+
+// TestFoldLogWithNoCapIsUnbounded — `entryOf` builds a single entry with size 0
+// and must not have its ring trimmed to nothing.
+func TestFoldLogWithNoCapIsUnbounded(t *testing.T) {
+	var ring []LogEntry
+	for i := 0; i < 5; i++ {
+		_, ring = FoldLog(ring, 0, routeros.Reply{"message": "x"}, int64(i))
+	}
+	if len(ring) != 5 {
+		t.Errorf("ring holds %d with no cap, want 5 — a zero size must mean "+
+			"unbounded, not empty", len(ring))
 	}
 }
