@@ -430,13 +430,43 @@ func (p *Packages) apply(rows []routeros.Reply, err error) {
 	p.applyRows(rows, err)
 }
 
-// applyRows builds and emits from the package list.
-func (p *Packages) applyRows(rows []routeros.Reply, _ error) {
-	p.packages = parsePackages(rows)
+// PackagesInput is one tick's worth of the outside world, for BuildPackages.
+//
+// Firmware and Update are CARRIED between ticks by the collector: both are read
+// on a slow lane (`configEvery`) while the package list is read every tick, so
+// the payload needs them on ticks that did not fetch them. That is the same
+// fast/slow shape `ifStatus` uses, arriving at the derivation as inputs rather
+// than as hidden receiver state.
+type PackagesInput struct {
+	Rows     []routeros.Reply
+	Firmware Firmware
+	Update   Update
+	// Available is the package-menu presence latch. NIL MEANS "NOT YET KNOWN",
+	// which reads as available — the same rule as DNS, and for the same reason:
+	// a router is presumed to have the menu until it says otherwise.
+	Available *bool
+	PollMs    int
+	Now       int64
+}
 
-	counts := PackageCounts{Total: len(p.packages)}
+// BuildPackages is the Packages payload, pure.
+//
+// ── THE COUNTS ARE DERIVED HERE, WHICH IS THE POINT OF THE STEP ────────────
+//
+// Totals, per-state counts and the pending-reboot flag were computed inline in
+// `applyRows`, so the only way to test "a disabled package is not counted as
+// installed" was to build a collector and drive a tick. They are a function of
+// the rows and nothing else.
+//
+// `PendingReboot` is `scheduled > 0` and is NOT a separate reading: a package
+// with a scheduled action is what a pending reboot IS, and deriving it here
+// stops the flag and the count disagreeing.
+func BuildPackages(in PackagesInput) (*PackagesPayload, []Package) {
+	pkgs := parsePackages(in.Rows)
+
+	counts := PackageCounts{Total: len(pkgs)}
 	scheduled := 0
-	for _, pk := range p.packages {
+	for _, pk := range pkgs {
 		switch pk.State {
 		case "installed":
 			counts.Installed++
@@ -451,16 +481,28 @@ func (p *Packages) applyRows(rows []routeros.Reply, _ error) {
 	}
 	counts.Scheduled = scheduled
 
-	payload := &PackagesPayload{
-		TS:            time.Now().UnixMilli(),
-		PollMs:        p.pollMs.ms(),
-		Packages:      p.packages,
-		Firmware:      p.firmware,
-		Update:        p.update,
+	return &PackagesPayload{
+		TS:            in.Now,
+		PollMs:        in.PollMs,
+		Packages:      pkgs,
+		Firmware:      in.Firmware,
+		Update:        in.Update,
 		Counts:        counts,
 		PendingReboot: scheduled > 0,
-		Available:     !(p.pkgOK != nil && !*p.pkgOK),
-	}
+		Available:     in.Available == nil || *in.Available,
+	}, pkgs
+}
+
+// applyRows builds and emits from the package list.
+func (p *Packages) applyRows(rows []routeros.Reply, _ error) {
+	payload, pkgs := BuildPackages(PackagesInput{
+		Rows: rows, Firmware: p.firmware, Update: p.update,
+		Available: p.pkgOK, PollMs: p.pollMs.ms(), Now: time.Now().UnixMilli(),
+	})
+	// THE PARSED LIST COMES BACK rather than being parsed twice: the collector
+	// keeps it for the fingerprint below, and two parses of one reply could
+	// diverge if `parsePackages` ever stopped being deterministic.
+	p.packages = pkgs
 	p.last = payload
 
 	// The fingerprint deliberately excludes ts and pollMs: newPollInterval(a) payload that says
