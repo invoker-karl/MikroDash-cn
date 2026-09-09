@@ -64,6 +64,7 @@ func main() {
 		few     = flag.Int("few", 2, "how many interfaces stand in for what `traffic` watches today")
 		chans   = flag.Int("channels", 0, "B.0b: instead of the width measurement, open up to N CONCURRENT channels and report the router's ceiling and any starvation")
 		hold    = flag.Int("hold", 4, "B.0b: seconds to hold and measure at each channel width")
+		probe   = flag.String("probe", "", "B.4: comma-separated menus to test for =interval= support, one at a time")
 	)
 	flag.Parse()
 
@@ -97,6 +98,18 @@ func main() {
 	small := names
 	if len(small) > *few {
 		small = small[:*few]
+	}
+
+	// ── B.4: DOES THIS MENU ACCEPT `=interval=`? ────────────────────────────
+	//
+	// See probe.go. The documentation settles the CLI and not the binary API,
+	// and assuming wrongly surfaces as a trap at the moment a router is switched
+	// to Stream. Same tool because the dial and the credential handling are here.
+	if *probe != "" {
+		menus := strings.Split(*probe, ",")
+		fmt.Printf("  B.4 probe — %d menu(s), %ds each\n\n", len(menus), *hold)
+		reportProbe(probeMenus(c, menus, *hold), *hold)
+		return
 	}
 
 	// ── B.0b: THE CHANNEL BUDGET, WHICH IS A DIFFERENT QUESTION ─────────────
