@@ -176,9 +176,11 @@ RouterOS binary API (TCP/TLS)
                          of the app speaks — Cmd, Reply, Trap, Config.
   internal/collect/      the collectors, one per RouterOS subsystem
   internal/session/      one Session per watched router, owning the connection every
-                         collector shares
-  internal/routers/      the background pool for routers nobody is watching
-  internal/alertpool/    the same, for routers with alerting enabled
+                         collector shares. It also holds a session for routers
+                         NOBODY is watching, for alerting, history or merely a
+                         known status — see internal/session/needs.go. That
+                         replaced internal/alertpool, deleted 2026-09-09.
+  internal/routers/      the Devices page's background pool
   internal/alert/        the alert rules — pure: rows in, verdict out
   internal/guard/        the write guards — also pure. See "Write guards" below
   internal/store/        /data as it is written: AES-256-GCM settings, scrypt users,

@@ -17,11 +17,11 @@ import (
 //
 // ── IT ASKED TWO SOURCES AND GAVE UP ───────────────────────────────────────
 //
-// `activeRouterHealth` consulted the interactive sessions, then the alert pool,
+// `activeRouterHealth` consulted the interactive sessions, then the held ones,
 // then returned false. Three components can hold a router, and the one it did
 // not ask is the one that holds it exactly when the other two do not:
-// `alertPoolExclusions` removes from the alert pool every router the overview
-// pool has ANSWERED for, and the alert pool forgets the status of a router it
+// `warmExclusions` drops the WARM hold on every router the overview
+// pool has ANSWERED for, and the manager forgets the status of a router it
 // drops.
 //
 // So while anybody had the Devices page open, `/healthz` reported the active
@@ -36,7 +36,7 @@ import (
 // sequence.
 
 // healthPoolServer is a server whose ACTIVE router is held only by the overview
-// pool — no interactive session, no alert pool entry.
+// pool — no interactive session, no held one.
 func healthPoolServer(t *testing.T, dial routers.Dialer) *Server {
 	t.Helper()
 	s := schedServer(t, `[{"id":"r1","label":"One","host":"198.51.100.1","port":8728,
@@ -114,7 +114,7 @@ func TestHealthzStillReportsAnUnreachableRouter(t *testing.T) {
 // as red Offline on the Devices page, twice reported.
 //
 // The gate in `activeRouterHealth` is DEFENSIVE, and this test does not prove
-// it: with the alert pool consulted first, an unanswered summary and a skipped
+// it: with the sessions consulted first, an unanswered summary and a skipped
 // one both end at the same `return false`, so removing `sum.Known` changes no
 // outcome and no test can kill that mutation. It is kept because it states the
 // invariant every other reader of `Summaries()` uses, and because the order
@@ -199,6 +199,6 @@ func TestSyncPoolSchedulesARelease(t *testing.T) {
 			"that is not the Devices page — a router edit, a create, a delete, a " +
 			"site change — then holds a connection to every router for the life of " +
 			"the process, and /healthz reports the active router disconnected " +
-			"because the alert pool has handed it over and forgotten it.")
+			"because the warm hold has been handed over and forgotten.")
 	}
 }

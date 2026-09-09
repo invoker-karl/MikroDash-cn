@@ -463,7 +463,7 @@ func TestANilWireIsInert(t *testing.T) {
 // live evaluator is reached from one event loop.
 //
 // This port reaches it from many goroutines: every collector has its own poll
-// timer, and `internal/alertpool` multiplied that by the fleet. On 2026-08-29
+// timer, and holding the whole fleet multiplied that by the fleet. On 2026-08-29
 // the server died mid page-sweep with
 //
 //	fatal error: concurrent map writes
@@ -528,7 +528,7 @@ func TestOneRoutersRulesAreNotEvaluatedConcurrently(t *testing.T) {
 // reads false as "the router reached the version" and closes the alert.
 //
 // It happens because this port runs TWO System collectors per router — the
-// session's and the alertpool's — with private update state, which
+// session's and the pool's — with private update state, which
 // `collect/system.go` warned about in advance: "A second session type would need
 // the shared map back." The session's has run the check; the pool's has not.
 //

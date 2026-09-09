@@ -11,10 +11,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"time"
-
-	"mikrodash/internal/alertpool"
-	"mikrodash/internal/history"
 	"mikrodash/internal/historywire"
 	"mikrodash/internal/routeros"
 	"mikrodash/internal/routers"
@@ -27,8 +23,6 @@ const blankIfFixture = `[
   {"id":"r2","label":"Two","host":"198.51.100.2","port":8728,"username":"u","password":"",
    "defaultIf":"sfp1"}
 ]`
-
-func refuse(routeros.Config) (alertpool.Conn, error) { return nil, os.ErrClosed }
 
 func recServer(t *testing.T) *Server {
 	t.Helper()
@@ -54,15 +48,18 @@ func TestTheGlobalDefaultInterfaceIsRead(t *testing.T) {
 	}
 }
 
-// TestTheAlertPoolSyncDeclaresWhatToRecord. This pool is the one holding
-// routers nobody is watching, so its declaration is what makes a series
-// continuous rather than following a browser tab.
-func TestTheAlertPoolSyncDeclaresWhatToRecord(t *testing.T) {
+// TestTheFleetHoldSyncDeclaresWhatToRecord. These are the holds that keep
+// routers nobody is watching connected, so their declaration is what makes a
+// series continuous rather than following a browser tab.
+//
+// `holdFleet` is set by hand because `New` derives it from `-no-pool` and this
+// test has no server options; without it `syncFleetHolds` returns at its first
+// line and every assertion below passes for the wrong reason.
+func TestTheFleetHoldSyncDeclaresWhatToRecord(t *testing.T) {
 	s := recServer(t)
-	s.alertPool = alertpool.New(refuse, 0, nil, nil, nil)
-	t.Cleanup(s.alertPool.Close)
+	s.holdFleet = true
 
-	s.syncAlertPool()
+	s.syncFleetHolds()
 
 	if !s.historyWire.Records("r1", "ether5") {
 		t.Error("r1 does not record the install-wide default interface, so a " +
@@ -96,90 +93,19 @@ func TestTheOverviewPoolSyncDeclaresItToo(t *testing.T) {
 	}
 }
 
-// ── THE OUTAGE DEBOUNCE REACHES THE STATUS HOOK ────────────────────────────
+// ── THE OUTAGE DEBOUNCE MOVED, AND SO DID ITS TESTS ────────────────────────
 //
-// `alertPoolStatus` is handed a router id and a bool, so the threshold has to
-// come from somewhere it can reach cheaply — reading the record there would
-// mean decrypting every router's password on every connect and drop. The fleet
-// syncs cache it.
+// Three tests stood here: that each sync cached a router's debounce, that a
+// brief drop was not recorded, and that a router asking for zero recorded at
+// once. All three drove `alertPoolStatus`, the hook `internal/alertpool` called
+// on a connect or a drop, and that package and that hook are gone.
 //
-// Passing a hardcoded zero instead is not a small error: zero is its own branch
-// meaning "record every close at once", and it turned a routine six-second
-// reconnect into an outage in the Reports page. A mutation restoring that zero
-// survived every other test in this package.
-
-type rowSink struct{ n int }
-
-func (r *rowSink) PersistHistoryLogged(rows []history.Row) int { r.n += len(rows); return len(rows) }
-
-// threshFixture: r1 leaves the debounce unset (live default 30s), r2 asks for
-// zero, which is a deliberate setting rather than an absence.
-// REPORTING ON, EXPLICITLY. Connectivity is report data, so a router with
-// reporting off writes no row whatever its debounce — which is the correct new
-// behaviour and would make every case below pass for the wrong reason.
-const threshFixture = `[
-  {"id":"r1","label":"One","host":"198.51.100.1","port":8728,"username":"u","password":"",
-   "defaultIf":"ether1","reportingEnabled":true},
-  {"id":"r2","label":"Two","host":"198.51.100.2","port":8728,"username":"u","password":"",
-   "defaultIf":"ether1","connDownThresholdSec":0,"reportingEnabled":true}
-]`
-
-func threshServer(t *testing.T) (*Server, *rowSink) {
-	t.Helper()
-	s, _, dir := routersServer(t, &Session{AuthMode: "none", Username: "admin"}, `{}`)
-	if err := os.WriteFile(filepath.Join(dir, "routers.json"),
-		[]byte(threshFixture), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	sink := &rowSink{}
-	s.historyWire = historywire.New(true, sink)
-	s.alertPool = alertpool.New(refuse, 0, nil, nil, nil)
-	t.Cleanup(s.alertPool.Close)
-	s.syncAlertPool()
-	return s, sink
-}
-
-func TestTheSyncCachesEachRoutersDebounce(t *testing.T) {
-	s, _ := threshServer(t)
-	if got := s.connThresholdMs("r1"); got != 30_000 {
-		t.Errorf("a router with no setting resolved to %dms, want the live 30s default", got)
-	}
-	if got := s.connThresholdMs("r2"); got != 0 {
-		t.Errorf("a router asking for zero resolved to %dms; zero is a deliberate "+
-			"setting, not an absence", got)
-	}
-}
-
-// TestABriefDropIsNotRecordedThroughTheHook is the reported bug, driven through
-// the hook the pool actually calls.
-func TestABriefDropIsNotRecordedThroughTheHook(t *testing.T) {
-	s, sink := threshServer(t)
-	s.alertPoolStatus("r1", true)
-	up := sink.n
-
-	// Down and back, the way a routine reconnect goes.
-	s.alertPoolStatus("r1", false)
-	if sink.n != up {
-		t.Errorf("the drop was written immediately (%d rows) — the hook is using a "+
-			"zero threshold rather than the router's 30s", sink.n-up)
-	}
-	s.alertPoolStatus("r1", true)
-	// Long past the threshold: the reconnect must have cancelled it outright.
-	s.historyWire.TickAll(time.Now().Add(time.Hour).UnixMilli())
-	if sink.n != up {
-		t.Errorf("a six-second reconnect ended up as %d recorded row(s)", sink.n-up)
-	}
-}
-
-// The other direction, or the test above passes against a hook that records
-// nothing at all.
-func TestARouterAskingForZeroStillRecordsAtOnce(t *testing.T) {
-	s, sink := threshServer(t)
-	s.alertPoolStatus("r2", true)
-	before := sink.n
-	s.alertPoolStatus("r2", false)
-	if sink.n == before {
-		t.Error("a router configured with a zero threshold did not record its " +
-			"close immediately")
-	}
-}
+// The property is unchanged and is asserted where it now lives:
+// `internal/session/connthresh_test.go` pins that the session builds
+// `connThreshMs` from the router's own record and passes it to every
+// `history.Connected`/`.Disconnected` call, and `internal/historywire/conn_test.go`
+// already held the debounce behaviour itself — a drop and return inside the
+// window writing nothing, a zero threshold writing at once.
+//
+// Recorded rather than silently dropped: a check removed without a reason reads
+// exactly like one that never existed.

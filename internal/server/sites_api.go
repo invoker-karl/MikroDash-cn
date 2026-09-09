@@ -276,7 +276,7 @@ func (s *Server) siteDelete(w http.ResponseWriter, r *http.Request) {
 	if detached > 0 {
 		s.broadcastRouterList()
 		s.syncPool()
-		s.syncAlertPool()
+		s.syncFleetHolds()
 	}
 	writeJSON(w, map[string]any{"ok": true, "detached": detached})
 }
@@ -378,7 +378,7 @@ func (s *Server) siteRoutersSet(w http.ResponseWriter, r *http.Request) {
 		s.hub.BroadcastAll("perms:changed", map[string]any{})
 		s.broadcastRouterList()
 		s.syncPool()
-		s.syncAlertPool()
+		s.syncFleetHolds()
 	}
 	writeJSON(w, map[string]any{"ok": true, "changed": changed})
 }

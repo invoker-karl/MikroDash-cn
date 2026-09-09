@@ -73,7 +73,7 @@ func TestTheSessionPassesRosDebugToTheClient(t *testing.T) {
 //
 // SCANNED ACROSS PACKAGES, not just this file. A first version read `session.go`
 // alone, which would have passed with `internal/routers/pool.go` and
-// `internal/alertpool/pool.go` each quietly enabling it — and those two are
+// the alert pool's own dial each quietly enabling it — and those two were
 // exactly the sites where the cost would be continuous rather than per-page.
 func TestOnlyOneDialSiteEnablesTracing(t *testing.T) {
 	roots := []string{"..", "../../cmd"}

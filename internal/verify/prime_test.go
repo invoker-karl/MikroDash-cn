@@ -10,7 +10,7 @@ import (
 //
 // ── THE POOL CAN ONLY BE PRIMED BY SOMEBODY ASKING ─────────────────────────
 //
-// `alertpool.PrimeStats` is deliberately not a poll: a router with alerting and
+// `session.Manager.PrimeStats` is deliberately not a poll: a router with alerting and
 // reporting both off holds a bare socket and runs no collectors, and reading its
 // gauges on a schedule would give back the cost the toggle exists to remove. It
 // is taken ONCE, when a browser opens the Devices page, on a connection that is
@@ -74,24 +74,24 @@ func TestDevicesFocusPrimesTheAlertPool(t *testing.T) {
 	// the frame has already gone with the gap in it, and by the next tick the
 	// overview pool is answering. That reads as a working call and fixes nothing.
 	if prime > send {
-		t.Error("devicesFocus primes the alert pool AFTER sending the first " +
+		t.Error("devicesFocus primes the sessions AFTER sending the first " +
 			"routers:stats — the frame the fix exists for has already left.")
 	}
 
 	// ── AND AFTER THE SYNCS, WHICH IS THE OTHER ORDERING THAT MATTERS ─────
 	//
-	// `syncAlertPool` decides the session set: `PlanSync` rebuilds a session
+	// `syncFleetHolds` decides the session set: `PlanSync` rebuilds a session
 	// whose flags changed, and a rebuilt session is a fresh socket with no
 	// reading on it. Priming ahead of it spends a command on sessions that are
 	// then discarded. This was proposed as an improvement in review and is
 	// pinned here so the reasoning does not have to be rediscovered.
-	sync := strings.Index(body, "cn.srv.syncAlertPool()")
+	sync := strings.Index(body, "cn.srv.syncFleetHolds()")
 	if sync < 0 {
-		t.Fatal("devicesFocus no longer calls cn.srv.syncAlertPool() — fix this " +
-			"check, or the alert pool is no longer being synced on focus.")
+		t.Fatal("devicesFocus no longer calls cn.srv.syncFleetHolds() — fix this " +
+			"check, or the fleet holds are no longer being synced on focus.")
 	}
 	if prime < sync {
-		t.Error("devicesFocus primes the alert pool BEFORE syncing it — a " +
+		t.Error("devicesFocus primes the sessions BEFORE syncing them — a " +
 			"session PlanSync rebuilds is a new socket, so the reading the " +
 			"prime just took is discarded and the frame goes out with the gap " +
 			"still in it.")

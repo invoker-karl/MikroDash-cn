@@ -144,7 +144,7 @@ func (s *Server) routerCreate(w http.ResponseWriter, r *http.Request) {
 	s.hub.BroadcastAll("perms:changed", map[string]any{})
 	s.broadcastRouterList()
 	s.syncPool()
-	s.syncAlertPool()
+	s.syncFleetHolds()
 
 	// THE PASSWORD IS MASKED, not sent back. The live route returns the record
 	// with `password: '••••••••'` when one is set, so the form can show the field
@@ -360,7 +360,7 @@ func (s *Server) routerUpdate(w http.ResponseWriter, r *http.Request) {
 	// the old credential every five seconds. See `Manager.Reconfigure`.
 	s.reconfigureLiveSession(id)
 	s.syncPool()
-	s.syncAlertPool()
+	s.syncFleetHolds()
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -474,7 +474,7 @@ func (s *Server) routerDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcastRouterList()
 	s.syncPool()
-	s.syncAlertPool()
+	s.syncFleetHolds()
 	writeJSON(w, map[string]any{"ok": true})
 }
 

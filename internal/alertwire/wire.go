@@ -244,7 +244,7 @@ func (w *Wire) Evaluate(r alert.Router, event string, payload any) []alert.Fired
 	//
 	// HERE IT IS NOT. Every collector has its own poll timer, so `system:update`
 	// and `ifstatus:update` for one router arrive on different goroutines, and
-	// after `internal/alertpool` landed a whole fleet's collectors do the same.
+	// once the fleet is held for alerting a whole fleet's collectors do the same.
 	// On 2026-08-29 the server died with
 	//
 	//	fatal error: concurrent map writes

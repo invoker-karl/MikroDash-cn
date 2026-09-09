@@ -95,7 +95,8 @@ live: there is one lifecycle to get right instead of twenty-nine.
 **THE DOCUMENTED GOAL WAS MET WITHOUT THE REFACTOR, on 2026-09-01.** The stated bottleneck is
 concurrent channels on the device, and nothing bounded them: 29 poll loops could all be inside
 `reader.Do` at once. `internal/roslimit` caps in-flight commands PER ROUTER at 8, taken in all three
-`reader.Do` implementations — the viewing session, the background pool and the alert pool — because
+`reader.Do` implementations — the session (viewing or held), the Devices pool, and, until it was
+deleted on 2026-09-09, the alert pool — because
 they reach the same devices and a per-pool cap would not be a cap on the router.
 
 That is ~90 lines against the 40-45 files the refactor needs, of which ~2,250 lines are

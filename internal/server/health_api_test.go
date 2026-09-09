@@ -232,7 +232,6 @@ func TestShutdownReleasesEverythingInOrder(t *testing.T) {
 	want := []struct{ what, call string }{
 		{"the backup scheduler", "backupSched.Stop()"},
 		{"the sessions", "sessions.Shutdown()"},
-		{"the alert pool", "alertPool.Close()"},
 		{"the overview pool", "pool.Close()"},
 		{"the database", "auditDB.Close()"},
 	}

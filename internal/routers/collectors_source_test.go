@@ -21,11 +21,11 @@ import (
 //
 //   - `session.Manager.Release` stopped 5 of the 14 collectors it starts.
 //   - `session.Manager.Shutdown` had the same defect, independently.
-//   - `alertpool` had a session LEAKED by a plan that both built and rebuilt it.
+//   - the alert pool had a session LEAKED by a plan that both built and rebuilt it.
 //   - the pool's history bucket was never flushed on shutdown, losing a minute
 //     per restart.
 //
-// `internal/session` and `internal/alertpool` each grew a source-derived ledger
+// `internal/session` and the alert pool each grew a source-derived ledger
 // after theirs. THIS package had none, and it gained two collectors — the
 // `traffic`/`ping` history pair — on 2026-08-30. So it gets the same ledger,
 // rather than waiting for the fifth instance.

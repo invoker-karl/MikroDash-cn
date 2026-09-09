@@ -17,7 +17,6 @@ package server
 import (
 	"log"
 	"mikrodash/internal/alertdispatch"
-	"mikrodash/internal/alertpool"
 	"mikrodash/internal/alertwire"
 	"mikrodash/internal/geo"
 	"mikrodash/internal/websession"
@@ -195,19 +194,16 @@ type Server struct {
 	// historyWire is built early, because the always-on pool must be given it
 	// BEFORE its first Sync — see New.
 	historyWire *historywire.Wire
-	// connThresh is each router's outage debounce in ms, cached by the fleet
-	// syncs so the status hook does not have to read (and decrypt) the store.
-	connThreshMu sync.Mutex
-	connThresh   map[string]int64
 	// connTick drives the debounce. See historywire.Wire.TickAll.
 	connTick *time.Ticker
 	connStop chan struct{}
 	// startedAt is when this process began serving, for /healthz's uptime and
 	// its starting-vs-failing distinction.
 	startedAt time.Time
-	// alertPool holds a connection to every router nobody is watching, so their
-	// status is known and their alerts are evaluated. Nil when `-no-pool`.
-	alertPool *alertpool.Pool
+	// holdFleet is whether a session is held for every router nobody is
+	// watching, so their status is known and their alerts are evaluated. False
+	// under `-no-pool`. See fleet_holds.go.
+	holdFleet bool
 
 	// conns is every live WebSocket connection, so a payload that must be built
 	// PER PRINCIPAL can find the sessions to build it for.
@@ -398,10 +394,14 @@ func New(st *store.Store, opts Options) (*Server, error) {
 	}
 	srv.startedAt = time.Now()
 	srv.pool = srv.buildPool(srv.standalone && !opts.NoPool)
-	// The ALWAYS-ON pool, sharing the same switch — see buildAlertPool for why.
-	// Unlike the overview pool this one connects as soon as it is synced, so it
-	// is synced once here rather than waiting for a page.
-	srv.alertPool = srv.buildAlertPool(srv.standalone && !opts.NoPool)
+	// THE ALWAYS-ON HOLDS, sharing the same switch — see fleet_holds.go for why.
+	// Unlike the overview pool these connect as soon as they are synced, so the
+	// sync happens once here rather than waiting for a page.
+	srv.holdFleet = srv.standalone && !opts.NoPool
+	if !srv.holdFleet {
+		log.Printf("[holds] off; routers nobody is watching are neither connected " +
+			"to nor alerted on (pass -no-pool to keep it that way)")
+	}
 	// ── THE HISTORY RECORDER GOES ON BEFORE THE FIRST SYNC ────────────────
 	//
 	// `Sync` is what BUILDS the sessions, and `buildCollectors` decides there
@@ -410,15 +410,12 @@ func New(st *store.Store, opts Options) (*Server, error) {
 	// something forces a rebuild. Wiring it two hundred lines further down, next
 	// to the session manager's copy, is exactly that bug.
 	srv.historyWire = srv.buildHistoryWire(opts.History)
-	if srv.historyWire.Enabled() && srv.alertPool != nil {
-		srv.alertPool.WithHistory(srv.historyWire.Record)
-	}
 	// SYNCED AT STARTUP. `New` connects to nothing; `Sync` does. The overview
 	// pool can wait for `devicesFocus` because its rows are only wanted while
 	// that page is open — this one exists so a router nobody is watching is
 	// still known to be up and still has its alerts evaluated, which is a claim
 	// about the whole uptime of the process.
-	srv.syncAlertPool()
+	srv.syncFleetHolds()
 	// ── AND THE CLOCK THE DEBOUNCE NEEDS ──────────────────────────────────
 	//
 	// `history.Connectivity` holds no timer: the caller supplies the passage of
@@ -436,10 +433,10 @@ func New(st *store.Store, opts Options) (*Server, error) {
 	// A session now outlives its last viewer by `session.DefaultIdleGrace`, so
 	// "the browser closed" and "this router is uncovered" are two moments up to
 	// two minutes apart. The pool must reclaim the router at the SECOND one:
-	// `syncAlertPool` excludes anything in `sessions.Live()`, so calling it at
+	// `syncFleetHolds` excludes anything in `sessions.Live()`, so calling it at
 	// Release time skips the very router that is about to need covering, and
 	// nothing would call it again.
-	srv.sessions.SetOnIdle(func(string) { srv.syncAlertPool() })
+	srv.sessions.SetOnIdle(func(string) { srv.syncFleetHolds() })
 	// The alert evaluator, for the same reason and in the same place: it needs
 	// the settings and the history database, both of which exist only now.
 	//
@@ -514,17 +511,18 @@ func New(st *store.Store, opts Options) (*Server, error) {
 	// socket is already established. Two command channels, one router, and only
 	// while nobody is looking; the moment a browser attaches, the session takes
 	// the router out of the pool and records it itself.
-	// ── CONTINUOUS HISTORY GOES ON THE ALWAYS-ON POOL ─────────────────────
+	// ── CONTINUOUS HISTORY GOES ON THE ALWAYS-ON HOLD ─────────────────────
 	//
-	// `internal/alertpool` is synced at startup and holds a connection to every
-	// enabled router whether or not anyone is looking. `internal/routers.Pool`
-	// is synced from the Devices page and the routers API only, so it idles
-	// until somebody looks at something — wiring history there recorded nothing
-	// after a restart with no browser, measured 2026-08-30.
+	// `syncFleetHolds` runs at startup and holds a session for every enabled
+	// router whether or not anyone is looking. `internal/routers.Pool` is synced
+	// from the Devices page and the routers API only, so it idles until somebody
+	// looks at something — wiring history there recorded nothing after a restart
+	// with no browser, measured 2026-08-30.
 	//
-	// Both are wired: the alertpool is what makes history CONTINUOUS, and the
-	// routers pool covers the window where an interactive session has taken the
-	// router away from the alertpool but the Devices page is what is open.
+	// Both are wired: the `history` hold is what makes history CONTINUOUS, and
+	// the routers pool covers the window where the Devices page is open. The
+	// hold used to be a session in `internal/alertpool`; a session that records
+	// its own history is the same seam with one implementation instead of two.
 	if hw.Enabled() {
 		if srv.pool != nil {
 			srv.pool.WithHistory(hw.Record)
@@ -825,31 +823,29 @@ func (s *Server) Shutdown() {
 		s.pruneSched.Stop()
 	}
 	s.sessions.Shutdown()
-	// ── THE POOL'S OPEN MINUTE, BEFORE ITS CONNECTIONS GO ─────────────────
+	// ── THE OPEN MINUTE, BEFORE THE CONNECTIONS GO ────────────────────
 	//
 	// A history bucket only rolls over when the NEXT minute's first sample
 	// arrives, so a process that stops mid-minute leaves that minute unwritten.
 	// `internal/session` has always flushed for exactly this reason — its own
 	// header quotes live's "flush all open buckets — call on session teardown to
-	// avoid data loss" — and `sessions.Shutdown()` above does it for the
-	// browser-driven path.
+	// avoid data loss".
 	//
-	// The POOL path had no such call, and since 2026-08-30 it is the PRIMARY
-	// recorder: it is what records while nobody is watching, which is almost
-	// always. So every restart silently lost the minute in progress. Added with
-	// the pool half of LOOP.md 0i, and missed until the flush call sites were
-	// counted.
+	// The BACKGROUND path had no such call, and it is the PRIMARY recorder: it
+	// is what records while nobody is watching, which is almost always. So every
+	// restart silently lost the minute in progress. Added with the pool half of
+	// LOOP.md 0i, and missed until the flush call sites were counted.
 	//
-	// BEFORE `alertPool.Close()`, so the collectors are still there to have
-	// produced what is being flushed.
-	if s.historyWire.Enabled() && s.alertPool != nil {
+	// BEFORE `pool.Close()`, so the overview pool's collectors are still there
+	// to have produced what is being flushed. The background recorder is a HELD
+	// SESSION now rather than `internal/alertpool`, and `sessions.Shutdown()`
+	// flushes each one as it tears it down — so the ordering that matters for
+	// that half is inside the manager, not here.
+	if s.historyWire.Enabled() {
 		// EVERY RECORDING ROUTER, not one. This was `Flush(HistoryRouter())`
 		// back when a single router recorded; with several, naming one would
 		// lose the open minute for all the others on every restart.
 		s.historyWire.FlushAll()
-	}
-	if s.alertPool != nil {
-		s.alertPool.Close()
 	}
 	if s.pool != nil {
 		s.pool.Close()

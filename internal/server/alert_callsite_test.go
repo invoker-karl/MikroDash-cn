@@ -95,10 +95,18 @@ func TestEveryAlertEvaluationReachesASink(t *testing.T) {
 	// THE AUDIT MUST HAVE FOUND THE CALL SITES. A refactor that renames
 	// `Evaluate` would otherwise leave this passing over nothing at all, which is
 	// the "check that cannot be told from a broken one" shape.
-	if checked < 2 {
-		t.Fatalf("found only %d alert evaluation(s); there are two (the pooled "+
-			"router path and the live-session emit closure). This audit has "+
-			"stopped seeing them and is no longer checking anything", checked)
+	// ── ONE, NOT TWO, SINCE `internal/alertpool` WAS DELETED ─────────────
+	//
+	// There were two: the pooled router path and the live-session emit closure.
+	// Every router nobody is watching is held by `session.Manager` now, so the
+	// emit closure is the ONLY seam an alert evaluation can pass through — which
+	// is the property the merge was for, and this number is where a second one
+	// reappearing would show up. Raising this back to two means a second
+	// evaluation site exists again; check it is meant to before doing so.
+	if checked < 1 {
+		t.Fatalf("found only %d alert evaluation(s); there is one (the "+
+			"live-session emit closure). This audit has stopped seeing it and "+
+			"is no longer checking anything", checked)
 	}
 	for _, d := range discarded {
 		t.Errorf("%s: %s — the alert is recorded and NOBODY IS TOLD. That is "+

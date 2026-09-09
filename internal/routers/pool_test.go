@@ -225,10 +225,10 @@ func TestPoolConnectsAndReportsSummaries(t *testing.T) {
 
 // ── ReleaseAll GIVES THE FLEET BACK, WHICH Suspend DOES NOT ────────────────
 //
-// `syncAlertPool` excludes every router this pool reports in `Summaries()`, and
+// `syncFleetHolds` excludes every router this pool reports in `Summaries()`, and
 // a SUSPENDED session is still reported — so once anybody had opened the Devices
 // page, the overview pool owned the whole fleet, stopped collecting the moment
-// they left, and the alert pool was locked out of all of it. No alert evaluation
+// they left, and the warm holds were locked out of all of it. No alert evaluation
 // and no continuous history for any router until something else re-ran the sync.
 //
 // The distinction pinned here is the one the Suspend test asserts in the other
@@ -245,14 +245,14 @@ func TestReleaseAllGivesUpEveryRouter(t *testing.T) {
 	p.ReleaseAll()
 
 	// BOTH, because they answer different questions: Tracked is what the pool
-	// thinks it holds, and Summaries is what `syncAlertPool` reads to decide
+	// thinks it holds, and Summaries is what `syncFleetHolds` reads to decide
 	// whether a router is already covered. A release that emptied one and not
-	// the other would leave the alert pool still locked out.
+	// the other would leave the warm holds still locked out.
 	if n := len(p.Tracked()); n != 0 {
 		t.Errorf("%d router(s) still tracked after ReleaseAll", n)
 	}
 	if n := len(p.Summaries()); n != 0 {
-		t.Errorf("%d router(s) still in Summaries — syncAlertPool would keep excluding them", n)
+		t.Errorf("%d router(s) still in Summaries — syncFleetHolds would keep excluding them", n)
 	}
 
 	// And the pool is still USABLE: returning to the Devices page re-dials,

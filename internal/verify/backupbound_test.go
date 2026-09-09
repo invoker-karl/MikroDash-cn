@@ -41,7 +41,7 @@ import (
 // The bound is set where the command is constructed, in a closure over a live
 // session, and the regression is someone adding a SIXTH call site without one —
 // which is exactly how the five in the restore file came to exist. That is a
-// property of the source, so the source is what is read. `internal/alertpool`
+// property of the source, so the source is what is read. The alert pool
 // had this same defect fixed before, and nothing generalised the rule; this is
 // the generalisation, for the paths that have now paid for it twice.
 var execCmdRe = regexp.MustCompile(`Exec\(routeros\.Cmd\{`)

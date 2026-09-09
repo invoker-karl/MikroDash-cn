@@ -110,7 +110,7 @@ func (s *Server) inRouterWriteQueue(routerID string, fn func() error) error {
 	defer s.sessions.Release(routerID)
 	// ── AND THE ALERT POOL MUST LET GO WHILE WE HOLD IT ───────────────────
 	//
-	// `syncAlertPool` excludes routers with a live session, but nothing re-ran
+	// `syncFleetHolds` excludes routers with a live session, but nothing re-ran
 	// it here, so a scheduled write on a router NOBODY is watching opened a
 	// second connection alongside the pool's -- two API channels on one device
 	// for the length of the backup, on exactly the routers the pool covers
@@ -118,7 +118,7 @@ func (s *Server) inRouterWriteQueue(routerID string, fn func() error) error {
 	//
 	// The same call `router:select` makes, for the same reason. `onIdle` hands
 	// the router back when this session finally goes.
-	s.syncAlertPool()
+	s.syncFleetHolds()
 
 	// ── AND WAIT FOR THE DIAL, WHICH Acquire DOES NOT ─────────────────────
 	//
@@ -220,7 +220,7 @@ func (s *Server) runScheduledBackup(r backups.SchedRouter) error {
 	// The pool lets go while this session holds the router — see
 	// inRouterWriteQueue for why, and note this is the commoner path: a
 	// scheduled backup runs against routers nobody is watching by definition.
-	s.syncAlertPool()
+	s.syncFleetHolds()
 
 	res, _, runErr := backups.RunFor(backups.RunForConfig{
 		RouterID: r.ID, Label: r.Label, Password: rec.password,

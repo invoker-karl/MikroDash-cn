@@ -220,7 +220,7 @@ func (s *Server) deviceExpected() bool {
 // reachable, and which one that is.
 //
 // It asks the INTERACTIVE session first and the always-on pool second, because
-// those are the two things that hold a connection — and after `internal/alertpool`
+// those are the two things that hold a connection — and after the fleet holds
 // landed, a router nobody is watching is genuinely connected rather than merely
 // unknown. Before that this would have read "down" for the whole fleet whenever
 // nobody had a browser open, which is exactly the wrong answer for a healthcheck.
@@ -237,8 +237,8 @@ func (s *Server) activeRouterHealth() (bool, string) {
 			return live[activeID].Connected(), activeID
 		}
 	}
-	if s.alertPool != nil {
-		if up, known := s.alertPool.Status()[activeID]; known {
+	if s.sessions != nil {
+		if up, known := s.sessions.Status()[activeID]; known {
 			return up, activeID
 		}
 	}
@@ -248,11 +248,11 @@ func (s *Server) activeRouterHealth() (bool, string) {
 	// active router DISCONNECTED whenever the component actually holding it was
 	// the third one.
 	//
-	// That is not a rare state. `alertPoolExclusions` removes from the alert
+	// That is not a rare state. `warmExclusions` removes from the alert
 	// pool every router the overview pool has ANSWERED for — deliberately, so
-	// one router is never held by both — and the alert pool forgets the status
+	// one router is never held by both — and the manager forgets the status
 	// of a router it drops. So while anybody has the Devices page open, the
-	// alert pool has no entry for the active router and this returned false for
+	// manager has no entry for the active router and this returned false for
 	// a router that was up and being watched.
 	//
 	// Worse, it never recovered after a router edit: `routerUpdate` calls
@@ -264,7 +264,7 @@ func (s *Server) activeRouterHealth() (bool, string) {
 	// `/healthz` answering 503 for a healthy install is not cosmetic — it is how
 	// an orchestrator decides to restart the container.
 	//
-	// KNOWN IS THE GATE, as it is in `alertPoolExclusions` and on the Devices
+	// KNOWN IS THE GATE, as it is in `warmExclusions` and on the Devices
 	// page: a summary exists as soon as `Sync` builds the session, so
 	// `Connected: false` is the zero value until the first dial returns. Reading
 	// it before then would report a router as down for the second it takes to

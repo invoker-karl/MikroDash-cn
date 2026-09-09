@@ -108,7 +108,7 @@ func TestStayingAwayPastTheGraceStillTearsDown(t *testing.T) {
 }
 
 // The pool hand-off moved with the teardown, and this is why it had to: while a
-// session lingers it is still in Live(), and `syncAlertPool` excludes anything
+// session lingers it is still in Live(), and `syncFleetHolds` excludes anything
 // there. Firing the hook at Release would tell the pool to reclaim a router the
 // session has not let go of — and nothing would call it again once it had.
 func TestOnIdleFiresAtTeardownAndNotAtRelease(t *testing.T) {

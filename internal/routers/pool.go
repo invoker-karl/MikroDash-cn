@@ -270,7 +270,7 @@ func (r reader) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
 	if c == nil || !up {
 		return nil, errNotConnected{}
 	}
-	// The same per-router budget the viewing session and the alert pool take.
+	// The same per-router budget the viewing session and the held ones take.
 	// This pool reaches routers nobody is watching, but it reaches the SAME
 	// routers, so a cap that skipped it would not be a cap on the device.
 	roslimit.Note(r.s.cfg.ID, cmd.Path)
@@ -343,7 +343,7 @@ func (p *Pool) WithHistory(rec func(routerID, event string, payload any)) *Pool 
 // comparing against a single id.
 //
 // Called from `Sync`, so a toggled flag takes effect on the next fleet sync
-// without tearing the session down: unlike the alert pool, this pool builds the
+// without tearing the session down: unlike a held session, this pool builds the
 // pair for everyone, so there is something to switch on.
 //
 // Idempotent by construction — `setHistoryCollectors` starts what is already
@@ -487,7 +487,7 @@ func (p *Pool) Sync(all []RouterConfig, excluded map[string]bool) PoolAction {
 	// it was BUILT with, so turning reporting on or off would otherwise do
 	// nothing until the session was rebuilt for some unrelated reason. This
 	// pool builds the history pair for every router and starts it for some, so
-	// there is something to switch — unlike the alert pool, which has to
+	// there is something to switch — unlike a held session, which has to
 	// rebuild.
 	p.applyReporting(byID)
 	return act
@@ -553,12 +553,12 @@ func (p *Pool) build(cfg RouterConfig) *poolSession {
 // ran and this function was never called, because THIS pool had no sessions.
 // `syncPool` is called from the Devices page and the routers API and from
 // nowhere else, so `routers.Pool` idles until somebody looks at something.
-// `internal/alertpool` is the pool that connects to every router at startup —
+// `syncFleetHolds` is what connects to every router at startup —
 // the three established sockets on this process are its, not this one's.
 //
 // So what is wired here records while the Devices page is open and not
 // otherwise. It is correct and pinned, and it is NOT by itself the answer to
-// LOOP.md 0i; the always-on path is the alertpool, which already holds the
+// LOOP.md 0i; the always-on path is the held session, which already holds the
 // connection and already runs `Ping`.
 //
 // THE CALLER MUST NOT HOLD `s.mu`. `Ping.Start` opens its stream synchronously
@@ -812,19 +812,19 @@ func (p *Pool) Suspend() {
 //
 // `Suspend` stops collecting and KEEPS the sockets, deliberately, so returning
 // to the Devices page is instant. The cost of that was invisible and fleet-wide:
-// `syncAlertPool` excludes every router this pool lists in `Summaries()`, and a
+// `syncFleetHolds` excludes every router this pool lists in `Summaries()`, and a
 // suspended session is still listed -- so once anybody opened Devices, the
 // overview pool owned the whole fleet, stopped collecting the moment they left,
-// and the alert pool was locked out of all of it.
+// and the warm holds were locked out of all of it.
 //
 // The result was no alert evaluation and no continuous history for ANY router
-// until something else happened to re-run `syncAlertPool`. That contradicts the
-// reason the alert pool exists, which `server.go` states plainly: a router
+// until something else happened to re-run `syncFleetHolds`. That contradicts the
+// reason the warm hold exists, which `server.go` states plainly: a router
 // nobody is watching "is still known to be up and still has its alerts
 // evaluated, which is a claim about the whole uptime of the process".
 //
 // So leaving the page now RELEASES the routers rather than merely going quiet on
-// them, and the alert pool takes them back. Returning to Devices re-dials, which
+// them, and the warm holds take them back. Returning to Devices re-dials, which
 // is what the first visit does anyway -- a cost paid by the person looking at
 // the page, instead of a gap in coverage paid by everyone who is not.
 func (p *Pool) ReleaseAll() {

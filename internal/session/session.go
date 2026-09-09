@@ -62,6 +62,13 @@ type Session struct {
 	// something that does not exist.
 	eff collection.Resolved
 
+	// primedSys is a one-shot `/system/resource` reading taken for the Devices
+	// page when this session runs no system collector of its own, and `priming`
+	// is the claim that stops two focuses reading the same router at once. See
+	// prime.go.
+	primedSys *collect.SystemPayload
+	priming   bool
+
 	// sched is the router's ONE scheduler, phase 3.2. It services the cache's
 	// demand set, so a collector that has subscribed does not own a timer. Nil
 	// until the session is built; started on the first connect and stopped in
@@ -926,7 +933,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 //
 // ── IT STAYS IN `m.live`, AND THAT IS LOAD-BEARING ──────────────────────────
 //
-// A lingering session is still a live one. `syncAlertPool` excludes routers that
+// A lingering session is still a live one. `syncFleetHolds` excludes routers that
 // appear in `Live()`, so leaving it there is what stops the alert pool opening a
 // SECOND connection to a router this session has not let go of yet. The pool
 // picks it up when the grace expires, via `onIdle`.
@@ -1257,7 +1264,7 @@ func (m *Manager) grace() time.Duration {
 func (m *Manager) SetIdleGrace(d time.Duration) { m.idleGrace = d }
 
 // SetOnIdle registers what to do once a session has actually gone. The server
-// points it at `syncAlertPool`, so the pool reclaims a router at the moment the
+// points it at `syncFleetHolds`, so the pool reclaims a router at the moment the
 // session stops covering it and not a moment before.
 func (m *Manager) SetOnIdle(fn func(routerID string)) { m.onIdle = fn }
 
@@ -2082,11 +2089,25 @@ func (s *Session) Collection() collection.Resolved { return s.eff }
 // reboot shows up as a status chip rather than as a table that quietly stops
 // changing.
 func (s *Session) announce() {
-	s.h.Broadcast("router-"+s.RouterID, "router:status", map[string]any{
+	frame := map[string]any{
 		"routerId":  s.RouterID,
 		"connected": s.Connected(),
 		"reason":    s.LastError(),
-	})
+	}
+	s.h.Broadcast("router-"+s.RouterID, "router:status", frame)
+	// ── AND THE FLEET-WIDE ROOM, WHICH IS NOT THE SAME AUDIENCE ──────────
+	//
+	// The Settings and Devices tables show EVERY router, not only the one whose
+	// room a browser happens to be in. `alertPoolStatus` sent both frames for
+	// the routers the alert pool held; when that pool was deleted and its
+	// routers became warm-held sessions, this was the only remaining sender and
+	// it reached one room. A non-active router going down would then have
+	// updated nothing an operator was looking at.
+	//
+	// A browser in this router's room receives both, which the pool did too:
+	// `main.ts` records the state into `routerStatus` by id, so a repeat is a
+	// second write of the same value rather than a visible event.
+	s.h.BroadcastAll("router:status", frame)
 }
 
 // InWriteQueue serialises writes to one router.

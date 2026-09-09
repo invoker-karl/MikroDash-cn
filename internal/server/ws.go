@@ -512,7 +512,7 @@ func (cn *conn) selectRouter(id string) {
 	}
 	// ── THE ALERT POOL MUST LET GO OF A ROUTER A SESSION HAS TAKEN ────────
 	//
-	// `syncAlertPool` excludes every router with a live `Session`, and until
+	// `syncFleetHolds` excludes every router with a live `Session`, and until
 	// 2026-08-30 nothing re-ran it at the moment that set CHANGED. It was called
 	// from the Devices page, the routers API and startup — never from here — so
 	// selecting a router left the pool holding it as well.
@@ -542,29 +542,32 @@ func (cn *conn) selectRouter(id string) {
 	// nobody has opened Devices `tracked` is empty -- so a socket handler would
 	// have connected to every router in the fleet to fix one duplicate.
 	//
-	// BEFORE syncAlertPool, so the alert pool computes its exclusion set from
+	// BEFORE syncFleetHolds, so the alert pool computes its exclusion set from
 	// `Summaries()` after this router has left the overview pool.
 	if cn.srv.pool != nil {
 		cn.srv.pool.Drop(id)
 	}
 	// ── PHASE 5.1: TAKE THE GRAPH HISTORY BEFORE THE POOL LETS GO ─────────
 	//
-	// BEFORE syncAlertPool, and that ordering is the whole point: the line below
-	// is what makes the alert pool release this router, and its `traffic` and
-	// `ping` rings go with it. They hold per-second samples for a router nobody
-	// was watching, which is exactly the router somebody has just landed on.
+	// ── THE GRAPH SEED IS STRUCTURAL NOW, AND THAT IS WHY THERE IS NO CALL ──
 	//
-	// Without this the two GRAPHS are the one thing `Last()` replay cannot serve.
-	// Every other card is a reading and replays whole; a chart is a WINDOW, and a
-	// window that starts empty grows from a single point over a minute. The
-	// operator's requirement is that no page waits, so the window has to be
-	// handed over rather than re-earned.
+	// This used to hand the retiring alert pool's per-second `traffic` and `ping`
+	// rings to the Session that displaced it. The two GRAPHS are the one thing
+	// `Last()` replay cannot serve: every other card is a reading and replays
+	// whole, but a chart is a WINDOW, and a window that starts empty grows from a
+	// single point over a minute. The operator's requirement is that no page
+	// waits, so the window had to be handed over rather than re-earned.
 	//
-	// Seeding NEVER OVERWRITES -- see collect.Traffic.Seed -- so this is safe to
-	// run unconditionally, including on a re-select where the Session is already
-	// warm and the pool has nothing.
-	cn.seedGraphsFromPool(id, rs)
-	cn.srv.syncAlertPool()
+	// Phase 4.3 removed the hand-over by removing the second session. A router
+	// with reporting on is HELD by `session.Manager` for the history reason, so
+	// `traffic` and `ping` have been running on THIS session all along; acquiring
+	// it as a viewer adds a reference and changes nothing about the rings. There
+	// is no other object holding the samples, so there is nothing to copy.
+	//
+	// A router with reporting OFF has no rings, and had none in the pool either
+	// -- `buildCollectors` returned before making any. The behaviour is
+	// unchanged; only the mechanism is gone.
+	cn.srv.syncFleetHolds()
 
 	// The stacks describe rows on the router being LEFT, and a `.id` from one
 	// router addresses something entirely different on another.
@@ -1479,7 +1482,7 @@ func (cn *conn) releaseRouter() {
 	//
 	// `Release` is ref-counted, so this runs when the LAST watcher goes; a second
 	// browser on the same router keeps the session and the exclusion.
-	cn.srv.syncAlertPool()
+	cn.srv.syncFleetHolds()
 }
 
 func itoa(n uint64) string {
@@ -1496,12 +1499,12 @@ func itoa(n uint64) string {
 	return string(b[i:])
 }
 
-// sendPooledStatus tells a browser the CURRENT state of every router the alert
-// pool holds.
+// sendPooledStatus tells a browser the CURRENT state of every router the
+// session manager holds.
 //
 // ── A TRANSITION IS NOT A STATE, AND THIS IS THE DIFFERENCE ───────────────
 //
-// `alertPoolStatus` broadcasts on CHANGE, which is right: an unreachable router
+// `Session.announce` broadcasts on CHANGE, which is right: an unreachable router
 // re-dials every five seconds and a frame per attempt would reach every browser.
 // But a browser that connects AFTER the change never heard it. Measured on
 // 2026-08-29: the pool connected both non-active routers at 10:52:49, a browser
@@ -1520,33 +1523,15 @@ func itoa(n uint64) string {
 // returns nil for an install with no RBAC, which means no filtering — the same
 // convention every other caller of it follows.
 func (cn *conn) sendPooledStatus() {
-	if cn.srv.alertPool == nil {
+	if cn.srv.sessions == nil {
 		return
 	}
 	visible := cn.srv.visibleRouters(cn.sess)
-	for id, up := range cn.srv.alertPool.Status() {
+	for id, up := range cn.srv.sessions.Status() {
 		if visible != nil && !visible[id] {
 			continue
 		}
 		cn.srv.hub.Send(cn.c, "router:status", map[string]any{
 			"routerId": id, "connected": up})
-	}
-}
-
-// seedGraphsFromPool hands the retiring pool's per-second rings to the Session
-// that displaced it. See the call site for why, and collect.Traffic.Seed for why
-// the history database is not the source.
-func (cn *conn) seedGraphsFromPool(routerID string, rs *session.Session) {
-	if cn.srv.alertPool == nil || rs == nil {
-		return
-	}
-	traffic, ping := cn.srv.alertPool.GraphSeed(routerID)
-	if tr := rs.Traffic(); tr != nil {
-		for ifName, points := range traffic {
-			tr.Seed(ifName, points)
-		}
-	}
-	if p := rs.Ping(); p != nil {
-		p.Seed(ping)
 	}
 }

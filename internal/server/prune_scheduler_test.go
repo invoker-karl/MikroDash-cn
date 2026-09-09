@@ -202,7 +202,11 @@ func TestEveryStartupActionIsGated(t *testing.T) {
 	for _, c := range []struct{ what, mustMatch, why string }{
 		{"the background pool", `buildPool\(srv\.standalone && !opts\.NoPool\)`,
 			"it holds a connection to every router"},
-		{"the always-on alert pool", `buildAlertPool\(srv\.standalone && !opts\.NoPool\)`,
+		// WAS `buildAlertPool(...)`. The alert pool is gone; the same switch now
+		// sets `holdFleet`, which is what decides whether a session is held for
+		// every router nobody is watching. Same gate, same consequence, one
+		// implementation instead of two.
+		{"the always-on fleet holds", `srv\.holdFleet = srv\.standalone && !opts\.NoPool`,
 			"it holds a connection to every router"},
 		{"the retention sweep", `buildPruneScheduler\(srv\.standalone && opts\.Retention\)`,
 			"it DELETES rows"},
@@ -259,22 +263,30 @@ func TestBothHistoryRecordersAreFlushedOnShutdown(t *testing.T) {
 	// would lose the open minute for every other on each restart — the same data
 	// loss this test exists for, narrowed to one router by accident.
 	if !regexp.MustCompile(`historyWire\.FlushAll\(\)`).Match(srv) {
-		t.Error("Shutdown does not flush the alertpool's history. That pool is the " +
-			"recorder whenever no browser is open — almost always — so every restart " +
-			"loses the minute in progress.")
+		t.Error("Shutdown does not flush the overview pool's history. That pool " +
+			"records while the Devices page is open, so every restart loses the " +
+			"minute in progress.")
 	}
 	// AND BEFORE THE POOL IS CLOSED, or the flush has nothing to flush from.
 	// THE RECEIVER IS PART OF THE PATTERN. Without `s\.` the first match is the
-	// COMMENT above the flush, which says "BEFORE `alertPool.Close()`" — so the
-	// first version of this test reported the order was wrong when the code was
-	// right, and would have had somebody "fix" correct code.
+	// COMMENT above the flush, so the first version of this test reported the
+	// order was wrong when the code was right, and would have had somebody "fix"
+	// correct code.
+	//
+	// ── AGAINST `pool.Close()`, NOT THE SESSIONS ──────────────────────────
+	//
+	// This used to name `s.alertPool.Close()`. That package is gone and the
+	// background recorder is a HELD SESSION; `sessions.Shutdown()` flushes each
+	// session as it tears it down, so that half is the manager's own invariant
+	// and not something a source read of `Shutdown` can see. The overview pool
+	// has no flush of its own, which is what leaves this line load-bearing.
 	flush := regexp.MustCompile(`s\.historyWire\.FlushAll\(`).FindIndex(srv)
-	closed := regexp.MustCompile(`s\.alertPool\.Close\(\)`).FindIndex(srv)
+	closed := regexp.MustCompile(`s\.pool\.Close\(\)`).FindIndex(srv)
 	if flush == nil || closed == nil {
 		t.Fatal("could not locate both the flush and the close")
 	}
 	if flush[0] > closed[0] {
-		t.Error("the history flush runs AFTER alertPool.Close(); the collectors it " +
+		t.Error("the history flush runs AFTER pool.Close(); the collectors it " +
 			"draws from are gone by then")
 	}
 }
@@ -283,7 +295,7 @@ func TestBothHistoryRecordersAreFlushedOnShutdown(t *testing.T) {
 //
 // ── THE DEFECT THIS PINS ──────────────────────────────────────────────────
 //
-// `syncAlertPool` excludes every router that has a live `Session`, and nothing
+// `syncFleetHolds` excludes every router that has a live `Session`, and nothing
 // re-ran it at the moment that set changed. It was called from the Devices page,
 // the routers API, the sites API and startup — never from `router:select`.
 //
@@ -319,7 +331,7 @@ func TestTheAlertPoolIsResyncedWhenASessionTakesOrReleasesARouter(t *testing.T) 
 	}
 	// The re-sync must come AFTER the acquire, or the pool is asked to exclude a
 	// session that does not exist yet and keeps the router.
-	if i := strings.Index(after, "cn.srv.syncAlertPool()"); i < 0 {
+	if i := strings.Index(after, "cn.srv.syncFleetHolds()"); i < 0 {
 		t.Error("router:select does not re-sync the alert pool after acquiring a " +
 			"session. The pool then keeps the router the session just took, and two " +
 			"system collectors feed one evaluator — which flapped routeros_update 50 " +
@@ -334,7 +346,7 @@ func TestTheAlertPoolIsResyncedWhenASessionTakesOrReleasesARouter(t *testing.T) 
 	if j := strings.Index(body, "\n}"); j >= 0 {
 		body = body[:j]
 	}
-	if !strings.Contains(body, "cn.srv.syncAlertPool()") {
+	if !strings.Contains(body, "cn.srv.syncFleetHolds()") {
 		t.Error("releaseRouter does not re-sync the alert pool. The last browser " +
 			"closing would leave that router covered by nothing — no status, no " +
 			"alerts, no history.")
@@ -346,7 +358,7 @@ func TestTheAlertPoolIsResyncedWhenASessionTakesOrReleasesARouter(t *testing.T) 
 // ── WHAT WAS MEASURED ─────────────────────────────────────────────────────
 //
 // `Evaluate()`'s return value — the `[]Fired` — is DISCARDED at both call sites
-// (`alertpool_wire.go`, `session.go`), and `srv.dispatch` is assigned in `New`
+// (the alert pool's wiring, and `session.go`), and `srv.dispatch` is assigned in `New`
 // and never read. So a fired alert reaches no transport: rows are written, and
 // nothing is sent.
 //
@@ -444,7 +456,6 @@ func TestEveryBackgroundComponentIsStoppedOnShutdown(t *testing.T) {
 	for _, c := range []struct{ field, call string }{
 		{"backupSched", "s.backupSched.Stop()"},
 		{"pruneSched", "s.pruneSched.Stop()"},
-		{"alertPool", "s.alertPool.Close()"},
 		{"pool", "s.pool.Close()"},
 		{"auditDB", "s.auditDB.Close()"},
 	} {

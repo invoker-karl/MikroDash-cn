@@ -40,6 +40,25 @@ type Reasons struct {
 	// Devices is true while the Devices page is open, which reads a fixed set
 	// per router.
 	Devices bool
+	// Warm keeps the CONNECTION and runs no collectors at all.
+	//
+	// ── WHY A REASON THAT WANTS NOTHING ─────────────────────────────────────
+	//
+	// The Devices page opened with a fleet of red "Offline" cards until the
+	// alert pool started dialling every router at startup -- a defect the
+	// operator reported twice. What fixed it was not data: it was the
+	// CONNECTION, so a card could say "up" the moment the page rendered instead
+	// of waiting seconds for a dial.
+	//
+	// That pool built no collectors at all for a router with alerts and
+	// reporting off -- verified live, `roslimit` reported "across 1 router(s)"
+	// with three more connected. So the thing worth keeping is a socket and
+	// nothing else, and this is that, expressed as a reason rather than as a
+	// second engine.
+	//
+	// It is what let `internal/alertpool` be deleted without the red cards
+	// coming back.
+	Warm bool
 }
 
 // historyFeeds are the two collectors continuous history is written from.
@@ -66,6 +85,8 @@ func Needs(key string, why Reasons) bool {
 	if why.Viewer {
 		return true
 	}
+	// `Warm` is deliberately absent from everything below. It holds the
+	// connection and wants no collector, which is the whole point of it.
 	if why.Alerts {
 		for _, k := range AlertFeeds {
 			if k == key {
@@ -97,6 +118,7 @@ func (s *Session) reasonsLocked() Reasons {
 		Alerts:  s.holds["alerts"],
 		History: s.holds["history"],
 		Devices: s.holds["devices"],
+		Warm:    s.holds["warm"],
 	}
 }
 

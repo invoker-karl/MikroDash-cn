@@ -6,10 +6,9 @@ import (
 	"os"
 	"time"
 
-	"mikrodash/internal/alertpool"
 	"mikrodash/internal/collection"
-	"mikrodash/internal/historywire"
 	"mikrodash/internal/routers"
+	"mikrodash/internal/session"
 	"mikrodash/internal/store"
 )
 
@@ -145,12 +144,17 @@ func (s *Server) buildStatsSources(sess *Session) routers.StatsSources {
 	// nothing here can mix two connections' readings into one card.
 	//
 	// This is what stops the page opening with a fleet of red "Offline" cards:
-	// the alert pool is synced at startup and already holds a connection to
-	// every enabled router, while the overview pool is synced from this page and
-	// takes a few seconds to dial. See alertpool.Snapshot for the full argument
-	// and for what a snapshot does NOT carry.
-	if s.alertPool != nil {
-		fillFromAlertPool(out.Background, s.alertPool.Snapshots())
+	// every enabled router is held WARM from startup and already has a
+	// connection, while the overview pool is synced from this page and takes a
+	// few seconds to dial. See session.Snapshot for the full argument and for
+	// what a snapshot does NOT carry.
+	//
+	// THE SOURCE MOVED AND THE GUARANTEE DID NOT. This read the alert pool until
+	// that package was deleted; `session.Reasons.Warm` is the hold that replaced
+	// it, and it holds the same thing the pool did for these routers -- the
+	// socket, and no collectors.
+	if s.sessions != nil {
+		fillFromSessions(out.Background, s.sessions.Snapshots())
 	}
 
 	if s.auditDB != nil {
@@ -177,7 +181,7 @@ func (s *Server) buildStatsSources(sess *Session) routers.StatsSources {
 	return out
 }
 
-// fillFromAlertPool adds a summary for every snapshotted router the overview
+// fillFromSessions adds a summary for every snapshotted router the overview
 // pool did not answer for, and leaves the ones it did alone.
 //
 // A free function over the map rather than a method, so the precedence can be
@@ -185,7 +189,7 @@ func (s *Server) buildStatsSources(sess *Session) routers.StatsSources {
 // `internal/routers` makes for being pure. The precedence is the part worth
 // testing: getting it backwards is not a crash, it is a card that quietly loses
 // its Clients count.
-func fillFromAlertPool(bg map[string]routers.Summary, snaps []alertpool.Snapshot) {
+func fillFromSessions(bg map[string]routers.Summary, snaps []session.Snapshot) {
 	for _, snap := range snaps {
 		// PRESENT IS NOT THE SAME AS ANSWERED, and getting that wrong is what
 		// made the first version of this fix do nothing at all. `Summaries`
@@ -243,7 +247,7 @@ func fillFromAlertPool(bg map[string]routers.Summary, snaps []alertpool.Snapshot
 			RouterID:  snap.RouterID,
 			Connected: snap.Connected,
 			// A snapshot is only ever built from an observation — see
-			// alertpool.Pool.Snapshots, which omits a session that has not
+			// session.Manager.Snapshots, which omits a session that has not
 			// answered rather than reporting it as down.
 			Known:    true,
 			System:   snap.System,
@@ -464,7 +468,6 @@ func (s *Server) syncPool() {
 			continue // a disabled router is not connected to at all
 		}
 		s.declareRecordedInterfaces(r.ID, routers.DefaultIfFor(r.DefaultIf, global))
-		s.noteConnThreshold(r.ID, r.ConnDownThresholdSec)
 		s.declareReporting(r)
 		cfgs = append(cfgs, routers.RouterConfig{
 			ID: r.ID, Label: r.Label, Host: r.Host, Port: r.Port,
@@ -484,7 +487,7 @@ func (s *Server) syncPool() {
 			// "no data unless I have the Dashboard open".
 			DefaultIf:  routers.DefaultIfFor(r.DefaultIf, global),
 			PingTarget: r.PingTarget,
-			// See the note in `syncAlertPool`: a hand-written field list, so a
+			// See the note in `syncFleetHolds`: a hand-written field list, so a
 			// flag left out here is invisible to the pool.
 			ReportingEnabled: store.ReportingOn(r),
 		})
@@ -507,7 +510,7 @@ func (s *Server) syncPool() {
 	//
 	// Two costs, and the second is the one that was reported: a connection to
 	// every router nobody asked for, and `/healthz` reporting the active router
-	// disconnected — `alertPoolExclusions` hands those routers to the overview
+	// disconnected — `warmExclusions` hands those routers to the overview
 	// pool and the alert pool forgets their status. Measured against 0.8.18: one
 	// router edit, then `ok:false` for as long as the process ran.
 	//
@@ -572,37 +575,21 @@ func (s *Server) declareReporting(r store.Router) {
 	}
 }
 
-// noteConnThreshold remembers this router's outage debounce, in milliseconds.
+// ── THE OUTAGE DEBOUNCE IS NO LONGER CACHED HERE ──────────────────────────
 //
-// ── CACHED, BECAUSE THE READER IS A STATUS HOOK ───────────────────────────
+// `noteConnThreshold` and `connThresholdMs` were a per-router cache of the
+// debounce, populated by both fleet syncs. Their only reader was
+// `alertPoolStatus`, the hook `internal/alertpool` called on a connect or a
+// drop: that hook was handed a router id and a bool and nothing else, and
+// reading the record there would have meant `store.Routers()` — which decrypts
+// every router's password with scrypt — on every connect and drop.
 //
-// `alertPoolStatus` is handed a router id and a bool and nothing else, and
-// reading the record there would mean `store.Routers()` — which decrypts every
-// router's password with scrypt — on every connect and drop. The fleet syncs
-// already walk every record, so the value is picked up where it is free.
-func (s *Server) noteConnThreshold(routerID string, sec *int) {
-	ms := historywire.ThresholdMs(0, false) // the live default when unset
-	if sec != nil {
-		ms = historywire.ThresholdMs(*sec, true)
-	}
-	s.connThreshMu.Lock()
-	if s.connThresh == nil {
-		s.connThresh = map[string]int64{}
-	}
-	s.connThresh[routerID] = ms
-	s.connThreshMu.Unlock()
-}
-
-// connThresholdMs is this router's debounce, or the live default for a router
-// no sync has seen yet.
-func (s *Server) connThresholdMs(routerID string) int64 {
-	s.connThreshMu.Lock()
-	defer s.connThreshMu.Unlock()
-	if ms, ok := s.connThresh[routerID]; ok {
-		return ms
-	}
-	return historywire.ThresholdMs(0, false)
-}
+// The pool is gone and every router nobody is watching is held as a SESSION, so
+// the session writes `connectivity_events` and carries the threshold off its own
+// record: `connThreshMs`, built once in `Acquire`. There is no hook left with
+// nothing but an id, so there is nothing left to cache for. Removed rather than
+// left populated and unread — see `internal/session/connthresh_test.go`, which
+// is where the property this protected is asserted now.
 
 // devicesFocus is what a browser opening the Devices page sets in motion.
 //
@@ -632,7 +619,7 @@ func (cn *conn) devicesFocus() {
 	// AFTER THE SYNCS, and the order is load-bearing rather than incidental —
 	// it was questioned in review precisely because nothing here said why.
 	//
-	// `syncAlertPool` is what DECIDES THE SESSION SET: `PlanSync` rebuilds a
+	// `syncFleetHolds` is what DECIDES THE SESSION SET: `PlanSync` rebuilds a
 	// session whose flags changed and drops one the overview pool has taken
 	// over, and a rebuilt session is a new socket with no reading on it. Priming
 	// ahead of that spends a command on sessions that are then discarded, and
@@ -645,9 +632,9 @@ func (cn *conn) devicesFocus() {
 	// a summary can be `Known` with a nil `System` when the frame is built. That
 	// is a gap to fill, not two sources to mix — see the guard there.
 	cn.srv.syncPool()
-	cn.srv.syncAlertPool()
-	if cn.srv.alertPool != nil {
-		cn.srv.alertPool.PrimeStats()
+	cn.srv.syncFleetHolds()
+	if cn.srv.sessions != nil {
+		cn.srv.sessions.PrimeStats()
 	}
 	cn.logEmptyFleet()
 	cn.sendRoutersStats()
@@ -754,22 +741,22 @@ func (cn *conn) startDevicesTick() {
 				// and the live app rebuilds its summaries from a pool that its
 				// own `syncSessions` keeps current on every routers.json write.
 				cn.srv.syncPool()
-				cn.srv.syncAlertPool()
+				cn.srv.syncFleetHolds()
 				// ── AND ANY SESSION THAT WENT COLLECTOR-LESS SINCE ────
 				//
 				// `PrimeStats` on focus covers what existed then. An
-				// interactive session idling out builds a bare alert-pool
-				// session WHILE the page is open — `SetOnIdle` calls
-				// `syncAlertPool` and nothing else — and it connects in
-				// about a hundred milliseconds, well before the overview
-				// pool has dialled and ticked. That card is the green
-				// badge over blank gauges all over again.
+				// interactive session idling out drops to its warm hold
+				// WHILE the page is open, and a warm session runs no
+				// collectors at all -- so its reading goes stale and the
+				// card is the green badge over blank gauges all over
+				// again, well before the overview pool has dialled and
+				// ticked.
 				//
 				// UNREAD ONLY: this is a timer, and re-reading a session
 				// that already answered is the poll the toggle exists to
 				// avoid.
-				if cn.srv.alertPool != nil {
-					cn.srv.alertPool.PrimeUnread()
+				if cn.srv.sessions != nil {
+					cn.srv.sessions.PrimeUnread()
 				}
 				cn.sendRoutersStats()
 			}
@@ -852,7 +839,7 @@ func (s *Server) scheduleDevicesRelease() {
 		// routers covered by nothing at all, which is worse than the bug this
 		// release exists to fix.
 		s.pool.ReleaseAll()
-		s.syncAlertPool()
+		s.syncFleetHolds()
 	})
 }
 

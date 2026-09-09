@@ -12,9 +12,9 @@ import (
 //
 // ── AN INVARIANT ACROSS EIGHT CALL SITES ──────────────────────────────────
 //
-// `syncPool` and `syncAlertPool` answer the same question — who is watching
+// `syncPool` and `syncFleetHolds` answer the same question — who is watching
 // what — so a change that affects one affects the other. The overview pool
-// excludes routers with an interactive session; the alert pool excludes those
+// excludes routers with an interactive session; the warm hold is dropped for those
 // AND the overview pool's. Sync one without the other and the two disagree about
 // who owns a router, which shows up as two connections to one device or none.
 //
@@ -51,8 +51,8 @@ func TestEverySyncPoolSiteAlsoSyncsTheAlertPool(t *testing.T) {
 			if i := strings.Index(next, "\n"); i >= 0 {
 				next = next[:i]
 			}
-			if !strings.Contains(next, "syncAlertPool()") {
-				t.Errorf("%s: a syncPool() call is not followed by syncAlertPool().\n"+
+			if !strings.Contains(next, "syncFleetHolds()") {
+				t.Errorf("%s: a syncPool() call is not followed by syncFleetHolds().\n"+
 					"  next line: %q\n"+
 					"The two pools divide the fleet between them; syncing one without the "+
 					"other leaves them disagreeing about who owns a router.", f, strings.TrimSpace(next))
@@ -78,8 +78,8 @@ func TestTheAlertPoolIsSyncedAtStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	code := regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(string(b), "")
-	if !strings.Contains(code, "srv.syncAlertPool()") {
-		t.Error("server.go never syncs the alert pool: it would connect to nothing until a " +
+	if !strings.Contains(code, "srv.syncFleetHolds()") {
+		t.Error("server.go never syncs the fleet holds: it would connect to nothing until a " +
 			"router was edited, so non-active routers read Offline and their alerts never fire")
 	}
 }

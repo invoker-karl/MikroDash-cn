@@ -590,13 +590,27 @@ func (e *Evaluator) SystemUpdate(r Router, cpuLoad *float64,
 // false as "the router reached the version" and RESOLVES an open alert.
 //
 // That is harmless in the live app, which shares one update result across every
-// SystemCollector for a router. This port does not — `collect/system.go` says so
+// SystemCollector for a router. This port did not — `collect/system.go` says so
 // outright: "This port builds ONE session per router, so the schedule lives on
-// the collector. A second session type would need the shared map back." The
-// alertpool IS that second session type, and its collector has usually never run
-// the check, so its payloads said "no update" and closed the alert the session's
-// collector had just opened. MEASURED: 50 fire/resolve pairs in 24 hours against
-// zero in the live app.
+// the collector. A second session type would need the shared map back."
+// `internal/alertpool` WAS that second session type, and its collector had
+// usually never run the check, so its payloads said "no update" and closed the
+// alert the session's collector had just opened. MEASURED: 50 fire/resolve pairs
+// in 24 hours against zero in the live app.
+//
+// ── THE SECOND SESSION TYPE IS GONE, AND THIS SPLIT STAYS ─────────────────
+//
+// The alert pool was deleted on 2026-09-09: every router nobody is watching is
+// held by `session.Manager` now, so the premise above — two collectors for one
+// router, disagreeing about the update check — cannot arise from that source.
+//
+// THAT IS NOT A REASON TO FOLD THIS BACK IN. The defect is in `updateVerdict`
+// conflating "not checked" with "up to date", and it fires for ANY payload that
+// carries no update information: a primed reading, a first tick before the
+// check has run, a collector whose check failed. Removing the split would make
+// the app correct only for as long as exactly one collector per router ever
+// produces a `system:update` payload, and nothing enforces that. Kept, with the
+// premise updated rather than the guard removed.
 //
 // ── WHY A SEPARATE METHOD RATHER THAN A FLAG ──────────────────────────────
 //
