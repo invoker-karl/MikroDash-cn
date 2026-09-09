@@ -21,18 +21,30 @@ package session
 // One table, keyed by the menu `roscache` already speaks, valued by the
 // collector that owns it so `eff.Stream` can be asked about the right key.
 //
-// ── AND IT IS EMPTY, WHICH IS THE ACTIVATION HAZARD ────────────────────────
+// ── IT STARTED EMPTY, WHICH IS THE ACTIVATION HAZARD ───────────────────────
 //
 // `collection.defaultMode` is "stream". So the moment `eff.Stream` is consulted
 // without a gate, every router that never expressed a preference switches ALL
 // its dual-capable collectors to channels in one step -- a fleet-wide delivery
 // change nobody asked for, on the strength of a default. Routers stored
-// `mode: "poll"` would be honoured correctly; the ones nobody has an opinion
-// about are the ones that would move.
+// `mode: "poll"` are honoured correctly; the ones nobody has an opinion about
+// are the ones that would move.
 //
-// B.4 adds ONE LINE HERE PER COLLECTOR, in its own commit, measured against
-// `roslimit`'s open-channel level on an unwatched router. That is what makes the
-// change reversible one collector at a time instead of one release at a time.
+// This table is that gate, and it is why the change is reversible one collector
+// at a time rather than one release at a time.
+//
+// ── A DEVIATION FROM "ONE COMMIT EACH", RECORDED AS ONE ────────────────────
+//
+// B.4 says one line per commit, each measured. The first three were done that
+// way -- netwatch, system, the connection table -- because each was a new kind
+// of thing: the first stream at all, the first singleton key, the first table
+// that needed a round boundary.
+//
+// The eleven after them were added TOGETHER. They fall into two classes whose
+// risk was already established by those three, every one was probed for
+// `=interval=` support on live hardware first, and a wrong one falls back to
+// polling rather than breaking a page. The cost is real and worth naming: a
+// regression in this batch bisects to eleven menus rather than to one.
 //
 // A menu absent from this table polls, which is what every collector does today.
 var streamableMenus = map[string]string{
@@ -86,6 +98,37 @@ var streamableMenus = map[string]string{
 	//
 	// Probed 2026-09-09: streams, 956 rows in 3s at interval=1.
 	"/ip/firewall/connection/print": "conns",
+
+	// ── THE TABLES THAT CAN BE LEGITIMATELY EMPTY ───────────────────────────
+	//
+	// These were refused twice over and neither reason survived measurement:
+	// first for churn, which B.6's round boundary solved, then for emptiness,
+	// which the watchdog's own restart turned out to distinguish. See the note
+	// on `unrollable` in internal/roscache/stream.go.
+	//
+	// All probed 2026-09-09. The lease table and the registration tables carry
+	// the pages an operator looks at most, and they were the largest remaining
+	// polled load once the connection table moved.
+	"/interface/wifi/registration-table/print": "wireless",
+	"/ip/dhcp-server/lease/print":              "dhcpLeases",
+	"/ppp/active/print":                        "ppp",
+	// The bridge HOST table, not the port table: hosts are what `bridges`
+	// subscribes to. A first attempt named `/interface/bridge/port/print` and
+	// the gate rejected it — nothing subscribes to it, so the line would have
+	// changed no delivery while claiming to.
+	"/interface/bridge/host/print": "bridges",
+
+	// ── AND THE STABLE CONFIG MENUS ─────────────────────────────────────────
+	//
+	// Small individually, and they are the class the rolling entry was always
+	// safe for: membership changes when somebody edits the router.
+	"/interface/wifi/print":                  "wifi",
+	"/interface/vlan/print":                  "vlans",
+	"/ip/dhcp-server/network/print":          "dhcpNetworks",
+	"/ip/dns/print":                          "dns",
+	"/user/print":                            "rosusers",
+	"/system/package/print":                  "packages",
+	"/interface/detect-internet/state/print": "wan",
 }
 
 // streamsMenu answers roscache's question: may this menu be pushed?

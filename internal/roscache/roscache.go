@@ -131,7 +131,9 @@ func (c *Cache) Get(menu string, fields []string, ttl time.Duration) ([]routeros
 	// the scheduler stay UNCHANGED -- it still calls Invalidate then Get then
 	// deliver, and for a streamed menu the first is inert and the second
 	// answers from the rolling map. Phase B is additive for that reason.
-	if f := c.fillFor(menu); f != nil {
+	// AND ONLY WHEN IT HAS WARMED UP. An open channel that has not yet delivered
+	// its first row must not answer "no rows": see hasRows.
+	if f := c.fillFor(menu); f != nil && f.authoritative() {
 		return f.snapshot(), nil
 	}
 	for {

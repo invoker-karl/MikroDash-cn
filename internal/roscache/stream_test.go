@@ -343,8 +343,11 @@ func TestTheSameMenuIsNotFilledTwice(t *testing.T) {
 func TestASilentChannelIsRestarted(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName, time.Hour,
-		5*time.Millisecond, 20*time.Millisecond)
+	// A SMALL boundary, because staleness is now derived from it: a stream is
+	// silent when it has said nothing for two of its own intervals, never less
+	// than the floor. A one-hour boundary would put the watchdog two hours away.
+	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
+		2*time.Millisecond, 5*time.Millisecond, 20*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,8 +388,8 @@ func TestASilentChannelIsRestarted(t *testing.T) {
 func TestAHealthyChannelIsNotRestarted(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName, time.Hour,
-		5*time.Millisecond, 200*time.Millisecond)
+	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
+		2*time.Millisecond, 5*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,39 +480,228 @@ func TestAStreamedMenuStillFiresOnDeliver(t *testing.T) {
 	}
 }
 
-// TestATableThatCanBeEmptyIsRefused.
+// TestOnlyRowsThatAreNotReadingsAreRefused.
 //
-// ── THE SECOND KIND, NARROWED BY B.6 ───────────────────────────────────────
+// ── THE REFUSAL LIST HAS BEEN NARROWED TWICE, BY MEASUREMENT ───────────────
 //
-// The first kind is rows that are not readings of one value: `ping`, `logs`.
+// This test used to name nine menus. Both reasons they were on it have been
+// removed, and neither by argument:
 //
-// The second USED TO BE churn, because the entry could only accumulate and a row
-// that left the table never left the map. B.6 found the round boundary, so that
-// reason is gone and the connection table came off this list.
+//	CHURN      the entry could only accumulate, so a row that LEFT the table
+//	           never left the map. B.6 found the round boundary and that reason
+//	           went; the connection table came off the list and was verified live
+//	           by its count going DOWN, which a broken implementation cannot do.
+//	EMPTINESS  a table with no rows sends nothing, indistinguishable from a dead
+//	           channel, so an emptied table held its last contents. The watchdog
+//	           already ran the distinguishing experiment: silence that survives a
+//	           deliberate reopen is evidence of emptiness, not breakage.
 //
-// What remains is narrower and real: a table with NO ROWS sends nothing, and
-// nothing is indistinguishable from a dead stream — which the watchdog treats as
-// death and reopens. So an EMPTIED table holds its last contents. Bounded by the
-// next row rather than by the session, but still wrong, and these are the menus
-// where empty is an ORDINARY state: a router with no associated clients and no
-// PPP sessions is a completely normal router.
-func TestATableThatCanBeEmptyIsRefused(t *testing.T) {
+// WHAT REMAINS IS PERMANENT AND IS NOT ABOUT THE MECHANISM. `ping` and `logs`
+// are refused because of what their rows ARE: a ping result is one measurement
+// the collector counts into min/max/avg/loss, and a log line is one event. No
+// amount of boundary or liveness detection makes the latest one stand for the
+// others.
+//
+// So this test asserts the shape of the list rather than its contents: the two
+// that can never be lifted are still there, and nothing has crept back in on a
+// mechanical reason that has since been solved.
+func TestOnlyRowsThatAreNotReadingsAreRefused(t *testing.T) {
 	c := New(&pusher{})
-	churning := []string{
-		"/interface/wifi/registration-table/print",
-		"/interface/wireless/registration-table/print",
-		"/ip/dhcp-server/lease/print",
-		"/ppp/active/print",
-		"/ip/kid-control/device/print",
-	}
-	for _, menu := range churning {
+
+	for _, menu := range []string{"/tool/ping", "/log/listen"} {
 		stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName, time.Hour)
 		if err == nil {
 			stop()
-			t.Errorf("%s was accepted for stream-filling. It can be legitimately EMPTY, "+
-				"and an empty table sends nothing — which is indistinguishable from a "+
-				"dead stream, so the entry would hold its last contents and the page "+
-				"would show rows that have gone.", menu)
+			t.Errorf("%s was accepted. Its rows are distinct elements the collector "+
+				"needs every one of, not readings of one value, so a rolling entry "+
+				"loses them SILENTLY — 0%% loss for ever, or dropped log lines.", menu)
 		}
+	}
+
+	// AND NOTHING ELSE. A menu refused for churn or for emptiness has been
+	// refused for a reason this package has since solved, and the effect is a
+	// collector left polling for no measured cause.
+	for menu := range unrollableForTest() {
+		if menu != "/tool/ping" && menu != "/log/listen" {
+			t.Errorf("%s is refused. Both mechanical reasons for refusing a menu — "+
+				"churn and emptiness — have been solved and measured, so a refusal "+
+				"now needs to be about what the ROWS ARE. If this is a new and real "+
+				"third reason, say so here.", menu)
+		}
+	}
+}
+
+// unrollableForTest exposes the list to this package's own tests.
+func unrollableForTest() map[string]string { return unrollable }
+
+// TestAnEmptiedTableEventuallyPublishesEmpty.
+//
+// ── SILENCE IS AMBIGUOUS, AND THE WATCHDOG IS THE EXPERIMENT ───────────────
+//
+// RouterOS sends nothing at all for a `/print =interval=N` on an empty table —
+// measured, not assumed: the B.4 probe held `/ppp/active/print` open for three
+// seconds on four routers and received nothing, and that menu is empty on all of
+// them. So "no rows" and "dead channel" look identical.
+//
+// Holding the last contents was the safe reading, and it is what kept the
+// registration tables, the lease table and `/ppp/active` on the polled path: an
+// emptied table went on showing rows that had gone.
+//
+// The watchdog already performs the distinguishing experiment. It reopens a
+// channel that has gone quiet, and a reopened channel on a router that answers
+// delivers at once IF the table has rows. Silence surviving a deliberate restart
+// is evidence of emptiness rather than of breakage.
+func TestAnEmptiedTableEventuallyPublishesEmpty(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
+		5*time.Millisecond, 5*time.Millisecond, 15*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	// A complete round, so there is something to lose.
+	p.push(routeros.Reply{"name": "a"}, routeros.Reply{"name": "b"})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second); len(rows) == 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second); len(rows) != 2 {
+		t.Fatalf("%d rows before the silence; the test has nothing to observe", len(rows))
+	}
+
+	// Now say nothing at all, as an emptied table does.
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second); len(rows) == 0 {
+			return // published empty, which is the point
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second)
+	t.Errorf("after a restart and a full staleness window of silence the entry still "+
+		"holds %d row(s). An emptied table would show rows that have gone, which is "+
+		"what kept five menus on the polled path.", len(rows))
+}
+
+// TestARowEndsTheSilenceRun — the other direction, so the rule above cannot be
+// satisfied by an entry that simply empties itself on a timer.
+func TestARowEndsTheSilenceRun(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
+		5*time.Millisecond, 5*time.Millisecond, 30*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	// Rows throughout, at a rate that never leaves a staleness window empty.
+	for i := 0; i < 40; i++ {
+		p.push(routeros.Reply{"name": "a"}, routeros.Reply{"name": "b"})
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second); len(rows) == 0 {
+		t.Error("a table delivering steadily was published as EMPTY. The rule is " +
+			"firing on a clock rather than on silence, and every streamed page " +
+			"would blank periodically.")
+	}
+}
+
+// TestASlowMenuIsNotCalledDeadOrEmpty.
+//
+// ── THE BUG THIS PINS SHIPPED TO A PAGE AND NOT TO A TEST ──────────────────
+//
+// `streamStale` is ten seconds, which is right for a menu delivering every
+// second or two and wrong for a slow one. `dhcpNetworks` runs at ten MINUTES, so
+// its channel says nothing for ten minutes by design.
+//
+// With a fixed bound the watchdog called that death every ten seconds and
+// reopened, and the empty-table rule — two staleness windows of silence — then
+// concluded after twenty seconds that a ten-minute menu was empty. The DHCP page
+// read "No DHCP networks on this device" while the router held three.
+//
+// The Go suite was green and the `=interval=` probe passed. Only the page was
+// wrong, which is what "live verification is mandatory" is for.
+func TestASlowMenuIsNotCalledDeadOrEmpty(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	// A "slow" menu in miniature: a 300ms cadence against a 10ms floor.
+	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
+		300*time.Millisecond, 5*time.Millisecond, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	p.push(routeros.Reply{"name": "a"}, routeros.Reply{"name": "b"})
+
+	// Well past the FLOOR, and well inside one of this menu's own intervals.
+	time.Sleep(150 * time.Millisecond)
+
+	rows, _ := c.Get("/interface/monitor-traffic", nil, time.Second)
+	if len(rows) != 2 {
+		t.Errorf("a slow menu was emptied after %v of silence: %d rows, want 2. Its "+
+			"cadence is 300ms, so silence shorter than that says nothing at all "+
+			"about whether the table has rows.", 150*time.Millisecond, len(rows))
+	}
+	opens, _, _ := p.counts()
+	if opens > 1 {
+		t.Errorf("a slow menu's channel was reopened %d time(s) inside one of its own "+
+			"intervals; the watchdog is measuring silence against a fixed bound "+
+			"rather than against the cadence", opens-1)
+	}
+}
+
+// TestAnUnwarmedStreamFallsThroughToARead.
+//
+// ── THE RACE THAT EMPTIED THE DHCP PAGE FOR TEN MINUTES ────────────────────
+//
+// `FillFromStream` returns when the channel is OPEN; the first row arrives some
+// milliseconds later. The scheduler can deliver inside that window, and `Get`
+// answering "no rows" there is not a cheap wrong answer — it is published to the
+// collector, which builds an EMPTY payload, and the next delivery is a whole
+// cadence away.
+//
+// Measured on live hardware: the DHCP page read "0 leases" and "No DHCP networks
+// on this device" while the router held 45 and 3. Both menus run at ten minutes,
+// so one empty answer at startup persisted for ten minutes.
+//
+// The same race exists on a fast menu and self-corrects within a second, which
+// is precisely why it would otherwise have been found much later and blamed on
+// something else.
+func TestAnUnwarmedStreamFallsThroughToARead(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	defer fill(t, c, "/interface/monitor-traffic")()
+
+	// Nothing pushed yet: the channel is open and has delivered nothing.
+	rows, err := c.Get("/interface/monitor-traffic", nil, time.Second)
+	if err != nil {
+		t.Fatalf("Get on an unwarmed stream: %v", err)
+	}
+	if _, _, reads := p.counts(); reads != 1 {
+		t.Errorf("%d read(s) issued; an unwarmed stream must fall through to the "+
+			"ordinary read path rather than publishing an empty table", reads)
+	}
+	// AND ONLY WHILE UNWARMED. An entry that has completed a round is
+	// authoritative about its own emptiness; sending THAT back to the read path
+	// would poll an empty table for ever while also holding a channel.
+	if len(rows) != 1 || rows[0]["from"] != "a read" {
+		t.Errorf("got %v, want the row a real read returns", rows)
+	}
+
+	// Once it has rows, the stream answers and the reads stop.
+	p.push(routeros.Reply{"name": "ether1"})
+	rows, _ = c.Get("/interface/monitor-traffic", nil, time.Second)
+	if len(rows) != 1 || rows[0]["name"] != "ether1" {
+		t.Fatalf("got %v, want the pushed row", rows)
+	}
+	if _, _, reads := p.counts(); reads != 1 {
+		t.Errorf("%d reads; a warmed stream must answer without touching the router", reads)
 	}
 }

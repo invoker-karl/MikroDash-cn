@@ -78,36 +78,27 @@ var unrollable = map[string]string{
 		"a rolling entry keeps only the latest and would report 0% loss for ever",
 	"/log/listen": "every row is a distinct event; a rolling entry drops lines",
 
-	// ── KIND TWO: THE TABLE CAN BE LEGITIMATELY EMPTY ───────────────────────
+	// ── KIND TWO WAS HERE AND IS NOW EMPTY ─────────────────────────────────
 	//
-	// THIS LIST USED TO BE ABOUT CHURN, and B.6 removed that reason. A round
-	// boundary is found now -- a repeated key, or a gap longer than the cadence
-	// -- so a row that LEAVES the table is forgotten and the entry no longer
-	// grows without bound. The connection table came off this list because of it.
+	// It has been narrowed twice by measurement rather than by argument, and
+	// both narrowings are worth keeping because each was a real obstacle:
 	//
-	// WHAT REMAINS IS NARROWER AND IT IS REAL. A table with NO ROWS sends
-	// nothing, and nothing is indistinguishable from a stream that has died --
-	// which the watchdog, correctly, treats as death and reopens. So an emptied
-	// table holds its last contents instead of emptying.
+	//	FIRST it was CHURN. The entry could only accumulate, so a row that left
+	//	the table never left the map -- closed connections, departed clients and
+	//	expired leases piling up for the life of the session. B.6 found the round
+	//	boundary (a repeated key, or a gap longer than the cadence) and that
+	//	reason went. The connection table came off the list.
 	//
-	// That is bounded by the next row rather than by the session, so it is a far
-	// smaller error than the growth it replaced. It is still an error, and these
-	// are the menus where "empty" is an ORDINARY state rather than an exotic one:
-	// a router with no wireless clients associated, no PPP sessions and no
-	// kid-control devices is a completely normal router, and the visible result
-	// would be ghost clients on a page that should read empty.
+	//	THEN it was EMPTINESS. A table with no rows sends nothing, and nothing is
+	//	indistinguishable from a dead channel, so an emptied table held its last
+	//	contents. The watchdog turned out to already run the distinguishing
+	//	experiment: it reopens a quiet channel, and silence that survives a
+	//	deliberate reopen is evidence of an empty table rather than a broken one.
+	//	See the rule in `watch`.
 	//
-	// Lifting these needs the empty case solved, not more boundary detection.
-	"/interface/wifi/registration-table/print": "no associated clients is an ordinary " +
-		"state, and an empty table is indistinguishable from a dead stream; departed " +
-		"clients would linger on the WiFi Clients page",
-	"/interface/wireless/registration-table/print": "same as the wifi registration table",
-	"/caps-man/registration-table/print":           "same as the wifi registration table",
-	"/ppp/active/print": "no active sessions is an ordinary state; this fleet's routers " +
-		"all report an empty table today",
-	"/ip/kid-control/device/print": "no devices is an ordinary state",
-	"/ip/dhcp-server/lease/print": "a server with no current leases is an ordinary state, " +
-		"and a lingering lease feeds the name lookups on three other pages",
+	// So no menu is refused for either reason now. The list above -- rows that
+	// are not readings of one value -- is the one that remains, and it is
+	// permanent: it is a fact about what a ping result and a log line ARE.
 }
 
 // streamStale is how long an open channel may deliver nothing before the
@@ -163,6 +154,9 @@ type streamFill struct {
 	restarts int
 	// rounds is how many complete rounds have been published.
 	rounds int
+	// quietSince is when the current run of silence began, reset by any row and
+	// by an intentional reopen. See the empty-table rule in watch.
+	quietSince time.Time
 }
 
 // FillFromStream opens a channel and keeps `menu`'s entry current from it, so
@@ -202,6 +196,25 @@ func (c *Cache) fillEvery(menu string, cmd routeros.Cmd,
 	if _, dup := c.fills[menu]; dup {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("roscache: %s is already stream-filled", menu)
+	}
+	// ── SILENCE IS RELATIVE TO THE CADENCE, AND A FIXED BOUND IS A BUG ──────
+	//
+	// `streamStale` is ten seconds, which is right for a menu delivering every
+	// second or two. It is WRONG for a slow one: `dhcpNetworks` runs at ten
+	// MINUTES, so its channel is legitimately silent for ten minutes and a fixed
+	// bound calls that death every ten seconds.
+	//
+	// MEASURED, not reasoned. With the fixed bound the DHCP page read "No DHCP
+	// networks on this device" while the router held three, because the watchdog
+	// restarted the channel constantly AND the empty-table rule -- which asks for
+	// two staleness windows of silence -- concluded after twenty seconds that a
+	// ten-minute menu was empty. The Go suite was green and the `=interval=`
+	// probe passed; only the page was wrong.
+	//
+	// So a stream is silent when it has said nothing for longer than two of its
+	// OWN intervals, and never less than the floor.
+	if boundary > 0 && 2*boundary > stale {
+		stale = 2 * boundary
 	}
 	f := &streamFill{cmd: cmd, keyOf: keyOf,
 		rows: map[string]routeros.Reply{}, round: map[string]routeros.Reply{},
@@ -298,6 +311,9 @@ func (f *streamFill) absorb(r routeros.Reply) {
 		f.finishRoundLocked()
 	}
 	f.lastRow = time.Now()
+	// Any row ends the run of silence, which is what makes the empty-table rule
+	// self-correcting rather than sticky.
+	f.quietSince = time.Time{}
 
 	if k == "" {
 		// NOT DROPPED SILENTLY. A menu whose rows this cannot name is one a
@@ -324,6 +340,39 @@ func (f *streamFill) finishRoundLocked() {
 	f.round = map[string]routeros.Reply{}
 	f.published = true
 	f.rounds++
+}
+
+// hasRows reports whether this fill has received anything at all yet.
+//
+// ── A STREAM THAT HAS NOT WARMED UP IS A MISS, NOT AN EMPTY ANSWER ─────────
+//
+// `FillFromStream` returns as soon as the channel is OPEN, and the first row
+// arrives some milliseconds later. The scheduler can deliver in that window, and
+// `Get` answering "no rows" there is not a cheap wrong answer -- it is published
+// to the collector, which builds an empty payload, and the next delivery is a
+// whole cadence away.
+//
+// MEASURED: the DHCP page read "0 leases" and "No DHCP networks on this device"
+// while the router held 45 and 3. Both menus run at TEN MINUTES, so one empty
+// answer at startup persisted for ten minutes. On a fast menu the same race
+// exists and self-corrects in a second, which is exactly why it would have been
+// found late and blamed on something else.
+//
+// So an unwarmed fill falls through to the ordinary read path: the page is
+// answered from a poll, and the stream takes over the moment it has rows.
+// ── "AUTHORITATIVE", NOT "HAS ROWS", AND THE DIFFERENCE IS NOT PEDANTIC ────
+//
+// Written as `len(rows) > 0` this sends an entry that has legitimately gone
+// EMPTY back to the read path -- so a genuinely empty table would be polled for
+// ever AND hold a channel, which is worse than either alone. An entry that has
+// completed a round is authoritative about its own emptiness.
+//
+// So the question is whether a round has ever completed, not whether there is
+// anything in it.
+func (f *streamFill) authoritative() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.published || len(f.round) > 0
 }
 
 // snapshot is the current value of every key, sorted. See the header on why the
@@ -378,6 +427,42 @@ func (f *streamFill) watch(s Streamer, done <-chan struct{}) {
 				time.Since(f.lastRow) > f.boundary {
 				f.finishRoundLocked()
 			}
+
+			// ── AN EMPTY TABLE SENDS NOTHING, AND SO DOES A DEAD STREAM ─────
+			//
+			// RouterOS emits no rows at all for a `/print =interval=N` on an
+			// empty table -- measured, not assumed: the B.4 probe held
+			// `/ppp/active/print` open for three seconds on four routers and
+			// received nothing, and that menu is empty on all of them.
+			//
+			// So silence is ambiguous, and holding the last contents was the
+			// safe reading: an emptied table went on showing rows that had gone.
+			// That is why the registration tables, the lease table and
+			// `/ppp/active` stayed on the polled path after B.6.
+			//
+			// THE WATCHDOG RESOLVES IT, because it already does the experiment.
+			// It reopens a channel that has gone quiet, and a REOPENED channel
+			// on a router that is answering delivers at once if the table has
+			// rows. Silence that survives a deliberate restart is therefore
+			// evidence of an empty table rather than of a broken one.
+			//
+			// The rule: once restarted for silence, a further full staleness
+			// window with nothing publishes an EMPTY round.
+			//
+			// IT CAN STILL BE WRONG, and the direction matters. A router that
+			// has wedged in a way a reconnect does not clear would be reported
+			// as having an empty table rather than a stale one. That is the
+			// better error for these menus -- "no clients associated" invites a
+			// look, while three clients that left an hour ago look entirely
+			// plausible -- and it self-corrects on the first row that arrives.
+			if f.restarts > 0 && f.published && len(f.rows) > 0 &&
+				!f.quietSince.IsZero() && time.Since(f.quietSince) > 2*f.stale {
+				f.rows = map[string]routeros.Reply{}
+				f.round = map[string]routeros.Reply{}
+				f.rounds++
+				f.quietSince = time.Now()
+			}
+
 			quiet := time.Since(f.lastRow)
 			shut := f.closed
 			stop := f.stop
@@ -385,6 +470,7 @@ func (f *streamFill) watch(s Streamer, done <-chan struct{}) {
 			if shut || quiet < f.stale {
 				continue
 			}
+
 			// STOPPED AND REOPENED, not closed: `close` sets `closed` and this
 			// fill must survive its own restart.
 			if stop != nil {
@@ -393,6 +479,18 @@ func (f *streamFill) watch(s Streamer, done <-chan struct{}) {
 			f.mu.Lock()
 			f.stop = nil
 			f.restarts++
+			// ── SET ONCE, NOT ON EVERY RESTART ──────────────────────────
+			//
+			// The silence run starts at the FIRST reopen and is not restarted by
+			// later ones. Written as an unconditional assignment it could never
+			// fire: the watchdog reopens every staleness window, so the run was
+			// reset every window and never reached the two windows the
+			// empty-table rule asks for. Caught by the test, which is the only
+			// thing that could have caught it -- a rule that never fires looks
+			// exactly like a rule that is not needed.
+			if f.quietSince.IsZero() {
+				f.quietSince = time.Now()
+			}
 			// The rolling map is KEPT across a restart. Its rows are the last
 			// readings the router gave and they are what a page renders while
 			// the channel comes back; dropping them would blank every card for
