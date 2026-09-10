@@ -242,12 +242,13 @@ func (l *Logs) Start() {
 // Reconnected drops the buffer and reloads. The router that came back may have
 // rebooted, in which case its log starts again and the lines held here describe
 // a different uptime.
+//
+// EXPRESSED THROUGH Resume, so the two paths cannot drift: coming back from a
+// reconnect and coming back from a suspend need the same three things in the
+// same order, and they used to be written out twice.
 func (l *Logs) Reconnected() {
 	l.Stop()
-	l.mu.Lock()
-	l.history = nil
-	l.mu.Unlock()
-	l.Start()
+	l.Resume()
 }
 
 func (l *Logs) Stop() {
@@ -260,8 +261,50 @@ func (l *Logs) Stop() {
 	}
 }
 
-func (l *Logs) Suspend() {}
-func (l *Logs) Resume()  {}
+// Suspend gives up the push channel.
+//
+// ── IT WAS A NO-OP FOR THE WHOLE LIFE OF THE PORT ──────────────────────────
+//
+// `logs` was the one page-fed collector nothing could stop. It held
+// `/log/listen` open from connect to teardown on every router, whether or not
+// anybody had ever opened the Logs page -- and because the page switchboard only
+// ran from a frame the browser sent, an empty pair of methods here looked like a
+// deliberate design rather than a gap. The comment that justified it said the
+// channel was the point; what it did not say is that the channel is exactly the
+// resource this project conserves.
+//
+// ── THE TRADE, STATED, BECAUSE IT IS NOT FREE ──────────────────────────────
+//
+// Suspending costs a `/log/print` on the next resume: the ring develops a gap
+// while nothing is listening, so the backlog has to come from the router again.
+// That is one command per visit, which is what every other page-gated collector
+// already pays on focus -- and CLAUDE.md is explicit that fewer channels is the
+// win and command count is not the bottleneck. A router that nobody watches the
+// logs of now holds no channel for them at all.
+func (l *Logs) Suspend() { l.Stop() }
+
+// Resume re-opens the channel, and RELOADS FIRST.
+//
+// The ring is dropped rather than appended to. `push` does not deduplicate, so
+// reading `/log/print` on top of a ring that still holds the same lines would
+// show every one of them twice; and a ring with a gap in the middle is worse
+// than an empty one, because the page renders it as continuous.
+//
+// IDEMPOTENT, and that is required rather than tidy: `applyDemand` calls
+// `ResumeCollector` for every wanted collector on every focus and blur, so a
+// viewer flipping between pages reaches this several times a minute. Reloading
+// each time would be a `/log/print` per navigation.
+func (l *Logs) Resume() {
+	l.mu.Lock()
+	running := l.stop != nil
+	if running {
+		l.mu.Unlock()
+		return
+	}
+	l.history = nil
+	l.mu.Unlock()
+	l.Start()
+}
 
 // snapshot copies the ring under the caller's lock.
 func (l *Logs) snapshot() []LogEntry {

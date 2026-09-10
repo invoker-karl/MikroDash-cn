@@ -34,9 +34,31 @@ var targetKeys = []string{
 	// `ResumeCollector` is now the only way it can. They were MISSING from the
 	// first version of this table and the twenty converted call sites in `ws.go`
 	// would have silently stopped resuming them — an unknown key is a no-op.
-	// `TestEveryKeyWsPassesIsInTheTable` is what caught it and what stops it
-	// happening again.
+	// `TestEveryCollectorWithAnAudienceIsInTheTable` is what caught it and what
+	// stops it happening again.
 	"conns", "dhcpLeases", "dhcpNetworks",
+	// ── THE LAST TWO UNGATED COLLECTORS, ADDED 2026-09-10 (3.4) ────────────
+	//
+	// Both declare an audience and neither was in this table, so `applyDemand`
+	// never asked about them and nothing could stop them. They ran from connect
+	// to teardown on every router, for pages most viewers never open.
+	//
+	//	logs  held `/log/listen` open — ONE CHANNEL PER ROUTER, for the whole
+	//	      life of the session, and channels are the documented bottleneck.
+	//	      Its Suspend and Resume were empty methods; they are real now.
+	//	ping  ran a ping loop against the router's target. Suspend stopped the
+	//	      stream and not the poll, which was dormant only because nothing
+	//	      could call it.
+	//
+	// `traffic` is the third set B stream and is deliberately NOT here: it
+	// already gates itself, per interface, on `Watch`/`Unwatch` refcounts that
+	// no room can express. See the note in `collect/traffic.go`.
+	//
+	// Neither is dormancy-eligible, and both hold their answer through a
+	// suspend, so neither needs a `refresh`: the resume IS the re-probe. `logs`
+	// re-reads `/log/print` on the way back up and `ping` produces its first
+	// reading within an interval.
+	"logs", "ping",
 }
 
 // collectorTarget is what the supervisor and the resume path need of one
@@ -211,6 +233,21 @@ func (s *Session) targets() map[string]collectorTarget {
 		}
 		return nil
 	}, s.dhcpNetworks.Suspend, s.dhcpNetworks.Resume, s.dhcpNetworks.RefreshNow)
+	// `Last()` returns a SLICE here, not a pointer, so the nil-into-interface
+	// trap the other entries guard against does not apply — but an empty ring
+	// must still read as "nothing reported" rather than as a report of nothing.
+	add("logs", func() any {
+		if h := s.logs.Last(); len(h) > 0 {
+			return h
+		}
+		return nil
+	}, s.logs.Suspend, s.logs.Resume, nil)
+	add("ping", func() any {
+		if p := s.ping.Last(); p != nil {
+			return p
+		}
+		return nil
+	}, s.ping.Suspend, s.ping.Resume, nil)
 	return t
 }
 

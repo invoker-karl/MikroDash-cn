@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"sync"
 	"testing"
 
 	"mikrodash/internal/routeros"
@@ -131,5 +132,134 @@ func TestFoldLogWithNoCapIsUnbounded(t *testing.T) {
 	if len(ring) != 5 {
 		t.Errorf("ring holds %d with no cap, want 5 — a zero size must mean "+
 			"unbounded, not empty", len(ring))
+	}
+}
+
+// logDoer answers /log/print and can hold a listen channel, counting both.
+type logDoer struct {
+	mu     sync.Mutex
+	prints int
+	opens  int
+	stops  int
+	rows   []routeros.Reply
+}
+
+func (d *logDoer) Connected() bool { return true }
+
+func (d *logDoer) Do(routeros.Cmd) ([]routeros.Reply, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.prints++
+	return d.rows, nil
+}
+
+func (d *logDoer) Stream(routeros.Cmd, func(routeros.Reply)) (func(), error) {
+	d.mu.Lock()
+	d.opens++
+	d.mu.Unlock()
+	return func() {
+		d.mu.Lock()
+		d.stops++
+		d.mu.Unlock()
+	}, nil
+}
+
+func (d *logDoer) counts() (prints, opens, stops int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.prints, d.opens, d.stops
+}
+
+func logRows(msgs ...string) []routeros.Reply {
+	out := make([]routeros.Reply, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, routeros.Reply{"message": m, "topics": "system,info", "time": "10:00:00"})
+	}
+	return out
+}
+
+// TestLogsSuspendGivesUpTheChannel — phase 3.4.
+//
+// ── IT WAS AN EMPTY METHOD FOR THE WHOLE LIFE OF THE PORT ──────────────────
+//
+// `logs` was the one page-fed collector nothing could stop: `/log/listen` was
+// held open from connect to teardown on every router, whether or not anybody had
+// ever opened the Logs page. `Suspend()` and `Resume()` were `{}`, which reads as
+// a deliberate design rather than a gap — and because the page switchboard only
+// ran from a frame the browser sent, nothing ever called them to find out.
+//
+// A channel per router is the resource this project conserves, so the property
+// is pinned rather than left to the methods looking plausible.
+func TestLogsSuspendGivesUpTheChannel(t *testing.T) {
+	d := &logDoer{rows: logRows("one", "two", "three")}
+	l := NewLogs(d, func(string, string, any) {})
+	l.Start()
+
+	if _, opens, _ := d.counts(); opens != 1 {
+		t.Fatalf("Start opened %d channel(s), want 1", opens)
+	}
+	l.Suspend()
+	if _, _, stops := d.counts(); stops != 1 {
+		t.Errorf("Suspend released the channel %d time(s), want 1 — the router keeps "+
+			"pushing log lines to a collector nobody is watching", stops)
+	}
+	l.Resume()
+	if _, opens, _ := d.counts(); opens != 2 {
+		t.Errorf("Resume opened %d channel(s) in total, want 2", opens)
+	}
+}
+
+// TestLogsResumeIsIdempotent.
+//
+// ── WHY THIS IS REQUIRED AND NOT MERELY TIDY ───────────────────────────────
+//
+// `applyDemand` calls `ResumeCollector` for every wanted collector on every focus
+// and every blur, so a viewer flipping between pages reaches Resume several times
+// a minute. `Start` is `LoadInitial` + `Listen`, and `LoadInitial` is a full
+// `/log/print`: resuming unconditionally would be one of those per navigation,
+// and a second channel each time if `Listen` were not itself guarded.
+func TestLogsResumeIsIdempotent(t *testing.T) {
+	d := &logDoer{rows: logRows("one", "two")}
+	l := NewLogs(d, func(string, string, any) {})
+	l.Start()
+	prints, opens, _ := d.counts()
+
+	for range 5 {
+		l.Resume()
+	}
+	p2, o2, _ := d.counts()
+	if p2 != prints {
+		t.Errorf("five Resumes on a running listener issued %d extra /log/print "+
+			"read(s); a viewer flipping pages would do that all day", p2-prints)
+	}
+	if o2 != opens {
+		t.Errorf("five Resumes opened %d extra channel(s)", o2-opens)
+	}
+}
+
+// TestLogsResumeReloadsWithoutDuplicating.
+//
+// The ring develops a gap while nothing is listening, so the backlog has to come
+// from the router again — and `push` does not deduplicate, so reading
+// `/log/print` on top of a ring that still holds the same lines would show every
+// one of them twice. A ring with a hole in the middle is worse still, because the
+// page renders it as continuous.
+func TestLogsResumeReloadsWithoutDuplicating(t *testing.T) {
+	d := &logDoer{rows: logRows("one", "two", "three")}
+	l := NewLogs(d, func(string, string, any) {})
+	l.Start()
+	if got := len(l.Last()); got != 3 {
+		t.Fatalf("the backlog holds %d line(s) after Start, want 3", got)
+	}
+
+	l.Suspend()
+	l.Resume()
+	if got := len(l.Last()); got != 3 {
+		t.Errorf("the backlog holds %d line(s) after a suspend and resume, want 3 — "+
+			"the reload was appended to the ring it should have replaced", got)
+	}
+	if prints, _, _ := d.counts(); prints != 2 {
+		t.Errorf("%d /log/print read(s) across Start and Resume, want 2 — a resume "+
+			"after a real suspend MUST reload, or the ring keeps its gap", prints)
 	}
 }

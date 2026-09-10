@@ -100,14 +100,6 @@ func TestEveryCollectorWithAnAudienceIsInTheTable(t *testing.T) {
 		if known[key] {
 			continue
 		}
-		// `logs` and `ping` declare rooms and are deliberately outside the table:
-		// logs holds a push channel for the life of the connection and its
-		// Suspend/Resume are no-ops, and ping is not dormancy-eligible or
-		// page-gated. Both are recorded rather than derived, because "not in the
-		// table" is otherwise indistinguishable from the bug above.
-		if key == "logs" || key == "ping" {
-			continue
-		}
 		t.Errorf("%q declares an audience and the session table has no entry for it, so "+
 			"applyDemand never asks about it and no viewer can ever start it", key)
 	}

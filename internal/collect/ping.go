@@ -491,17 +491,40 @@ func (p *Ping) stopStream() {
 	}
 }
 
-func (p *Ping) Suspend() { p.stopStream() }
+// Suspend stops BOTH halves, and until 2026-09-10 it stopped one.
+//
+// ── THE ASYMMETRY, AND WHY IT WAS DORMANT ──────────────────────────────────
+//
+// `Start` chooses between a stream and a poll loop -- B.5, because RouterOS
+// silently ignores a `/tool/ping` interval above five seconds, so a slower
+// cadence can only be delivered by polling. `Suspend` stopped the stream only,
+// and `Resume` started the stream only. So on an install whose ping interval is
+// above five seconds, a suspend stopped nothing and a resume would have started
+// the very stream the interval says cannot carry it.
+//
+// It was harmless because NOTHING CALLED EITHER: `ping` was not in the dormancy
+// target table, so no gate could reach it. Adding it there is what turns a
+// dormant asymmetry into a live bug, which is why this is fixed in the same
+// commit and not after it.
+func (p *Ping) Suspend() {
+	p.stopStream()
+	p.stopPolling()
+}
 
+// Resume mirrors Start, rather than reimplementing half of it.
 func (p *Ping) Resume() {
 	if p.Denied() {
 		return
 	}
-	p.startStream()
+	p.Start()
 }
 
 func (p *Ping) Stop() {
 	p.stopStream()
+	p.stopPolling()
+}
+
+func (p *Ping) stopPolling() {
 	p.mu.Lock()
 	loop := p.loop
 	p.loop = nil

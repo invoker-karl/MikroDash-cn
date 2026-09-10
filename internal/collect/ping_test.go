@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"mikrodash/internal/routeros"
 )
@@ -360,8 +361,15 @@ func (e errString) Error() string { return string(e) }
 type pollDoer struct {
 	mu      sync.Mutex
 	streams int
+	stops   int
 	dos     int
 	rows    []routeros.Reply
+}
+
+func (d *pollDoer) stopCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.stops
 }
 
 func (d *pollDoer) Connected() bool { return true }
@@ -370,7 +378,14 @@ func (d *pollDoer) Stream(routeros.Cmd, func(routeros.Reply)) (func(), error) {
 	d.mu.Lock()
 	d.streams++
 	d.mu.Unlock()
-	return func() {}, nil
+	// The stop is COUNTED, so a test can tell "the channel was given up" from
+	// "the field was nilled". They are the same thing here only because this
+	// closure is the one the collector holds.
+	return func() {
+		d.mu.Lock()
+		d.stops++
+		d.mu.Unlock()
+	}, nil
 }
 
 func (d *pollDoer) Do(routeros.Cmd) ([]routeros.Reply, error) {
@@ -584,4 +599,116 @@ func TestFoldPingLossIsOverTheWindowNotAllTime(t *testing.T) {
 				"still being counted", pl.Loss)
 		}
 	}
+}
+
+// TestPingSuspendStopsWhicheverHalfIsRunning — phase 3.4.
+//
+// ── A DORMANT ASYMMETRY THAT GATING TURNS LIVE ─────────────────────────────
+//
+// `Start` chooses between a stream and a poll loop (B.5), because RouterOS
+// silently ignores a `/tool/ping` interval above five seconds. `Suspend` stopped
+// the stream only, and `Resume` started the stream only — so on an install whose
+// interval is above five seconds a suspend stopped nothing, and a resume would
+// have started the very stream the interval says cannot carry it.
+//
+// It was harmless while `ping` was outside the session's target table, because
+// nothing could call either. Adding it there is what makes this a live bug, so
+// the property is pinned rather than assumed.
+//
+// ── HOW THE POLL HALF IS PROVED, AND WHAT THAT PROOF IS NOT ────────────────
+//
+// `pollLoop` arms one timer at a time and only re-reads its cadence when it
+// reschedules, so a surviving loop cannot be made to misbehave quickly: the next
+// read is a whole interval away, and this path exists precisely for intervals
+// above five seconds. A first version of this test lowered the cadence to 600ms
+// after the suspend and waited a second and a half, which proves NOTHING —
+// the already-armed timer does not shorten. It passed against the bug.
+//
+// What does prove it is RESUME: `startPolling` refuses while `p.loop` is set, so
+// "Resume restarts the poll" can only be true if Suspend cleared it. Both
+// mutations — Suspend stopping only the stream, and Resume always streaming —
+// fail on that assertion.
+//
+// Stated plainly because it is the limit: this shows the loop was given up, not
+// that `stop()` was called on its timer. The two are the same line of code and
+// the field check below is what holds them together.
+func TestPingSuspendStopsWhicheverHalfIsRunning(t *testing.T) {
+	t.Run("a fast ping streams, and Suspend gives the channel up", func(t *testing.T) {
+		d := &pollDoer{rows: []routeros.Reply{{"time": "10ms"}}}
+		p := NewPing(d, func(string, string, any) {}, 5000, "198.51.100.1")
+		p.Start()
+		defer p.Stop()
+
+		if streams, _ := d.counts(); streams != 1 {
+			t.Fatalf("Start opened %d channel(s), want 1", streams)
+		}
+		p.Suspend()
+		if got := d.stopCount(); got != 1 {
+			t.Errorf("Suspend called the channel's stop %d time(s), want 1 — the "+
+				"router is still streaming to a collector nobody is watching", got)
+		}
+		p.Resume()
+		if streams, _ := d.counts(); streams != 2 {
+			t.Errorf("Resume opened %d channel(s) in total, want 2", streams)
+		}
+	})
+
+	t.Run("a slow ping polls, and Suspend stops the loop", func(t *testing.T) {
+		d := &pollDoer{rows: []routeros.Reply{{"time": "10ms"}}}
+		p := NewPing(d, func(string, string, any) {}, 30000, "198.51.100.1")
+		p.Start()
+		defer p.Stop()
+
+		// `pollLoop.start` fires immediately when a whole interval has elapsed
+		// since the last run, and on a fresh loop that is always true.
+		var first int
+		for range 40 {
+			if _, first = d.counts(); first > 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if first == 0 {
+			t.Fatal("Start issued no read: there is no poll loop for Suspend to stop")
+		}
+		if streams, _ := d.counts(); streams != 0 {
+			t.Fatalf("Start opened %d channel(s) for an interval a stream cannot "+
+				"carry", streams)
+		}
+
+		p.Suspend()
+		// The loop was GIVEN UP, not merely left unreferenced. Same package, so
+		// the field is readable — and it is read under the collector's own lock,
+		// because `stopPolling` writes it from whichever goroutine called
+		// Suspend.
+		p.mu.Lock()
+		leaked := p.loop != nil
+		p.mu.Unlock()
+		if leaked {
+			t.Error("Suspend left the poll loop in place; it reschedules itself, so " +
+				"the collector keeps pinging a router nobody is watching for the life " +
+				"of the session")
+		}
+
+		// AND RESUME MUST PICK THE SAME HALF Start DID. Resuming a slow ping onto
+		// a stream would silently ignore the interval the operator set, which is
+		// the setting B.5 exists to honour. This is also what proves the suspend:
+		// `startPolling` refuses while `p.loop` is set.
+		_, before := d.counts()
+		p.Resume()
+		var back int
+		for range 40 {
+			if _, back = d.counts(); back > before {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if back <= before {
+			t.Errorf("Resume restarted no poll (%d reads before, %d after)", before, back)
+		}
+		if streams, _ := d.counts(); streams != 0 {
+			t.Errorf("Resume opened %d channel(s) for a ping whose interval only a "+
+				"poll can deliver", streams)
+		}
+	})
 }

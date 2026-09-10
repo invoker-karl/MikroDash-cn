@@ -31,12 +31,25 @@ func TestEveryTargetCanBeRefreshed(t *testing.T) {
 		t.Fatalf("%d add() calls for %d target keys — targets() and targetKeys have "+
 			"drifted, and this check is reading the wrong thing", got, len(targetKeys))
 	}
+	// ── A NIL REFRESH IS ALLOWED, AND ONLY WHERE `noPrimePath` SAYS WHY ─────
+	//
+	// This required all 24, which was true while `targetKeys` and the prime list
+	// were the same thing. They separated in 3.4: `logs` and `ping` are set B
+	// acquisitions with no "take one reading" to ask for, and until then they
+	// were kept OUT of the table entirely to avoid this rule — which also meant
+	// `applyDemand` could not gate them, so `logs` held a channel per router for
+	// a page nobody had open.
+	//
+	// The property is unchanged and the exceptions are now named rather than
+	// avoided. `TestEveryPrimeTargetCanActuallyRefresh` fails a nil that is NOT
+	// recorded, and a recording for a key the table does not hold.
 	refreshers := strings.Count(src, ".RefreshNow)") + strings.Count(src, ".Tick)")
-	if refreshers != len(targetKeys) {
-		t.Errorf("%d of %d targets have a refresh closure. A target without one is "+
-			"skipped by primeAll and by the dormancy probe, so its page waits a full "+
-			"cadence on first landing — silently, because a resumed collector does "+
-			"eventually report.", refreshers, len(targetKeys))
+	if want := len(targetKeys) - len(noPrimePath); refreshers != want {
+		t.Errorf("%d of %d targets have a refresh closure, expected %d (%d recorded in "+
+			"noPrimePath). A target without one is skipped by primeAll and by the "+
+			"dormancy probe, so its page waits a full cadence on first landing — "+
+			"silently, because a resumed collector does eventually report.",
+			refreshers, len(targetKeys), want, len(noPrimePath))
 	}
 }
 

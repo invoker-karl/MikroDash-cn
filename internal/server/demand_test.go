@@ -127,16 +127,22 @@ func TestDemandCoversEveryCollectorTheSwitchboardDid(t *testing.T) {
 		}
 	}
 	sort.Strings(newlyGated)
-	// The three the switchboard NEVER resumed are the interesting direction:
-	// they were never gated by it at all, and ran from connect until dormancy or
-	// a hold pruned them. Under demand they are gated like everything else, which
-	// is the behaviour CHANGE of this phase.
+	// The collectors the switchboard NEVER resumed are the interesting
+	// direction: they were never gated by it at all, and ran from connect until
+	// dormancy or a hold pruned them. Under demand they are gated like everything
+	// else, which is the behaviour CHANGE of this phase.
 	//
 	// `ifStatus` is the one that needed work rather than a note: four collectors
 	// borrow its rates on pages it emits nothing to, so it is gated on
 	// `keepAliveFor` as well as its own audience. `netwatch` and `talkers` feed
 	// only the dashboard, and now stop when nobody is on it.
-	want := "ifStatus,netwatch,talkers"
+	//
+	// `logs` and `ping` joined them on 2026-09-10 — phase 3.4, the last two
+	// ungated collectors in the app. Neither was in the session's target table
+	// at all, so nothing could reach them: `logs` held `/log/listen` open for the
+	// life of every session, one channel per router, for a page most viewers
+	// never open.
+	want := "ifStatus,logs,netwatch,ping,talkers"
 	if got := strings.Join(newlyGated, ","); got != want {
 		t.Errorf("collectors newly gated by demand = %q, want %q.\nIf that list has "+
 			"changed, a collector has gained or lost coverage and the behaviour change "+
