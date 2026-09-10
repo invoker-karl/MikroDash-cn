@@ -59,6 +59,14 @@ var targetKeys = []string{
 	// re-reads `/log/print` on the way back up and `ping` produces its first
 	// reading within an interval.
 	"logs", "ping",
+	// ── NO PAYLOAD AND NO PAGE, AND IT STILL BELONGS HERE ──────────────────
+	//
+	// `arp` emits nothing: four collectors read its index in memory. It is in
+	// this table because `applyDemand` gates by KEY and `keepAliveFor` gives it
+	// the rooms of the four consumers — so it runs while any of their pages is
+	// open and stops when none is, which is exactly the gating every other
+	// collector gets.
+	"arp",
 }
 
 // collectorTarget is what the supervisor and the resume path need of one
@@ -248,6 +256,12 @@ func (s *Session) targets() map[string]collectorTarget {
 		}
 		return nil
 	}, s.ping.Suspend, s.ping.Resume, nil)
+	add("arp", func() any {
+		if ix := s.arp.Last(); ix != nil {
+			return ix
+		}
+		return nil
+	}, s.arp.Suspend, s.arp.Resume, s.arp.Tick)
 	return t
 }
 

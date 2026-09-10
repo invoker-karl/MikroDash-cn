@@ -342,6 +342,10 @@ type Wireless struct {
 	emit   Emit
 	pollMs *pollInterval
 	leases LeaseSource
+	// arp is the MAC->IP join. A registration row carries a MAC and never an
+	// address, so without this the `ip` field is empty for every client — which
+	// is what it was until 2026-09-10.
+	arp ARPByMAC
 
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
@@ -476,6 +480,20 @@ func (w *Wireless) Last() *WirelessPayload {
 }
 
 // leaseName resolves a client MAC to its DHCP name.
+// ipOf is the client's address, which only ARP knows.
+func (w *Wireless) ipOf(mac string) string {
+	if w.arp == nil {
+		return ""
+	}
+	return w.arp.IPForMAC(mac)
+}
+
+// WithARP attaches the MAC→IP join.
+func (w *Wireless) WithARP(a ARPByMAC) *Wireless {
+	w.arp = a
+	return w
+}
+
 func (w *Wireless) leaseName(mac string) string {
 	if w.leases == nil {
 		return ""
@@ -516,7 +534,11 @@ func (w *Wireless) Tick() {
 				continue
 			}
 			seen[mac] = true
-			clients = append(clients, parseWirelessClient(row, capsman, "", w.leaseName(mac)))
+			// THE ADDRESS COMES FROM ARP AND FROM NOWHERE ELSE. A `""` sat
+			// here from the port until 2026-09-10 and the WiFi Clients page's
+			// address line — `wireless.ts` renders it only `if (c.ip)` — never
+			// drew once. Measured on the live fleet: 26 clients, 0 addresses.
+			clients = append(clients, parseWirelessClient(row, capsman, w.ipOf(mac), w.leaseName(mac)))
 		}
 	}
 

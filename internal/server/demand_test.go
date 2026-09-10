@@ -142,7 +142,11 @@ func TestDemandCoversEveryCollectorTheSwitchboardDid(t *testing.T) {
 	// at all, so nothing could reach them: `logs` held `/log/listen` open for the
 	// life of every session, one channel per router, for a page most viewers
 	// never open.
-	want := "ifStatus,logs,netwatch,ping,talkers"
+	//
+	// `arp` joined on 2026-09-10 and is the clearest case for demand there is:
+	// it emits to no room at all, so it can only ever be wanted through
+	// `keepAliveFor` — the rooms of the four collectors that read its index.
+	want := "arp,ifStatus,logs,netwatch,ping,talkers"
 	if got := strings.Join(newlyGated, ","); got != want {
 		t.Errorf("collectors newly gated by demand = %q, want %q.\nIf that list has "+
 			"changed, a collector has gained or lost coverage and the behaviour change "+

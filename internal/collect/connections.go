@@ -546,7 +546,9 @@ type Connections struct {
 	cache *roscache.Cache
 
 	leases LeaseSource
-	nets   NetworkSource
+	// arp is the IP->MAC join. Nil is allowed and costs step 2 of `nameOf`.
+	arp  ARPByIP
+	nets NetworkSource
 	// detailed reports whether anyone has the Connections page open. The heavy
 	// per-country and per-source indexes are built only then.
 	detailed func() bool
@@ -625,6 +627,14 @@ func (c *Connections) WithDetailed(fn func() bool) *Connections {
 
 // WithGeo attaches the country lookup. Nil leaves every country index empty,
 // which is what the live app shows wherever geoip-lite failed to load.
+// WithARP attaches the IP→MAC join. Optional in the builder sense every other
+// source here is: absent, `nameOf` keeps its first and third steps and loses the
+// middle one.
+func (c *Connections) WithARP(a ARPByIP) *Connections {
+	c.arp = a
+	return c
+}
+
 func (c *Connections) WithGeo(fn GeoLookup) *Connections {
 	c.geo = fn
 	return c
@@ -690,20 +700,54 @@ func (c *Connections) lanCidrs() []string {
 }
 
 // nameOf resolves a LAN source to its DHCP name and MAC.
+//
+// ── THREE STEPS, AND THE MIDDLE ONE WAS MISSING UNTIL 2026-09-10 ───────────
+//
+// The live `resolveName` is a chain, and this had only its first link:
+//
+//	1  the lease keyed by this ADDRESS            names most devices
+//	2  ARP gives the MAC, then the lease keyed by that MAC
+//	3  no lease at all: the MAC is still worth having
+//
+// Step 2 is what the ARP collector exists for. It fires when a device is using
+// an address its lease is not keyed by — a static assignment, a lease that moved,
+// a router that answers `active-address` and `address` differently — and without
+// it the row falls all the way through to showing a bare IP.
+//
+// STEP 3 DEPARTS FROM LIVE DELIBERATELY. The original returns the string
+// "Unknown (aa:bb:cc:dd:ee:ff)" as the NAME. This returns an empty name and the
+// MAC in its own field, because the caller already substitutes the address for
+// an empty name and a row reading `192.0.2.5` is more use than one reading
+// `Unknown (…)` — while the MAC, which the live string buried in prose, reaches
+// the column that exists for it. Measured on the live fleet: 6 of 48 ARP entries
+// have no lease at all, so this is the branch those take.
 func (c *Connections) nameOf(ip string) (string, string) {
-	if c.leases == nil {
-		return "", ""
+	var leases *LeasesPayload
+	if c.leases != nil {
+		leases = c.leases.Last()
 	}
-	p := c.leases.Last()
-	if p == nil {
-		return "", ""
-	}
-	for _, l := range p.Leases {
-		if l.IP == ip {
-			return firstNonEmptyStr(l.Name, l.HostName), l.MAC
+	if leases != nil {
+		for _, l := range leases.Leases {
+			if l.IP == ip {
+				return firstNonEmptyStr(l.Name, l.HostName), l.MAC
+			}
 		}
 	}
-	return "", ""
+	if c.arp == nil {
+		return "", ""
+	}
+	mac, _ := c.arp.MACForIP(ip)
+	if mac == "" {
+		return "", ""
+	}
+	if leases != nil {
+		for _, l := range leases.Leases {
+			if strings.EqualFold(l.MAC, mac) {
+				return firstNonEmptyStr(l.Name, l.HostName), mac
+			}
+		}
+	}
+	return "", mac
 }
 
 func (c *Connections) Tick() {

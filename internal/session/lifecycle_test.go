@@ -222,7 +222,13 @@ func TestTheNotPolledListIsStillTrue(t *testing.T) {
 func TestTheBackgroundCollectorCountIsRecorded(t *testing.T) {
 	// Counted 2026-08-25: bridges dhcpLeases dhcpNetworks dns firewall ifStatus
 	// logs netwatch ping system talkers traffic vlans wan.
-	const recorded = 15
+	//
+	// 15 -> 16 on 2026-09-10: `arp` joined, and it is the first collector here
+	// with NO payload and NO page — it exists so `conns`, `bandwidth`,
+	// `wireless` and `topology` can join an IP to a MAC. The number is the basis
+	// of the background-pool decision, so it is moved with the reason rather
+	// than nudged.
+	const recorded = 16
 
 	body, err := os.ReadFile("session.go")
 	if err != nil {

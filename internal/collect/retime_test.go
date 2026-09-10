@@ -285,16 +285,31 @@ var retunable = map[string]string{
 	"routing": "Routing", "system": "System", "talkers": "Talkers",
 	"topology": "Topology", "vlans": "Vlans", "vpn": "VPN", "wan": "Wan",
 	"wifi": "Wifi", "wireless": "Wireless",
+	// Added 2026-09-10 with the collector. `pollArp` has been a persisted,
+	// validated, writable setting since the port with nothing reading it.
+	"arp": "ARP",
 }
 
 // notRetunable is the live target with no Go counterpart, and why.
-var notRetunable = map[string]string{
-	"arp": "this port has NO ARP collector. The live one exists to fill a cache that " +
-		"other collectors read through getByIP/getByMAC — the port record notes it " +
-		"alongside `conns` and `traffic` as collectors that 'fill a cache and emit " +
-		"elsewhere'. There is nothing here to re-tune, and inventing one so this table " +
-		"could be complete would be a collector with no caller.",
-}
+//
+// ── IT IS EMPTY, AND THE ENTRY IT HELD IS THE LESSON ───────────────────────
+//
+// `arp` was the one exemption: "this port has NO ARP collector... inventing one
+// so this table could be complete would be a collector with no caller."
+//
+// That was TRUE WHEN WRITTEN and stopped being true without anything failing.
+// `topology.go` declared `ARPIP func(mac) string` and used it at two sites, both
+// behind a nil check nothing ever satisfied; `wireless.go` passed a literal ""
+// where the live collector passed an ARP lookup, so 26 of 26 WiFi clients had no
+// address. The callers existed — they were stubbed, which reads exactly like a
+// caller that does not exist.
+//
+// This ledger could not have caught that: it asks whether a re-tunable key has a
+// collector, not whether a declared seam is filled. The entry is kept as an empty
+// map rather than deleted because the next collector this port skips needs
+// somewhere to say so, and because a reason that expires silently is this
+// repository's most expensive recurring defect.
+var notRetunable = map[string]string{}
 
 // TestEveryReTunedCollectorHasASetter.
 //

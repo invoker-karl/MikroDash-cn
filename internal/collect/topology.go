@@ -1252,7 +1252,9 @@ type Topology struct {
 	// leases and core are the optional joins, held as interfaces so this
 	// collector depends on neither type. A nil one degrades one field.
 	leases LeaseSource
-	sys    SystemSource
+	// arp gives an address to a neighbour whose own row carries none.
+	arp ARPByMAC
+	sys SystemSource
 
 	loop     *pollLoop
 	pingLoop *pollLoop
@@ -1302,6 +1304,29 @@ func (t *Topology) WithSources(leases LeaseSource, sys SystemSource) *Topology {
 	t.leases = leases
 	t.sys = sys
 	return t
+}
+
+// WithARP attaches the MAC→IP join.
+//
+// ── THIS SEAM WAS DECLARED AND NEVER FILLED ────────────────────────────────
+//
+// `TopoInput.ARPIP` has existed since the port and is used at two sites, both
+// behind `if in.ARPIP != nil` — and nothing ever set it, so the fallback was
+// dead code that read as a working feature. The comment at the first site says
+// what it costs: "Without it a device is on the map with no way to ping it,
+// which also costs it its status."
+func (t *Topology) WithARP(a ARPByMAC) *Topology {
+	t.arp = a
+	return t
+}
+
+// arpIP is the closure `BuildTopology` takes. Nil-safe both ways: no collector,
+// or a collector that has not read yet.
+func (t *Topology) arpIP(mac string) string {
+	if t.arp == nil {
+		return ""
+	}
+	return t.arp.IPForMAC(mac)
 }
 
 // leaseName resolves a client MAC to its DHCP name and address.
@@ -1601,7 +1626,7 @@ func (t *Topology) apply(rows []routeros.Reply, err error) {
 		Label: t.label, PollMs: t.pollMs.ms(), ShowClients: true,
 		Discovery: discovery, PingDenied: pingDenied,
 		Seen: seen, Ping: ping,
-		LeaseName: t.leaseName, Core: t.coreInfo(),
+		LeaseName: t.leaseName, Core: t.coreInfo(), ARPIP: t.arpIP,
 	}
 	payload := BuildTopology(in)
 

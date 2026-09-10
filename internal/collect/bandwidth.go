@@ -366,9 +366,11 @@ type Bandwidth struct {
 
 	rates  RateSource
 	leases LeaseSource
-	nets   NetworkSource
-	geo    GeoLookup
-	org    OrgLookup
+	// arp is the IP->MAC join. Nil is allowed and costs step 2 of `nameOf`.
+	arp  ARPByIP
+	nets NetworkSource
+	geo  GeoLookup
+	org  OrgLookup
 
 	mu     sync.Mutex
 	prev   map[string]bwPrev
@@ -433,6 +435,12 @@ func (b *Bandwidth) apply(rows []routeros.Reply, err error) {
 
 // WithGeo attaches the country lookup. A nil one leaves the fields empty, which
 // is the live app's behaviour wherever geoip-lite failed to load.
+// WithARP attaches the IP→MAC join. See `connections.WithARP`.
+func (b *Bandwidth) WithARP(a ARPByIP) *Bandwidth {
+	b.arp = a
+	return b
+}
+
 func (b *Bandwidth) WithGeo(fn GeoLookup) *Bandwidth {
 	b.geo = fn
 	return b
@@ -523,20 +531,40 @@ func (b *Bandwidth) ifaceOf(ip string) string {
 }
 
 // nameOf resolves a source address to its DHCP name and MAC.
+// nameOf resolves a device to its DHCP name and MAC.
+//
+// THE SAME THREE-STEP CHAIN `connections.nameOf` runs, and for the same reason:
+// the live `_resolveName` here is the same function with a different empty case.
+// It differed from Connections' in exactly one way — where that one falls back
+// to the address, this returns an empty name — and BOTH are reproduced, because
+// the two pages render a nameless row differently on purpose.
 func (b *Bandwidth) nameOf(ip string) (string, string) {
-	if b.leases == nil {
-		return "", ""
+	var leases *LeasesPayload
+	if b.leases != nil {
+		leases = b.leases.Last()
 	}
-	p := b.leases.Last()
-	if p == nil {
-		return "", ""
-	}
-	for _, l := range p.Leases {
-		if l.IP == ip {
-			return firstNonEmptyStr(l.Name, l.HostName), l.MAC
+	if leases != nil {
+		for _, l := range leases.Leases {
+			if l.IP == ip {
+				return firstNonEmptyStr(l.Name, l.HostName), l.MAC
+			}
 		}
 	}
-	return "", ""
+	if b.arp == nil {
+		return "", ""
+	}
+	mac, _ := b.arp.MACForIP(ip)
+	if mac == "" {
+		return "", ""
+	}
+	if leases != nil {
+		for _, l := range leases.Leases {
+			if strings.EqualFold(l.MAC, mac) {
+				return firstNonEmptyStr(l.Name, l.HostName), mac
+			}
+		}
+	}
+	return "", mac
 }
 
 func (b *Bandwidth) Tick() {

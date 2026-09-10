@@ -69,6 +69,25 @@ func TestCollectorEdgesAreDeclared(t *testing.T) {
 		},
 		"system":   {"topology": "identity and gauges, via WithSources"},
 		"firewall": {"queues": "the FastTrack summary, via FilterRowSource"},
+		// ── THE ONE PRODUCER WITH NO PAYLOAD OF ITS OWN (2026-09-10) ────────
+		//
+		// `arp` emits nothing and has no page. Its ENTIRE output is these four
+		// edges: the router's ARP table is the only place that says which MAC is
+		// behind which IP, and every one of these consumers needs that join to
+		// put a name or an address on a device.
+		//
+		// The `what` field decides whether phase 2 could remove an edge by
+		// having the consumer read the menu itself. Here it could — `/ip/arp/print`
+		// is an ordinary cacheable table — and it still should not: four
+		// consumers reading it separately is four subscriptions and four copies
+		// of the same index, which is exactly what the coalescing cache and this
+		// collector exist to avoid.
+		"arp": {
+			"conns":     "IP→MAC, so a lease keyed by the MAC can name an address the lease table does not list",
+			"bandwidth": "IP→MAC, the same chain on the same table",
+			"wireless":  "MAC→IP: a registration row carries no address, and this is the `ip` the page renders",
+			"topology":  "MAC→IP, for an MNDP neighbour whose own row has no address — without it there is nothing to ping, so no status",
+		},
 		// ── `connTable` WAS HERE, AND ITS REMOVAL IS THE POINT ──────────────
 		//
 		// It was declared as a non-collector because it was the same shape of

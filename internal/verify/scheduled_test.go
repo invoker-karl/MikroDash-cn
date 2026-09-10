@@ -65,6 +65,10 @@ func TestScheduledCollectorsAreDeclared(t *testing.T) {
 		"wireless.go":     "wireless",
 		"bandwidth.go":    "bandwidth",
 		"vlans.go":        "vlans",
+		// The one subscriber with no page and no payload. It reads
+		// `/ip/arp/print` on the scheduler like any other table, and four
+		// collectors read the index it builds. See internal/collect/arp.go.
+		"arp.go": "arp",
 	}
 
 	// ── EVERY UNSCHEDULED COLLECTOR, AND HOW STRONG THE REASON ACTUALLY IS ──

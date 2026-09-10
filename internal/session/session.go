@@ -178,6 +178,9 @@ type Session struct {
 	bandwidth    *collect.Bandwidth
 	traffic      *collect.Traffic
 	conns        *collect.Connections
+	// arp has no payload and no page: it is the IP<->MAC join four collectors
+	// read in memory. See internal/collect/arp.go.
+	arp *collect.ARP
 
 	// pendingResume holds page-focus resumes that arrived BEFORE the router
 	// connection came up. Guarded by mu. See ResumeCollector and replayResumes.
@@ -236,6 +239,9 @@ func (s *Session) Routing() *collect.Routing { return s.routing }
 // DHCPLeases is the lease-table collector. It is also the LeaseIPs behind
 // dhcpNetworks' per-subnet lease counts.
 func (s *Session) DHCPLeases() *collect.DHCPLeases { return s.dhcpLeases }
+
+// ARP is the IP<->MAC join. No page reads it; four collectors do.
+func (s *Session) ARP() *collect.ARP { return s.arp }
 
 // DHCPNetworks is the subnet and pool collector behind the DHCP page's top row.
 func (s *Session) DHCPNetworks() *collect.DHCPNetworks { return s.dhcpNetworks }
@@ -784,6 +790,15 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// client count is the leases that fall inside it, and only this collector
 	// knows what they are. Unlike vlans, this one is no longer nil.
 	s.dhcpLeases = collect.NewDHCPLeases(reader{s}, emit, s.eff.Poll["dhcpLeases"])
+	// ── BUILT BEFORE ITS FOUR CONSUMERS, AND IT EMITS NOTHING ──────────────
+	//
+	// The ARP table is the only place the router says which MAC is behind which
+	// IP. `conns` and `bandwidth` need IP→MAC to reach a lease the address alone
+	// does not find; `wireless` and `topology` need MAC→IP because a
+	// registration row and an MNDP neighbour carry no address at all.
+	//
+	// It takes no `emit` because it has no audience — see internal/collect/arp.go.
+	s.arp = collect.NewARP(reader{s}, s.eff.Poll["arp"])
 	// The WAN interface name is the record's, falling back to "WAN1" inside the
 	// collector exactly as index.js does.
 	s.dhcpNetworks = collect.NewDHCPNetworks(reader{s}, emit, s.dhcpLeases, "", s.eff.Poll["dhcpNetworks"])
@@ -842,11 +857,17 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// identity and gauges. Each is optional — a nil one costs exactly the field
 	// it feeds, which is what the live app does when a collector is disabled.
 	s.topology = collect.NewTopology(reader{s}, emit, s.ifStatus, rec.ID, rec.Label, s.eff.Poll["topology"]).
-		WithSources(s.dhcpLeases, s.system)
-	// The lease source names the clients. There is no ARP collector yet, so a
-	// client with no DHCP name shows as its MAC — which is what the live app
-	// does on a router that is not the client's DHCP server either.
-	s.wireless = collect.NewWireless(reader{s}, emit, s.dhcpLeases, s.eff.Poll["wireless"])
+		WithSources(s.dhcpLeases, s.system).
+		// Fills `TopoInput.ARPIP`, which was declared and used at two sites from
+		// the port and never set: a neighbour whose own row carries no address
+		// had no way to be pinged, and so no status.
+		WithARP(s.arp)
+	// The lease source names the clients and ARP gives them an address. Both are
+	// needed: a registration row has a MAC and nothing else, so a client with no
+	// DHCP name shows as its MAC — which is what the live app does on a router
+	// that is not the client's DHCP server either.
+	s.wireless = collect.NewWireless(reader{s}, emit, s.dhcpLeases, s.eff.Poll["wireless"]).
+		WithARP(s.arp)
 	// ifStatus names the interface a source arrived on, dhcpLeases names the
 	// device, and dhcpNetworks supplies the LAN ranges the source filter uses.
 	// Each is optional and costs exactly the field it feeds.
@@ -864,10 +885,14 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		WithTopN(topSetting(cfgSettings, "topN")).
 		WithDetailed(func() bool { return m.h.Occupants(room+"page-connections") > 0 }).
 		WithGeo(geoLookup()).
-		WithOrg(asn.Lookup)
+		WithOrg(asn.Lookup).
+		// Step 2 of `nameOf`: the lease keyed by the MAC ARP found, when the
+		// lease keyed by the address does not exist.
+		WithARP(s.arp)
 	s.bandwidth = collect.NewBandwidth(reader{s}, emit, s.ifStatus, s.dhcpLeases, s.dhcpNetworks, s.eff.Poll["bandwidth"]).
 		WithGeo(geoLookup()).
-		WithOrg(asn.Lookup)
+		WithOrg(asn.Lookup).
+		WithARP(s.arp)
 	// The default interface is what the WAN badge watches, so it is always in
 	// the stream even when nobody has selected it. Five minutes of history, as
 	// the live app keeps.
@@ -930,6 +955,9 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// holds no channel at all and every chart is empty, which is why it is
 		// in the list rather than beside it.
 		s.traffic,
+		// Subscribed like any other table, and it feeds no page at all: four
+		// collectors read its index in memory.
+		s.arp,
 	} {
 		c.UseCache(s.roscache)
 	}
@@ -1410,6 +1438,7 @@ func (m *Manager) idleOut(routerID string, s *Session) {
 	s.traffic.Stop()
 	s.dhcpNetworks.Stop()
 	s.dhcpLeases.Stop()
+	s.arp.Stop()
 	s.netwatch.Stop()
 	s.talkers.Stop()
 	s.ping.Stop()
@@ -1482,6 +1511,7 @@ func (m *Manager) Shutdown() {
 		s.traffic.Stop()
 		s.dhcpNetworks.Stop()
 		s.dhcpLeases.Stop()
+		s.arp.Stop()
 		s.netwatch.Stop()
 		s.talkers.Stop()
 		s.ping.Stop()
@@ -1773,6 +1803,20 @@ func (s *Session) connectLoop() {
 			if s.eff.Enabled["dhcpLeases"] {
 				s.dhcpLeases.Start()
 			}
+			// ── STARTED WITH THE LEASES, AND FOR THE SAME REASON ────────
+			//
+			// Four collectors read its index and `conns` asks on its first tick,
+			// so it starts here rather than later.
+			//
+			// GATED LIKE EVERYTHING ELSE, even though `arp` is
+			// `disableable: false` in the registry. The gate is uniform on
+			// purpose: `system` is non-disableable too and carries the same
+			// guard, `CollectorEnabled` resolves an absent key to true, and a
+			// collector exempted here would be the one nobody notices when the
+			// registry changes its mind.
+			if s.eff.Enabled["arp"] {
+				s.arp.Start()
+			}
 			if s.eff.Enabled["dhcpNetworks"] {
 				s.dhcpNetworks.Start()
 			}
@@ -1885,6 +1929,9 @@ func (s *Session) connectLoop() {
 			}
 			if s.eff.Enabled["dhcpLeases"] {
 				s.dhcpLeases.Reconnected()
+			}
+			if s.eff.Enabled["arp"] {
+				s.arp.Reconnected()
 			}
 			if s.eff.Enabled["dhcpNetworks"] {
 				s.dhcpNetworks.Reconnected()

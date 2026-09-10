@@ -73,6 +73,11 @@ func TestEveryCollectorDeclaresItsDerivation(t *testing.T) {
 		"ping.go":    "",
 		"traffic.go": "",
 
+		// `arp` has a derivation and no payload: `BuildARP` turns the table into
+		// the two lookups its four consumers read. That it emits nothing does not
+		// exempt it — the rows-in, value-out half is exactly what 4.1 asks to be
+		// callable without building the collector.
+		"arp.go":          "BuildARP",
 		"dhcpleases.go":   "BuildLeases,buildLeaseServers",
 		"dhcpnetworks.go": "BuildLanOverview",
 		"firewall.go":     "BuildFirewallRule",

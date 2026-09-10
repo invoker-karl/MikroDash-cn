@@ -34,6 +34,9 @@ func (s *Session) pollTargets() map[string]interface{ SetPollMs(int) } {
 		// The nil check happens there, where the type is still concrete.
 		out[name] = c
 	}
+	if s.arp != nil {
+		add("arp", s.arp)
+	}
 	if s.bandwidth != nil {
 		add("bandwidth", s.bandwidth)
 	}

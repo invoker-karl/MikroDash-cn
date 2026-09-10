@@ -166,10 +166,14 @@ func TestBothTeardownPathsFlushHistory(t *testing.T) {
 // 14 -> 15 on 2026-09-08: phase 4.3b starts `vpn` at connect because the router
 // has ALERTING on, rather than leaving four of the six alert rules to depend on
 // whether somebody opened the VPN page.
+//
+// 15 -> 16 on 2026-09-10: `arp` — the first collector here with no payload and
+// no page. It joins an IP to a MAC for four other collectors, and it starts at
+// connect because `conns` asks it on its first tick.
 func TestTheConnectBlockCollectorCountIsPinned(t *testing.T) {
 	started := namesIn(blockBetween(t, sessionSource(t), "if first {", "\n\t\t}"), "Start")
-	if len(started) != 15 {
-		t.Errorf("the connect block starts %d collectors, not 15: %v\n"+
+	if len(started) != 16 {
+		t.Errorf("the connect block starts %d collectors, not 16: %v\n"+
 			"If that is deliberate, update this number and say why in the comment "+
 			"above — the count drifting unremarked is how it went from 11 to 14.",
 			len(started), started)

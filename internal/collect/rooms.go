@@ -221,6 +221,15 @@ var keepAliveFor = map[string]Rooms{
 	"ifStatus": union(bridgesRooms, vlansRooms, wanRooms, bandwidthRooms),
 	"dhcpLeases": union(dhcpNetworksRooms, connsRooms, connsDetailRooms,
 		wirelessRooms, topologyRooms, bandwidthRooms),
+	// ── `arp` HAS NO AUDIENCE AT ALL, NOT EVEN A ROUTER-WIDE ONE ───────────
+	//
+	// It emits nothing. Its whole output is an in-memory IP<->MAC index that
+	// four collectors read, so the rooms that should keep it running are THEIRS:
+	// the Connections and Bandwidth pages ask it IP→MAC to reach a lease, and
+	// WiFi Clients and Network Topology ask it MAC→IP for an address their own
+	// rows do not carry.
+	"arp": union(connsRooms, connsDetailRooms, bandwidthRooms,
+		wirelessRooms, topologyRooms),
 }
 
 // DeclaredRoomKeys is every collector `RoomsOf` answers for.
