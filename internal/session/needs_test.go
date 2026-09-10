@@ -324,3 +324,40 @@ func TestWantsAsksTheHoldsWhenNobodyIsWatching(t *testing.T) {
 		t.Error("a session held for alerting wants `queues`, which no alert rule reads")
 	}
 }
+
+// TestWantsConsultsTheHoldsEvenWithAViewer.
+//
+// ── THE REGRESSION THIS PINS SHIPPED FOR ONE COMMIT ────────────────────────
+//
+// `Needs` returns true for EVERYTHING while a viewer is present, because it
+// answers "what is this session allowed to run". Phase 6.3's first version
+// handled that with `Needs(key, why) && !why.Viewer`, which does not ask the
+// holds question without the viewer term — it SKIPS the question entirely
+// whenever a viewer exists.
+//
+// So on the router you are looking at, the alert and history feeds were gated
+// purely on rooms. Opening any page that does not declare `ifStatus` suspended
+// it, and with it four of the six alert rules, on the one router most likely to
+// be watched. Found by a Devices-page bug: no WAN RX/TX.
+func TestWantsConsultsTheHoldsEvenWithAViewer(t *testing.T) {
+	s := NewForTest(nil, "r1") // no hub: no room can be occupied
+	s.mu.Lock()
+	s.holds = map[string]bool{"alerts": true}
+	s.refs = 1 // a browser has this router selected
+	s.mu.Unlock()
+
+	for _, key := range AlertFeeds {
+		if !s.Wants(key) {
+			t.Errorf("%s is an alert feed and the session does not want it while a "+
+				"viewer is present. The rules go quiet on the router somebody is "+
+				"actually looking at, which is the last place anyone would look for it.",
+				key)
+		}
+	}
+	// AND A VIEWER STILL DOES NOT WANT EVERYTHING, or page gating is undone:
+	// `queues` is fed by no hold and no occupied room.
+	if s.Wants("queues") {
+		t.Error("a viewer makes `queues` wanted with nobody on its page; `Needs` " +
+			"returning true for everything under a viewer has leaked into the rule")
+	}
+}

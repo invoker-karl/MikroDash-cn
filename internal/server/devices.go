@@ -78,6 +78,20 @@ func (s *Server) buildStatsSources(sess *Session) routers.StatsSources {
 		out.Routers = append(out.Routers, routers.StatsRouter{
 			ID: r.ID, Label: r.Label, Host: r.Host, Disabled: r.Disabled,
 			SiteIDs: store.RouterSiteIDs(r),
+			// ── WITHOUT THIS THE WAN RX/TX COLUMN IS EMPTY ────────────────
+			//
+			// `BuildStats` resolves the WAN interface as
+			// `DefaultIfFor(r.DefaultIf, global)` and looks it up by NAME in the
+			// interface payload. Unset, every router fell through to the global
+			// default — and this is the second field on this struct to be
+			// declared and never filled, after `Geo` below.
+			//
+			// IT HID BEHIND THE FALLBACK, which is the same accident this file
+			// already records for the `defaultIf` setting key: three of four
+			// routers here are configured as `ether1` and so is the global, so
+			// they matched anyway. The one router with a real WAN name showed no
+			// throughput at all, which is how the operator found it.
+			DefaultIf: r.DefaultIf,
 			// ── WITHOUT THIS THE MAP PLOTS NOTHING ────────────────────────
 			//
 			// `BuildStats` copies this into the row's `Geo`, and
@@ -780,6 +794,17 @@ func (cn *conn) stopDevicesTick() {
 
 // devicesBlur is the mirror. Called from page:blur AND from teardown, because a
 // browser that closes its tab never sends a blur.
+// devicesWatched reports whether anybody has the Devices page open.
+//
+// The page reads a payload per router — see `session.devicesFeeds` — so while it
+// is open every router has a reason to run those collectors, and while it is
+// closed none of them do.
+func (s *Server) devicesWatched() bool {
+	s.devicesMu.Lock()
+	defer s.devicesMu.Unlock()
+	return len(s.devicesWatchers) > 0
+}
+
 func (cn *conn) devicesBlur() {
 	cn.stopDevicesTick()
 	cn.srv.devicesMu.Lock()
@@ -797,6 +822,14 @@ func (cn *conn) devicesBlur() {
 	// and this line is what makes that impossible rather than merely unlikely.
 	last := had && len(cn.srv.devicesWatchers) == 0
 	cn.srv.devicesMu.Unlock()
+
+	// THE HOLD GOES WITH THE LAST WATCHER. `holdOne` reads `devicesWatched`, so
+	// re-running the sync is what drops it — and it must run BEFORE the pool
+	// grace below, because a router the pool takes back needs its session
+	// released first.
+	if last {
+		cn.srv.syncFleetHolds()
+	}
 
 	if last && cn.srv.pool != nil {
 		// ── STOP COLLECTING NOW, LET THE SOCKETS GO AFTER A GRACE ─────────

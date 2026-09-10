@@ -279,6 +279,33 @@ card blur, a router switch, and a socket closing. A suspend waits out a grace
 period and re-asks when it fires, so a page refresh does not stop and restart a
 channel to save one second of polling.
 
+### Holds: a reason that is not a viewer
+
+A session may be kept alive by something other than a browser, and each such
+reason is a **hold** naming the collectors it needs:
+
+| hold | why the session exists | what it runs |
+|---|---|---|
+| `alerts` | the rules must be evaluated | `session.AlertFeeds` |
+| `history` | traffic and ping are being recorded | `historyFeeds` |
+| `devices` | the Devices page reads a payload per router | `devicesFeeds` |
+| `warm` | the page must be able to say "up" instantly | **nothing** — a connection only |
+
+**A hold is inert unless something takes it.** `Reasons.Devices` and
+`devicesFeeds` existed from 4.3 and nothing ever called `Retain(id, "devices")`
+— declared and never filled, exactly like `topology.ARPIP`. It cost nothing while
+`ifStatus` ran from connect, and started costing when 4.2b gated `ifStatus` on
+demand: the Devices page's WAN RX/TX column was empty for every router.
+`internal/verify/holds_test.go` fails in both directions now — a reason read and
+never taken, and a reason taken and never read.
+
+**And the holds are asked WITHOUT the viewer term.** `Needs` returns true for
+everything while a viewer is present, because it answers "what is this session
+allowed to run". `Wants` therefore clears `Viewer` before asking it, so a hold
+still counts on the router somebody is looking at — and page gating still decides
+the rest. Getting that wrong for one commit suspended four of the six alert rules
+on whichever router was selected.
+
 ### Rooms a collector does not emit to
 
 `keepAliveFor` is the exception, and there are **3** entries. It exists for an

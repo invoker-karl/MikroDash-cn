@@ -177,7 +177,32 @@ func (s *Server) holdOne(r store.Router, warmCovered bool) {
 		// exactly what the pool ran for these routers: `buildCollectors`
 		// returned before making any unless the router had alerting or reporting
 		// on, and those are the two rows above.
+		// ── THE DEVICES PAGE IS A CONSUMER, AND IT NEVER SAID SO ──────────
+		//
+		// `Reasons.Devices` and `session.devicesFeeds` have existed since 4.3
+		// deleted the pools, and NOTHING EVER TOOK THIS HOLD. The field was read
+		// by `reasonsLocked`, the feed list was consulted by `Needs`, and the
+		// whole path was dead — declared and never filled, which is the same
+		// shape as `topology.ARPIP` and reads exactly as well.
+		//
+		// It cost nothing while `ifStatus` ran from connect on every session. It
+		// started costing when 4.2b gated `ifStatus` on demand: a router nobody
+		// is viewing then has no reason to run it, so the page's WAN RX/TX column
+		// was empty for every device. Reported by the operator; measured as 3 of
+		// 4 routers showing null, and the fourth showing a frozen reading from
+		// the single tick its poll-mode start had managed before it was
+		// suspended.
+		// ── THE CONNECTION, FOR THE DEVICES PAGE ────────────────────────
+		//
+		// Every enabled router nothing else answers for. This is the last thing
+		// the deleted `alertpool` package was doing: holding a socket so the page
+		// can say "up" the moment it renders, instead of a fleet of red Offline
+		// cards while the overview pool dials.
+		//
+		// A warm hold runs NO collectors — see `session.Reasons.Warm` — which is
+		// exactly what the pool ran for these routers.
 		{"warm", !r.Disabled && !warmCovered},
+		{"devices", !r.Disabled && s.devicesWatched()},
 	} {
 		if !h.want {
 			s.sessions.Drop(r.ID, h.reason)

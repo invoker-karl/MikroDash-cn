@@ -189,9 +189,24 @@ func (s *Session) Wants(key string) bool {
 	s.mu.Lock()
 	why := s.reasonsLocked()
 	s.mu.Unlock()
-	if Needs(key, why) && !why.Viewer {
-		// A hold or an alert rule wants it, and no viewer is inflating the
-		// answer — `Needs` returns true for everything while one is present.
+	// ── THE VIEWER TERM IS THE ROOMS' QUESTION, NOT THIS ONE'S ─────────────
+	//
+	// `Needs` returns true for EVERYTHING while a viewer is present, because it
+	// answers "what is this session allowed to run". Asked here unmodified it
+	// would want every collector for any browser and undo page gating entirely.
+	//
+	// The first version of 6.3 handled that with `Needs(key, why) && !why.Viewer`
+	// — which SKIPS the holds question whenever a viewer exists, rather than
+	// asking it without the viewer term. On the router you are looking at, the
+	// alert and history feeds were then gated purely on rooms: opening the
+	// Devices page suspended `ifStatus`, and with it four of the six alert rules,
+	// on the one router most likely to be watched.
+	//
+	// `NeededForHolds` had it right and its comment said so — "the viewer half is
+	// the caller's question now" — and the rule this replaced called BOTH it and
+	// the rooms. Found by a Devices-page bug the operator reported: no WAN RX/TX.
+	why.Viewer = false
+	if Needs(key, why) {
 		return true
 	}
 	return s.roomsOccupied(collect.DemandRooms(key))
