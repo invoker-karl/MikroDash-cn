@@ -182,6 +182,11 @@ type Session struct {
 	// read in memory. See internal/collect/arp.go.
 	arp *collect.ARP
 
+	// payloads counts what the derivation layer produces, for the API
+	// Diagnostics card. Its own lock: the emit closure is the hottest path in
+	// the session and must not queue behind whatever holds `mu`.
+	payloads rollingMin
+
 	// pendingResume holds page-focus resumes that arrived BEFORE the router
 	// connection came up. Guarded by mu. See ResumeCollector and replayResumes.
 	pendingResume map[string]bool
@@ -683,6 +688,14 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// It costs a map lookup on events with no rule, which is most of them.
 		// THE RETURN VALUE IS THE ALERT. It was discarded here until 2026-08-30,
 		// which is why nothing was ever sent — LOOP.md 0k.
+		// ── AND THE DERIVATION LAYER'S OWN COUNTER, AT THE SAME SEAM ────────
+		//
+		// One call site rather than one per collector, for the reason the two
+		// interceptions below share: a collector that forgot to count would be
+		// invisible on the card, and "the number looks a bit low" is not a
+		// symptom anybody chases. See internal/session/diagnostics.go.
+		s.notePayload()
+
 		fired := m.alerts.Evaluate(alert.Router{
 			ID: s.RouterID, AlertsEnabled: s.alertsEnabled,
 		}, event, payload)

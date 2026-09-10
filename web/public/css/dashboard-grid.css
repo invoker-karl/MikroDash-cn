@@ -423,6 +423,22 @@ html[data-theme="light"] #dashAddPanel {
 
 /* ── Extra dashboard cards (dc-*) ───────────────────────────────────────── */
 
+/* API Diagnostics — the menu list scrolls inside the card.
+   `.dash-card` clips at `overflow:hidden`, and this card's content is variable:
+   eleven subscribed menus on a live router, more on a busy one. Without this the
+   list is cut off mid-row with no scrollbar and no tell — the operator reads a
+   shorter list and has no way to know it. Same failure the payload's `more`
+   field exists to prevent, one layer down. */
+#dc-card-diagnostics .card-body {
+  display: flex;
+  flex-direction: column;
+}
+#dc-diagList {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 /* Logs panel — same styling as #logs on Logs page but height auto */
 #dc-logs {
   background: rgba(2,5,14,.85);

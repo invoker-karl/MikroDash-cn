@@ -345,6 +345,32 @@ value (a payload comes out), a room name (which decides whether step 2 happens a
 all). Nothing in the derivation knows who is watching; nothing in the view layer
 knows what a menu is.
 
+### Reading the layers on a running install
+
+The Dashboard's **API Diagnostics** card is this document made observable: three
+sections, one per layer, for the router the operator has selected. It asks the
+router nothing — every figure is already in this process — which is the property
+that lets it be added without changing what it measures.
+`internal/session/diagnostics.go` assembles it and `internal/server/diagnostics.go`
+sends it to the socket every two seconds while the card is on screen.
+
+| section | what it reads | where the number comes from |
+|---|---|---|
+| Acquisition | router commands/min, in flight against the cap, open channels, menus split into pushed and polled | `roslimit`, `roscache.Demand`, `roscache.StreamedMenus` |
+| Menus read | the subscribed menus themselves, pushed first | `roscache.Demand` |
+| Derivation | payloads/min | one counter in the session's single emit closure |
+| Views | collectors running of those demand can gate, occupied rooms, dormant, and the holds | `Session.Wants`, `hub.Occupants`, `Session.holds` |
+
+**Coalescing does not show up as a subscriber count, and the card learned that
+the hard way.** The section above was first written as "shared reads" — the menus
+several collectors want — on the assumption that the read cache's saving is
+visible there. Measured on the live fleet across seven pages on 2026-09-10: no
+menu ever has more than one subscriber. This app coalesces a level UP, at the
+collector rather than the subscription: `arp` and `dhcpLeases` own their menus and
+four consumers each read the derived index rather than subscribing themselves. So
+a subscriber count is structurally 1, and a section keyed on it could never have
+rendered. Listing the menus is what that section was actually reaching for.
+
 ---
 
 ## The gates that decide whether a collector runs

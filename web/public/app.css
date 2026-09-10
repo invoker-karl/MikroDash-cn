@@ -1784,7 +1784,22 @@
     .diag-total-label{font-size:.75rem;color:var(--text-muted);display:block;margin-top:-.2rem}
     .diag-row{display:flex;justify-content:space-between;align-items:center;padding:.25rem 0;border-bottom:1px solid var(--border);font-size:.8rem}
     .diag-row:last-child{border-bottom:none}
-    .diag-count{font-weight:600;min-width:1.5rem;text-align:right}
+    .diag-count{font-weight:600;min-width:1.5rem;text-align:right;flex:0 0 auto;white-space:nowrap}
     .diag-count-zero{color:var(--text-muted)}
     .diag-count-active{color:var(--accent)}
+    /* One layer of the collector architecture. A heading rather than a row: the
+       card is read top to bottom as the path data takes, and a section that
+       looked like a row would read as another number. */
+    .diag-layer{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin:.6rem 0 .15rem;border-bottom:1px solid var(--border)}
+    .diag-layer:first-child{margin-top:0}
+    .diag-layer-name{font-size:.72rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-main)}
+    .diag-layer-sub{font-size:.68rem;color:var(--text-muted)}
+    /* The label half of a row. It MUST be allowed to shrink -- a menu path is
+       long and the card is narrow, and without a min-width of 0 a flex child
+       refuses to shrink below its content and pushes the count off the card.
+       The count is `flex:0 0 auto` and nowrap for the other half of the same
+       problem, measured live on 2026-09-10: against
+       `/interface/wifi/registration-table/print` the value column was squeezed
+       until "pushed" wrapped mid-word to two lines. */
+    .diag-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)}
   

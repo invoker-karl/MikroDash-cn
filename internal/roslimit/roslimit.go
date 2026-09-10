@@ -71,6 +71,25 @@ var (
 	// path to count it, which is a strange trade for an instrument.
 	counts = map[string]int64{}
 
+	// rate is a ROLLING per-router command count: sixty one-second buckets,
+	// summed on read.
+	//
+	// ── WHY NOT `counts`, WHICH IS RIGHT THERE ──────────────────────────────
+	//
+	// `counts` is DRAINED DESTRUCTIVELY by `StartStats`, which clears it every
+	// period. A second reader would either miss whatever the logger had just
+	// taken or steal it from the logger, and the two would silently disagree
+	// about the same minute. That is the same "two statements of one fact"
+	// defect the collector rewrite spent itself removing, so this is a separate
+	// instrument that nobody clears.
+	//
+	// It is also a RATE rather than a total, which is what a diagnostics card
+	// wants: "47 a minute" is readable and "3,912 since some unstated moment" is
+	// not. Sixty buckets is one minute at one-second resolution, and a bucket
+	// carries the second it belongs to so a router that goes quiet ages out
+	// instead of holding its last reading for ever.
+	rate = map[string]*cmdRate{}
+
 	// menus is commands per RouterOS menu since the last report.
 	//
 	// The per-router total says how much this app costs a device; this says
@@ -159,7 +178,65 @@ func Note(routerID, menu string) {
 	}
 	mu.Lock()
 	menus[menu]++
+	noteRateLocked(routerID)
 	mu.Unlock()
+}
+
+// cmdRate is one router's rolling minute. Index is the unix second modulo the
+// window, and `sec` records which second the bucket actually holds -- without it
+// a bucket read a minute later would be counted as current.
+type cmdRate struct {
+	sec [rateWindow]int64
+	n   [rateWindow]int64
+}
+
+const rateWindow = 60
+
+// noteRateLocked adds one command to this second's bucket. Caller holds mu.
+func noteRateLocked(routerID string) {
+	if routerID == "" {
+		return
+	}
+	r := rate[routerID]
+	if r == nil {
+		r = &cmdRate{}
+		rate[routerID] = r
+	}
+	now := time.Now().Unix()
+	i := now % rateWindow
+	if r.sec[i] != now {
+		r.sec[i], r.n[i] = now, 0
+	}
+	r.n[i]++
+}
+
+// Cap is the in-flight command limit, for an instrument that wants to show a
+// level against its ceiling. `max` resolves it once and caches; this is the
+// exported read.
+func Cap() int {
+	mu.Lock()
+	defer mu.Unlock()
+	return max()
+}
+
+// CommandsPerMin is how many commands this router has been sent in the last
+// minute. Non-destructive: any number of readers may ask, and asking changes
+// nothing.
+func CommandsPerMin(routerID string) int64 {
+	mu.Lock()
+	defer mu.Unlock()
+	r := rate[routerID]
+	if r == nil {
+		return 0
+	}
+	cut := time.Now().Unix() - rateWindow
+	total := int64(0)
+	for i := range r.sec {
+		if r.sec[i] > cut {
+			total += r.n[i]
+		}
+	}
+	return total
 }
 
 // StreamOpened records that a channel is now open on this router, and returns
@@ -371,5 +448,9 @@ func Reset() {
 	// LEVEL, so a leaked entry never decays and every later assertion in the
 	// package would be measuring the leak.
 	streams = map[string]int{}
+	// The rolling rate too: it decays on its own in a running process, but a
+	// test that runs two cases inside one second would see the first case's
+	// commands in the second's reading.
+	rate = map[string]*cmdRate{}
 	maxOne = -1
 }

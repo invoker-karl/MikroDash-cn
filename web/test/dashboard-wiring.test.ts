@@ -255,7 +255,20 @@ const PROBE = {
   // The chart ignores a sample for an interface it is not showing, so the probe
   // must name the one `traffic:history` selected — see the note below.
   'traffic:update': { ifName: '__probe__', ts: 1, rx_mbps: 1, tx_mbps: 1 },
-  'diagnostics:update': { total: 3, collectors: [{ name: 'dns', streams: 1 }] },
+  // The three-layer payload, with one menu of each delivery mode so the probe
+  // reaches both branches of the menu list.
+  'diagnostics:update': {
+    acquisition: {
+      commandsPerMin: 42, inFlight: 1, cap: 4, channels: 2, menus: 3, streamed: 1, polled: 2,
+      reads: [
+        { menu: '/ip/dhcp-server/lease/print', streamed: true },
+        { menu: '/ip/arp/print', streamed: false },
+      ],
+      more: 0,
+    },
+    derivation: { payloadsPerMin: 90 },
+    views: { running: 5, gated: 22, dormant: 1, rooms: 4, holds: ['alerts'] },
+  },
   'firewall:update': { filter: [{ action: 'accept' }], nat: [], mangle: [], raw: [] },
   'logs:new': { time: '10:00:00', topics: 'system', message: 'probe', severity: 'info' },
   'routers:update': [{ id: '__probe__', bwDownMbps: 100, bwUpMbps: 50 }],

@@ -85,6 +85,15 @@ type conn struct {
 	devicesMu   sync.Mutex
 	devicesTick *time.Ticker
 	devicesStop chan struct{}
+
+	// diagTick is this viewer's API Diagnostics refresh, and it is PER SOCKET
+	// for the same reason the Devices one is: the card reports on the router
+	// THIS connection has selected, and two browsers on two routers want two
+	// different payloads. Started when the card is added, stopped when it is
+	// removed or the socket goes.
+	diagMu   sync.Mutex
+	diagTick *time.Ticker
+	diagStop chan struct{}
 	// mu guards `cards`. The grid can send dashcard:focus while another
 	// goroutine is selecting a router, and the map is written by both.
 	mu sync.Mutex
@@ -200,6 +209,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// grace expires. `releaseRouter` leaves the rooms and re-asks demand, which
 	// is what makes a closed tab indistinguishable from a blur.
 	cn.devicesBlur()
+	// The diagnostics ticker too: it is per socket, so a closing connection that
+	// left it running would repaint a card nobody has, for ever.
+	cn.diagBlur()
 	cn.releaseRouter()
 	s.hub.Remove(cn.c)
 	_ = ws.Close(websocket.StatusNormalClosure, "")

@@ -142,6 +142,15 @@ func (cn *conn) dashCardFocus(key string) {
 	// The SAME wake a page focus performs, through the page this card borrows
 	// from — see resumePage.
 	cn.resumePage(src)
+	// ── THE ONE CARD NO COLLECTOR FEEDS ────────────────────────────────────
+	//
+	// Every other card is painted by a collector that `resumePage` has just
+	// woken. This one reports on THIS PROCESS, so there is nothing to wake and
+	// nothing would ever arrive — which is why it rendered empty for the whole
+	// life of the port. See internal/server/diagnostics.go.
+	if key == "diagnostics" {
+		cn.diagFocus()
+	}
 }
 
 func (cn *conn) dashCardBlur(key string) {
@@ -158,6 +167,9 @@ func (cn *conn) dashCardBlur(key string) {
 	// no-op, and refusing to let someone leave because their permissions changed
 	// while they were watching would strand them in it.
 	cn.srv.hub.Leave(cn.c, cn.dashCardRoom(key))
+	if key == "diagnostics" {
+		cn.diagBlur()
+	}
 	// ── PHASE 4.2b: A CARD BLUR NOW STOPS SOMETHING ───────────────────────
 	//
 	// It never did before, and the asymmetry was invisible because the page

@@ -43,12 +43,18 @@ var eventsUnconsumed = map[string]string{
 // MECHANISM behind it was missing too — the traffic stream had no watchdog, so a
 // stream that silently stalled was never restarted and never reported. The
 // entry described the quiet half of a real fault. Both halves are ported now.
+//
+// `diagnostics:update` LEFT ON 2026-09-10, and its note had the same defect. It
+// said "there is no diagnostics collector... the card renders empty", which reads
+// as a deliberate omission — and the card DID render empty, so nothing ever
+// contradicted it. What it could not say is that there is no diagnostics
+// collector BY DESIGN: the numbers are in this process, so a collector would be
+// the wrong mechanism, and what was actually missing was a sender.
+// `internal/server/diagnostics.go` is that sender.
 var eventsUnserved = map[string]string{
 	"alert:fired": "the alerter holds per-router evaluator state and SENDS; the bell renders the " +
 		"stored feed without it.",
 	"alert:resolved": "as alert:fired.",
-	"diagnostics:update": "there is no diagnostics collector. Same reasoning: it reports on the " +
-		"server, so it would describe this process, not the old one. The card renders empty.",
 }
 
 var (
