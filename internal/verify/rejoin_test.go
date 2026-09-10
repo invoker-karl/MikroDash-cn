@@ -44,10 +44,31 @@ func TestSelectRouterRejoinsEveryPerSocketSubscription(t *testing.T) {
 	// THE LEAVE IS THE PREMISE. Without it there is nothing to rejoin and this
 	// check is asserting a rule that no longer applies — so it must be the thing
 	// that fails first if the handler is restructured.
-	if !strings.Contains(body, "hub.Leave(cn.c, room)") {
-		t.Fatal("selectRouter no longer leaves every room; the rejoin rule below " +
-			"was written for that design and needs re-deciding rather than " +
-			"quietly continuing to pass")
+	//
+	// ── IT MOVED ONE CALL DEEP ON 2026-09-10, AND THIS FAILED FIRST ────────
+	//
+	// `selectRouter` spelled the loop out itself. Phase 4.2b's disconnect fix
+	// moved it into `releaseRouter`, which every path that lets go of a router
+	// already goes through — including the one that sends no frame at all, a
+	// closed tab. The rooms must be given up BEFORE demand is re-asked there, so
+	// the loop had to live with the release rather than beside three of its four
+	// callers.
+	//
+	// The premise is unchanged and the check follows it: `selectRouter` must
+	// still call the thing that leaves every room, and that thing must still
+	// leave them. Re-decided rather than relaxed — this Fatal is what forced the
+	// question, which is the check working.
+	if !strings.Contains(body, "cn.releaseRouter()") {
+		t.Fatal("selectRouter no longer calls releaseRouter, which is what leaves " +
+			"every room; the rejoin rule below was written for that design and " +
+			"needs re-deciding rather than quietly continuing to pass")
+	}
+	rel := mustRead(t, root+"/internal/server/ws.go")
+	if k := strings.Index(rel, "func (cn *conn) releaseRouter("); k < 0 {
+		t.Fatal("releaseRouter is gone from ws.go")
+	} else if !strings.Contains(rel[k:k+2000], "hub.Leave(cn.c, room)") {
+		t.Fatal("releaseRouter no longer leaves every room, so selectRouter's " +
+			"rejoin has nothing to rejoin and this check asserts a dead rule")
 	}
 
 	for _, replay := range []struct{ call, why string }{

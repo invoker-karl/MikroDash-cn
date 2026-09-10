@@ -249,3 +249,89 @@ func TestSuspendIsDeferredAndReAsked(t *testing.T) {
 		})
 	}
 }
+
+// TestAClosedTabIsIndistinguishableFromABlur.
+//
+// ── THE PATH THAT SENDS NO FRAME ───────────────────────────────────────────
+//
+// Every other way of leaving a page tells the server: `page:blur`,
+// `dashcard:blur`, `router:select`. Closing the tab tells it nothing, and under
+// the switchboard that meant a viewer who shut their laptop left every collector
+// they had started polling until the session's own idle grace expired — a grace
+// that exists to keep the CONNECTION warm, not to gate collectors.
+//
+// `releaseRouter` is the one place that path goes through. What makes it correct
+// is the ORDER: the rooms are given up first, so this connection is no longer
+// counted as its own audience, and only then is demand re-asked.
+//
+// Both halves are driven here. A lone viewer leaving must hand every collector
+// to the suspend; a SECOND viewer still on a page must keep that page's
+// collector and lose nothing else — which is the assertion that fails if the
+// rooms are left after the question instead of before it, or not at all.
+func TestAClosedTabIsIndistinguishableFromABlur(t *testing.T) {
+	for _, c := range []struct {
+		why       string
+		otherPage string // a room a second viewer stays in, "" for nobody
+		keeps     string // the collector that must NOT be suspended
+	}{
+		{"the last viewer closes the tab", "", ""},
+		{"a second viewer is still on the Firewall page", "page-firewall", "firewall"},
+	} {
+		c := c
+		t.Run(c.why, func(t *testing.T) {
+			s := devicesServerWithPool(t)
+			s.sessions = session.NewManager(s.store, s.hub)
+			t.Cleanup(s.sessions.Shutdown)
+			s.idleGrace = time.Millisecond
+			suspended := make(chan string, 64)
+			s.suspendOne = func(_ *session.Session, key string) { suspended <- key }
+
+			leaving := devicesConn(s, "leaving")
+			leaving.routerID = "r1"
+			leaving.rsession = &session.Session{}
+			// The tab was on the DNS page and had the VPN card in its grid.
+			s.hub.Join(leaving.c, "router-r1-page-dns")
+			s.hub.Join(leaving.c, "router-r1-dash-card-vpn")
+
+			if c.otherPage != "" {
+				staying := devicesConn(s, "staying")
+				s.hub.Join(staying.c, "router-r1-"+c.otherPage)
+			}
+
+			leaving.releaseRouter()
+
+			got := map[string]bool{}
+			want := len(session.TargetKeys())
+			if c.keeps != "" {
+				want--
+			}
+			deadline := time.After(3 * time.Second)
+			for len(got) < want {
+				select {
+				case k := <-suspended:
+					got[k] = true
+				case <-deadline:
+					var missing []string
+					for _, k := range session.TargetKeys() {
+						if k != c.keeps && !got[k] {
+							missing = append(missing, k)
+						}
+					}
+					sort.Strings(missing)
+					t.Fatalf("closing the tab suspended %d of %d collectors; %v kept "+
+						"polling a router nobody is watching", len(got), want, missing)
+				}
+			}
+			if c.keeps != "" && got[c.keeps] {
+				t.Errorf("%s was suspended while a second viewer is still on its page", c.keeps)
+			}
+			// AND THE ROOMS REALLY WENT. Without this the test would pass on a
+			// version that asked the right question at the wrong moment and got
+			// the right answer by luck.
+			if n := len(leaving.c.Rooms()); n != 0 {
+				t.Errorf("the leaving connection is still in %d room(s): %v",
+					n, leaving.c.Rooms())
+			}
+		})
+	}
+}

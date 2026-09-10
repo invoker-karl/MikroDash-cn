@@ -193,9 +193,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	delete(s.conns, cn.c)
 	s.connsMu.Unlock()
 
-	// A CLOSED TAB SENDS NO BLUR. Without this the pool keeps a connection to
+	// A CLOSED TAB SENDS NO BLUR. Without these the pool keeps a connection to
 	// every router for a page nobody has open — the exact cost `devicesBlur`
-	// exists to avoid, reached by the commonest way a viewer leaves.
+	// exists to avoid, reached by the commonest way a viewer leaves — and every
+	// collector this viewer started keeps polling until the session's own idle
+	// grace expires. `releaseRouter` leaves the rooms and re-asks demand, which
+	// is what makes a closed tab indistinguishable from a blur.
 	cn.devicesBlur()
 	cn.releaseRouter()
 	s.hub.Remove(cn.c)
@@ -251,10 +254,8 @@ func (cn *conn) revalidator(ctx context.Context) {
 			}
 			cn.sess = live
 			if cn.routerID != "" && !live.CanReadRouter(cn.routerID) {
+				// `releaseRouter` leaves every room this connection is in.
 				cn.releaseRouter()
-				for _, room := range cn.c.Rooms() {
-					cn.srv.hub.Leave(cn.c, room)
-				}
 				cn.srv.hub.Send(cn.c, "access:revoked", map[string]any{})
 			}
 		}
@@ -498,10 +499,9 @@ func (cn *conn) selectRouter(id string) {
 		return
 	}
 	log.Printf("[ws] %s: router:select %s", cn.c.ID, id)
+	// Leaves every room this connection is in, and re-asks demand for the router
+	// it is leaving before it lets go of the session.
 	cn.releaseRouter()
-	for _, room := range cn.c.Rooms() {
-		cn.srv.hub.Leave(cn.c, room)
-	}
 
 	rs, err := cn.srv.sessions.Acquire(id)
 	if err != nil {
@@ -1317,6 +1317,31 @@ func (cn *conn) releaseRouter() {
 		return
 	}
 	cn.dropTraffic()
+	// ── THE ROOMS GO FIRST, AND THE ORDER IS THE WHOLE POINT ──────────────
+	//
+	// Both switch call sites already left every room immediately after calling
+	// this, so moving the loop in changes nothing for them. What it adds is the
+	// path that had no blur at all: A CLOSED TAB SENDS NO page:blur, and until
+	// phase 4.2b nothing was listening for one anyway — the switchboard only ran
+	// from a frame the browser chose to send.
+	//
+	// So a viewer who closed their laptop left every collector they had started
+	// running until the session's own idle grace expired, up to two minutes
+	// later, and that grace exists to keep the CONNECTION warm rather than to
+	// gate collectors.
+	//
+	// Leaving the rooms and THEN asking makes the answer right: this connection
+	// is no longer its own audience, so `applyDemand` sees what a second viewer
+	// on the same router still occupies, and nothing more. A lone viewer leaving
+	// hands every collector to `suspendAfterGrace`; a second viewer still on the
+	// Firewall page keeps `firewall` and loses the rest.
+	//
+	// `hub.Remove` in the disconnect path drops the same rooms a moment later
+	// and is then a no-op for them.
+	for _, room := range cn.c.Rooms() {
+		cn.srv.hub.Leave(cn.c, room)
+	}
+	cn.srv.applyDemand(cn.rsession, cn.routerID)
 	cn.srv.sessions.Release(cn.routerID)
 	cn.routerID = ""
 	cn.rsession = nil
