@@ -13,36 +13,32 @@ import (
 
 var reResume = regexp.MustCompile(`ResumeCollector\("(\w+)"\)`)
 
-// roomlessCollectors are the collectors no room can ever want, with the reason.
+// TestEveryGatedCollectorDeclaresARoom is the safety check the switchover needs.
 //
 // ── THE FAILURE THIS GUARDS IS SILENT AND TOTAL ────────────────────────────
 //
-// Phase 4.2b's rule is "a collector runs if anybody is in any room it declares".
-// A collector that declares NONE is therefore never wanted by a viewer — it can
-// only ever run for alerting or a hold, and on a router with neither it would be
-// suspended from connect to teardown with nothing anywhere saying so.
+// Demand's rule is "a collector runs if anybody is in any room it declares". A
+// collector no room can want is therefore never wanted by a viewer — it can only
+// run for alerting or a hold, and on a router with neither it is suspended from
+// connect to teardown with nothing anywhere saying so.
 //
 // Under the switchboard that could not happen: a page's case called
 // `ResumeCollector` by name whether or not the collector's rooms agreed. So this
-// hazard is CREATED by the change, which is why it gets a gate rather than a
-// comment.
+// hazard is CREATED by demand, which is why it is a gate rather than a comment.
 //
-// ── IT IS EMPTY, AND IT WAS NOT ─────────────────────────────────────────────
+// ── THERE IS NO EXEMPTION LIST, AND THERE WAS ──────────────────────────────
 //
-// `dhcpLeases` was the one entry, on the grounds that its payload reaches the
-// browser only through the collectors that consume it. That was wrong in the way
-// this gate exists to catch: it emits ROUTER-WIDE, so `RoomsOf` reports nothing
-// for it while the DHCP page and the Connections page both render it directly.
-// Suspending it would have blanked both. It is `keepAliveFor["dhcpLeases"]` now,
-// which is why this map has no entries and why the question is asked of
-// `DemandRooms` rather than `RoomsOf`.
+// `roomlessCollectors` was a map recording which collectors were allowed to have
+// no rooms and why. It held one entry, `dhcpLeases`, and THAT ENTRY WAS WRONG —
+// it emits router-wide, so the DHCP and Connections pages render it directly and
+// suspending it blanks both. The map was then kept EMPTY, with a comment saying
+// the next collector with no audience would need somewhere to say so.
 //
-// Keeping the map empty rather than deleting it is deliberate: the next
-// collector with no audience needs somewhere to say so, and the gate below is
-// what forces the reason to be written down instead of assumed.
-var roomlessCollectors = map[string]string{}
-
-// TestEveryGatedCollectorDeclaresARoom is the safety check the switchover needs.
+// Phase 6.1 deleted it. A collector with no demand rooms has `keepAliveFor` to
+// name the rooms that should keep it alive — which is what `arp` and `dhcpLeases`
+// both use — and an empty exemption list is a mechanism with no instances kept
+// against a hypothetical caller. If one ever genuinely needs an exemption, the
+// map is four lines and git history has this paragraph.
 func TestEveryGatedCollectorDeclaresARoom(t *testing.T) {
 	var roomless []string
 	for _, key := range session.TargetKeys() {
@@ -51,22 +47,11 @@ func TestEveryGatedCollectorDeclaresARoom(t *testing.T) {
 		}
 	}
 	sort.Strings(roomless)
-
 	for _, key := range roomless {
-		if _, known := roomlessCollectors[key]; !known {
-			t.Errorf("%s is gated by demand and no room can want it, so it runs only "+
-				"for alerting or a hold: on a router with neither it is suspended from "+
-				"connect to teardown with nothing saying so. Declare its rooms, add a "+
-				"keepAliveFor entry, or record here why it needs neither.", key)
-		}
-	}
-	// AND THE OTHER DIRECTION. A recorded exception that has GAINED rooms is a
-	// note describing something that is no longer true.
-	for key, why := range roomlessCollectors {
-		if len(collect.DemandRooms(key)) > 0 {
-			t.Errorf("%s is recorded as wanted by no room (%q) and now declares %v. "+
-				"Drop the entry.", key, why, collect.DemandRooms(key))
-		}
+		t.Errorf("%s is gated by demand and no room can want it, so it runs only for "+
+			"alerting or a hold: on a router with neither it is suspended from connect "+
+			"to teardown with nothing saying so. Declare its rooms, or give it a "+
+			"keepAliveFor entry naming the rooms of whatever reads it.", key)
 	}
 }
 

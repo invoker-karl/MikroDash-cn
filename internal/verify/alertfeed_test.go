@@ -107,9 +107,15 @@ func TestTheAlertFeedIsStartedBecauseAlertingIsOn(t *testing.T) {
 	// has to be asked is stronger now: demand asks about EVERY collector on every
 	// focus and blur, so a rule whose feed occupies no room would be suspended by
 	// somebody merely opening a page, not only by leaving the one it feeds.
-	dem := stripGoComments(mustRead(t, filepath.Join(repoRoot(t), "internal", "server", "demand.go")))
-	if !strings.Contains(strings.Join(strings.Fields(dem), " "), "rs.NeededForAlerts(key)") {
-		t.Error("the demand rule no longer asks NeededForAlerts, so navigating away from " +
-			"the VPN page suspends a collector four of the six rules depend on")
+	// IT MOVED AGAIN IN 6.3, from internal/server to internal/session, because
+	// the rule was being stated on both sides. `Wants` asks `Needs`, which is
+	// where the alert feeds are named — so the question is now whether the one
+	// rule consults them at all.
+	dem := stripGoComments(mustRead(t, filepath.Join(repoRoot(t), "internal", "session", "needs.go")))
+	flat2 := strings.Join(strings.Fields(dem), " ")
+	if !strings.Contains(flat2, "func (s *Session) Wants(key string) bool") ||
+		!strings.Contains(flat2, "Needs(key, why)") {
+		t.Error("the demand rule no longer asks Needs, so navigating away from the VPN " +
+			"page suspends a collector four of the six rules depend on")
 	}
 }

@@ -65,7 +65,7 @@ func TestWantsCollectorReadsTheRooms(t *testing.T) {
 			}
 			// A non-nil session is required; `wantsCollector` uses it only for
 			// the holds and alert questions, both of which a zero value answers.
-			if got := s.wantsCollector(&session.Session{}, "r1", c.key); got != c.want {
+			if got := s.wantsCollector(session.NewForTest(h, "r1"), "r1", c.key); got != c.want {
 				t.Errorf("wantsCollector(%q) = %v, want %v", c.key, got, c.want)
 			}
 		})
@@ -93,7 +93,7 @@ func TestEveryDeclaredRoomAloneIsEnough(t *testing.T) {
 			cl := hub.NewClient("viewer", 4)
 			h.Add(cl)
 			h.Join(cl, "router-r1-"+room)
-			if !s.wantsCollector(&session.Session{}, "r1", key) {
+			if !s.wantsCollector(session.NewForTest(h, "r1"), "r1", key) {
 				t.Errorf("a lone viewer in %q does not make %q wanted, though %q "+
 					"declares it", room, key, key)
 			}
@@ -113,10 +113,11 @@ func TestEveryDeclaredRoomAloneIsEnough(t *testing.T) {
 // TestNothingIsWantedWithNobodyWatching is the other direction, and without it
 // the sweep above is satisfied by a rule that returns true unconditionally.
 func TestNothingIsWantedWithNobodyWatching(t *testing.T) {
-	s := &Server{hub: hub.New()}
+	h := hub.New()
+	s := &Server{hub: h}
 	var wanted []string
 	for _, key := range session.TargetKeys() {
-		if s.wantsCollector(&session.Session{}, "r1", key) {
+		if s.wantsCollector(session.NewForTest(h, "r1"), "r1", key) {
 			wanted = append(wanted, key)
 		}
 	}
@@ -133,12 +134,12 @@ func TestWantsCollectorRefusesIncompleteInput(t *testing.T) {
 	if s.wantsCollector(nil, "r1", "vpn") {
 		t.Error("a nil session wants a collector")
 	}
-	if s.wantsCollector(&session.Session{}, "", "vpn") {
+	if s.wantsCollector(session.NewForTest(s.hub, ""), "", "vpn") {
 		t.Error("an empty router id wants a collector")
 	}
 	// And applyDemand must survive both without reaching a collector.
 	s.applyDemand(nil, "r1")
-	s.applyDemand(&session.Session{}, "")
+	s.applyDemand(session.NewForTest(s.hub, ""), "")
 }
 
 // TestApplyDemandSuspendsWhatNothingWants closes the gap between the rule and
@@ -168,7 +169,7 @@ func TestApplyDemandSuspendsWhatNothingWants(t *testing.T) {
 	h.Add(cl)
 	h.Join(cl, "router-r1-page-vpn")
 
-	s.applyDemand(&session.Session{}, "r1")
+	s.applyDemand(session.NewForTest(h, "r1"), "r1")
 
 	got := map[string]bool{}
 	deadline := time.After(2 * time.Second)
@@ -225,7 +226,7 @@ func TestSuspendIsDeferredAndReAsked(t *testing.T) {
 					suspended <- key
 				},
 			}
-			rs := &session.Session{}
+			rs := session.NewForTest(h, "r1")
 			s.suspendAfterGrace(rs, "r1", "vpn")
 			if c.comesBack {
 				cl := hub.NewClient("viewer", 4)
@@ -288,7 +289,7 @@ func TestAClosedTabIsIndistinguishableFromABlur(t *testing.T) {
 
 			leaving := devicesConn(s, "leaving")
 			leaving.routerID = "r1"
-			leaving.rsession = &session.Session{}
+			leaving.rsession = session.NewForTest(s.hub, "r1")
 			// The tab was on the DNS page and had the VPN card in its grid.
 			s.hub.Join(leaving.c, "router-r1-page-dns")
 			s.hub.Join(leaving.c, "router-r1-dash-card-vpn")

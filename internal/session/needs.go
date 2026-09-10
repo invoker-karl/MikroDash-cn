@@ -1,5 +1,10 @@
 package session
 
+import (
+	"mikrodash/internal/collect"
+	"mikrodash/internal/hub"
+)
+
 // Which collectors a session runs, given why it is being kept alive.
 //
 // ── PHASE 4.3c: THE COST THAT MAKES THE MERGE A REGRESSION IF IGNORED ───────
@@ -140,7 +145,97 @@ func (s *Session) reasonsLocked() Reasons {
 // viewer arriving or leaving, a hold taken or dropped. The order those happen in
 // is racy — a Retain releases its own viewer reference while the connect
 // goroutine is still dialling — so this converges rather than being sequenced.
-func (s *Session) applyReasons() {
+// NewForTest builds a Session that knows its hub and its router and nothing else.
+//
+// ── A SEAM, AND WHY THE RULE MOVING HERE REQUIRED ONE ──────────────────────
+//
+// `Wants` reads room occupancy, so it needs the hub and the router id. A real
+// Session gets both from `Manager.Acquire`, which dials a router; a test cannot.
+// `internal/server`'s demand tests used to build `&session.Session{}` and pass the
+// router id alongside, because the rule lived over there.
+//
+// The same kind of seam as `Server.idleGrace` and `Cache.StreamTimings`: nothing
+// in the binary calls it, and the alternative was to keep the rule in two places
+// so that both sides could test it — which is what phase 6.3 exists to undo.
+func NewForTest(h *hub.Hub, routerID string) *Session {
+	return &Session{h: h, RouterID: routerID}
+}
+
+// Wants is THE collector gate, and there is one of it.
+//
+// ── PHASE 6.3: THIS RULE WAS WRITTEN TWICE ─────────────────────────────────
+//
+// `internal/server`'s `wantsCollector` asked "is anybody in a room it feeds, or
+// does alerting or a hold need it". `applyReasons` here asked "does alerting or a
+// hold need it" and ran when there was no viewer — at which point the room term
+// is empty and the two questions are the SAME question.
+//
+// Step 3.4 said the idle gate becomes demand. What happened instead was that the
+// page-room half was delivered, a justification was written for keeping this
+// half, and the step was recorded as done. It was not: two statements of one rule
+// is exactly what this rewrite exists to remove, and the drift went unnoticed
+// because each step was checked against the step before it rather than against
+// the end state.
+//
+// So the rule lives here, where the session already holds the hub and its router
+// id, and `internal/server` delegates to it. The two callers differ only in when
+// they act: the server defers a suspend by a grace period, because a page refresh
+// empties every room and refills it a second later; this one runs at the end of
+// the session's own idle grace or when a hold changes, which is already late.
+func (s *Session) Wants(key string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	why := s.reasonsLocked()
+	s.mu.Unlock()
+	if Needs(key, why) && !why.Viewer {
+		// A hold or an alert rule wants it, and no viewer is inflating the
+		// answer — `Needs` returns true for everything while one is present.
+		return true
+	}
+	return s.roomsOccupied(collect.DemandRooms(key))
+}
+
+// roomsOccupied reports whether any of these rooms still has a viewer.
+//
+// THE ROOM NAMES ARE PER ROUTER, and `RoomFor` is the one place that convention
+// is written down — a joiner using a different prefix sits in a room nobody sends
+// to, and the only symptom is a chart that stays empty.
+func (s *Session) roomsOccupied(sets ...collect.Rooms) bool {
+	if s.h == nil {
+		return false
+	}
+	for _, set := range sets {
+		for _, r := range set {
+			if r == "" {
+				continue
+			}
+			if s.h.Occupants(RoomFor(s.RouterID, r)) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// applyDemand brings every collector into line with `Wants`.
+//
+// ── IT STILL RETURNS EARLY FOR A VIEWER, AND THAT IS NOT THE DUPLICATION ───
+//
+// The first version of 6.3 removed that early return on the grounds that `Wants`
+// now covers the viewer case too. A gate caught it, and the gate was right:
+// THE ROOMS ARE NOT JOINED YET when this runs from the connect path. A browser
+// selects a router, the session dials, the connect block starts the collectors,
+// and only then does `page:focus` arrive and put the viewer in a room. Applying
+// room-demand in that window suspends everything connect has just started, and
+// the page waits for the next focus to bring it back.
+//
+// So the early return is not a second copy of the rule — it says WHICH APPLIER
+// owns the viewer case, and the answer is `internal/server`, which is the side
+// that hears about rooms changing. What 6.3 removed is the duplicated RULE:
+// `Wants` is the only statement of it now, and both appliers ask it.
+func (s *Session) applyDemand() {
 	// NOTHING TO PRUNE BEFORE THE LINK IS UP. A hold taken while the session is
 	// still dialling finds no collectors running, and the connect path calls this
 	// itself once they are -- which is what makes the racy order between Retain
@@ -151,7 +246,6 @@ func (s *Session) applyReasons() {
 	s.mu.Lock()
 	why := s.reasonsLocked()
 	s.mu.Unlock()
-
 	if why.Viewer {
 		return
 	}
@@ -161,7 +255,7 @@ func (s *Session) applyReasons() {
 		if !ok {
 			continue
 		}
-		if Needs(key, why) {
+		if s.Wants(key) {
 			// THROUGH THE FUNNEL, so the enabled check and the dormancy veto
 			// still apply. A collector the operator turned off for this router
 			// must not come back because alerting wants it.

@@ -80,15 +80,15 @@ func TestNothingRunsForNoReason(t *testing.T) {
 func TestApplyReasonsLeavesAViewerAlone(t *testing.T) {
 	src := readSource(t, "needs.go")
 	if !contains(src, "if why.Viewer { return }") {
-		t.Error("applyReasons no longer returns early for a viewer, so it would resume " +
+		t.Error("applyDemand no longer returns early for a viewer, so it would resume " +
 			"every collector for any browser and undo page gating entirely")
 	}
 	if !contains(src, "if s == nil || !s.Connected() { return }") {
-		t.Error("applyReasons no longer guards on Connected. A hold taken while the " +
+		t.Error("applyDemand no longer guards on Connected. A hold taken while the " +
 			"session is dialling then reaches collectors that do not exist yet.")
 	}
 	if !contains(src, "s.ResumeCollector(key)") {
-		t.Error("applyReasons resumes a collector without the funnel, so a collector the " +
+		t.Error("applyDemand resumes a collector without the funnel, so a collector the " +
 			"operator disabled for this router comes back because alerting wants it")
 	}
 }
@@ -99,22 +99,22 @@ func TestApplyReasonsLeavesAViewerAlone(t *testing.T) {
 func TestEveryTransitionConverges(t *testing.T) {
 	src := readSource(t, "session.go")
 	for _, where := range []string{
-		// The Retain path. NOT "hold then applyReasons" -- that adjacency is what
+		// The Retain path. NOT "hold then applyDemand" -- that adjacency is what
 		// the first version of this test asserted, and it was pinning the BUG:
-		// applyReasons no-ops while a viewer is present, and Acquire's reference
+		// applyDemand no-ops while a viewer is present, and Acquire's reference
 		// is still held at that point. The correct shape is release, THEN apply,
 		// and TestRetainPrunesAfterGivingBackItsViewerReference checks the order
 		// directly. Here it is enough that the Retain path applies at all.
 		"m.Release(routerID)",
 		// The Drop path. Checked as the whole sequence, because `delete(s.holds,
 		// reason)` alone is trivially present and a mutation removing the
-		// applyReasons after it SURVIVED the first version of this test.
-		"delete(s.holds, reason) empty := len(s.holds) == 0 && s.refs <= 0 s.mu.Unlock() s.applyReasons()",
+		// applyDemand after it SURVIVED the first version of this test.
+		"delete(s.holds, reason) empty := len(s.holds) == 0 && s.refs <= 0 s.mu.Unlock() s.applyDemand()",
 		// The connect path. NOT deferred -- see TestTheConnectPruneIsNotDeferred.
-		"s.applyReasons() first = false",
+		"s.applyDemand() first = false",
 	} {
 		if !contains(src, where) {
-			t.Errorf("a holder transition no longer calls applyReasons (%q). The session "+
+			t.Errorf("a holder transition no longer calls applyDemand (%q). The session "+
 				"then runs whatever the last transition left, which for an alerting "+
 				"router is fifteen collectors instead of six.", where)
 		}
@@ -126,7 +126,7 @@ func TestEveryTransitionConverges(t *testing.T) {
 // ── THE BUG THIS PINS, WHICH EVERY TEST MISSED ──────────────────────────────
 //
 // `Retain` acquires (taking a VIEWER reference), records the hold, and releases.
-// `applyReasons` does nothing while a viewer is present — so calling it between
+// `applyDemand` does nothing while a viewer is present — so calling it between
 // the hold and the release saw refs == 1, concluded a viewer wanted everything,
 // and returned. The session then ran all fifteen collectors for a router nobody
 // was watching.
@@ -137,14 +137,14 @@ func TestEveryTransitionConverges(t *testing.T) {
 func TestRetainPrunesAfterGivingBackItsViewerReference(t *testing.T) {
 	src := readSource(t, "session.go")
 	rel := indexOf(src, "m.Release(routerID) ")
-	app := indexOf(src, "s.applyReasons() return s, nil")
+	app := indexOf(src, "s.applyDemand() return s, nil")
 	if rel < 0 || app < 0 {
 		t.Fatal("Retain no longer releases then applies; this check is reading the wrong " +
 			"shape and would pass against anything")
 	}
 	if app < rel {
-		t.Error("Retain calls applyReasons BEFORE giving back its viewer reference. " +
-			"applyReasons no-ops while a viewer is present, so the prune never happens " +
+		t.Error("Retain calls applyDemand BEFORE giving back its viewer reference. " +
+			"applyDemand no-ops while a viewer is present, so the prune never happens " +
 			"and a router held for alerting runs every collector.")
 	}
 }
@@ -173,13 +173,13 @@ func TestTheIdleGatePrunesAtTheEndOfTheGrace(t *testing.T) {
 	// Release must NOT prune: it only arms the timer.
 	rel := src[indexOf(src, "func (m *Manager) Release(routerID string) {"):]
 	rel = rel[:min(len(rel), 900)]
-	if contains(rel, "s.applyReasons()") {
+	if contains(rel, "s.applyDemand()") {
 		t.Error("Release prunes when the last viewer leaves. A refresh or a router " +
 			"switch then suspends every collector for the two minutes the grace was " +
 			"meant to cover, and the viewer returns to a page waiting for data.")
 	}
 	// idleOut must, and only when no viewer came back.
-	if !contains(src, "viewer := s.refs > 0") || !contains(src, "if !viewer { s.applyReasons() }") {
+	if !contains(src, "viewer := s.refs > 0") || !contains(src, "if !viewer { s.applyDemand() }") {
 		t.Error("idleOut no longer prunes a held session at the end of the grace, so a " +
 			"router held for alerting keeps the full viewer collector set indefinitely")
 	}
@@ -192,7 +192,7 @@ func TestTheIdleGatePrunesAtTheEndOfTheGrace(t *testing.T) {
 
 // TestTheConnectPruneIsNotDeferred.
 //
-// It was written as `defer s.applyReasons()`. A defer runs when the FUNCTION
+// It was written as `defer s.applyDemand()`. A defer runs when the FUNCTION
 // returns, and the function is `connectLoop` — a loop that runs for the life of
 // the session and never returns. So the prune never happened, and a router held
 // only for alerting kept all fifteen collectors.
@@ -202,11 +202,11 @@ func TestTheIdleGatePrunesAtTheEndOfTheGrace(t *testing.T) {
 // baseline. This is the cheap version of that measurement.
 func TestTheConnectPruneIsNotDeferred(t *testing.T) {
 	src := readSource(t, "session.go")
-	if contains(src, "defer s.applyReasons()") {
-		t.Error("the connect path defers applyReasons. connectLoop never returns, so a " +
+	if contains(src, "defer s.applyDemand()") {
+		t.Error("the connect path defers applyDemand. connectLoop never returns, so a " +
 			"deferred call never runs and a held session keeps every collector.")
 	}
-	if !contains(src, "s.replayResumes() // ── PHASE 4.3c") && !contains(src, "s.applyReasons() first = false") {
+	if !contains(src, "s.replayResumes() // ── PHASE 4.3c") && !contains(src, "s.applyDemand() first = false") {
 		t.Error("the connect path no longer prunes at the end of the start block, so what " +
 			"a held session runs depends on whatever touched it last")
 	}
@@ -257,8 +257,8 @@ func TestResumeCollectorRefusesWhatTheSessionHasNoReasonToRun(t *testing.T) {
 // exists because the mirror-image mistake was made on the way down.
 func TestBothConnectPathsPrune(t *testing.T) {
 	src := readSource(t, "session.go")
-	if n := strings.Count(src, "s.applyReasons()"); n < 4 {
-		t.Errorf("session.go calls applyReasons %d times; expected at least four — the "+
+	if n := strings.Count(src, "s.applyDemand()"); n < 4 {
+		t.Errorf("session.go calls applyDemand %d times; expected at least four — the "+
 			"first connect, the reconnect, Retain and Drop. A branch without it leaves a "+
 			"held session running the viewer's collector set until something else "+
 			"happens to touch it.", n)
@@ -266,7 +266,7 @@ func TestBothConnectPathsPrune(t *testing.T) {
 	// The reconnect branch specifically: it restarts every collector, so it is
 	// the one where a missing prune is invisible AND expensive.
 	recon := src[indexOf(src, "if s.eff.Enabled[\"conns\"] { s.conns.Reconnected() }"):]
-	if !contains(recon[:min(len(recon), 200)], "s.applyReasons()") {
+	if !contains(recon[:min(len(recon), 200)], "s.applyDemand()") {
 		t.Error("the reconnect branch no longer prunes. A held session comes back from " +
 			"any blip running every collector, which is what took this install from 129 " +
 			"commands a minute to 300.")
@@ -284,4 +284,43 @@ func min(a, b int) int {
 // `readSource` returns.
 func indexOf(src, want string) int {
 	return strings.Index(src, strings.Join(strings.Fields(want), " "))
+}
+
+// TestWantsAsksTheHoldsWhenNobodyIsWatching.
+//
+// ── A SURVIVING MUTATION IS WHY THIS EXISTS ────────────────────────────────
+//
+// Phase 6.3 moved the demand rule here, and the room half was driven by
+// `TestWantsCollectorReadsTheRooms` next door. The HOLD half was not: deleting
+// the `Needs(key, why)` branch entirely left both packages green, because the
+// only thing asserting it was a source check looking for the words.
+//
+// That is the branch that keeps an unwatched router evaluating alerts. Without
+// it a session held for alerting runs nothing at all, and the rules go quiet with
+// nothing anywhere saying so — which is the exact failure `AlertFeeds` exists to
+// prevent, one layer down.
+func TestWantsAsksTheHoldsWhenNobodyIsWatching(t *testing.T) {
+	s := NewForTest(nil, "r1") // no hub: no room can be occupied
+	for _, key := range AlertFeeds {
+		if s.Wants(key) {
+			t.Fatalf("%s is wanted by a session with no viewer and no holds", key)
+		}
+	}
+
+	s.mu.Lock()
+	s.holds = map[string]bool{"alerts": true}
+	s.mu.Unlock()
+
+	for _, key := range AlertFeeds {
+		if !s.Wants(key) {
+			t.Errorf("%s is an alert feed and a session held for alerting does not want "+
+				"it. The rules go quiet on every unwatched router, and nothing says so.",
+				key)
+		}
+	}
+	// And a hold must not want everything: that would put the whole viewer set
+	// back on a router nobody is looking at, which is what 4.3 removed.
+	if s.Wants("queues") {
+		t.Error("a session held for alerting wants `queues`, which no alert rule reads")
+	}
 }

@@ -3,7 +3,6 @@ package server
 import (
 	"time"
 
-	"mikrodash/internal/collect"
 	"mikrodash/internal/session"
 )
 
@@ -34,38 +33,29 @@ import (
 //
 // plus the consumers that occupy no room and never will.
 
-// wantsCollector answers whether one collector should be running for this
-// session, and it is the whole of the new gate.
+// wantsCollector answers whether one collector should be running, and it asks
+// `internal/session` rather than deciding.
 //
-// THREE WAYS TO BE WANTED, and only the first is about a viewer:
+// ── PHASE 6.3: THE RULE MOVED, AND THE DUPLICATE WENT WITH IT ─────────────
 //
-//	somebody is in a room it feeds   the ordinary case
-//	alerting needs it                the rules are not in a room and never will
-//	                                 be, so occupancy always answers no for them
-//	a non-viewer hold needs it       a session held for history or warm has no
-//	                                 viewer at all
+// This used to hold the rule — rooms occupied, or alerting, or a hold — while
+// `session.applyReasons` held the hold half of the same rule for a session with
+// no viewer. Two statements of one fact, which is what this whole rewrite exists
+// to remove, and step 3.4 had said so.
 //
-// ENABLEMENT IS NOT ASKED HERE. `ResumeCollector` already refuses a collector the
-// operator disabled, and asking twice would put the same rule in two places --
-// which is the defect this whole step exists to remove.
+// The session owns it now: it already holds the hub and its own router id, and it
+// is the side that has a lifecycle of its own to apply the rule from. What is
+// left here is the GRACE, which is genuinely this side's business — a page
+// refresh empties every room and refills it a second later, and that is a browser
+// event the session knows nothing about.
+//
+// The router id is still taken and still checked, because a connection with no
+// router selected must not be asked about one.
 func (s *Server) wantsCollector(rs *session.Session, routerID, key string) bool {
 	if rs == nil || routerID == "" {
 		return false
 	}
-	if rs.NeededForAlerts(key) {
-		return true
-	}
-	if rs.NeededForHolds(key) {
-		return true
-	}
-	// ── DemandRooms, NOT RoomsOf ────────────────────────────────────────────
-	//
-	// The audience plus the rooms this collector must stay alive FOR. `ifStatus`
-	// is the case: it emits to Interfaces, Topology and the Physical Ports card,
-	// and four more pages borrow its rates without it ever sending them anything.
-	// Asking `RoomsOf` here would suspend it for a viewer on Bridges and blank
-	// every throughput column on the page.
-	return s.roomsOccupied(routerID, collect.DemandRooms(key))
+	return rs.Wants(key)
 }
 
 // applyDemand brings every collector's running state into line with who is

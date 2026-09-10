@@ -1133,7 +1133,7 @@ func (m *Manager) Retain(routerID, reason string) (*Session, error) {
 	// from 119-120 a minute to 263-311. Every test was green: the tests ask what
 	// the code DECIDES, and not one of them could see how much the router was
 	// actually being asked.
-	s.applyReasons()
+	s.applyDemand()
 	return s, nil
 }
 
@@ -1150,7 +1150,7 @@ func (m *Manager) Drop(routerID, reason string) {
 	delete(s.holds, reason)
 	empty := len(s.holds) == 0 && s.refs <= 0
 	s.mu.Unlock()
-	s.applyReasons()
+	s.applyDemand()
 	if !empty {
 		return
 	}
@@ -1377,7 +1377,7 @@ func (m *Manager) idleOut(routerID string, s *Session) {
 		// takes nothing away: `refs > 0` means the browser is here and the full
 		// set is right.
 		if !viewer {
-			s.applyReasons()
+			s.applyDemand()
 		}
 		return
 	}
@@ -1693,7 +1693,7 @@ func (s *Session) connectLoop() {
 			//
 			// ── NOT `defer`, AND THAT COST A DEPLOY TO FIND ─────────────
 			//
-			// This was written as `defer s.applyReasons()`. A defer runs when
+			// This was written as `defer s.applyDemand()`. A defer runs when
 			// the FUNCTION returns, and the function here is `connectLoop` --
 			// which is a loop that never returns for the life of the session. So
 			// it never ran, and a router held only for alerting kept all fifteen
@@ -1885,7 +1885,7 @@ func (s *Session) connectLoop() {
 			// Every test stayed green, because they assert the call exists and it
 			// did. The command rate is what showed it: 264-287 a minute against a
 			// 119-120 baseline.
-			s.applyReasons()
+			s.applyDemand()
 			first = false
 		} else {
 			// THE CACHED ROWS CAME FROM A CONNECTION THAT IS GONE. Their age says
@@ -2041,7 +2041,7 @@ func (s *Session) connectLoop() {
 			// goes wrong. `TestBothConnectPathsPrune` is the guard, in the shape
 			// `TestBothTeardownPathsStopEveryCollector` already uses for the
 			// mirror-image mistake.
-			s.applyReasons()
+			s.applyDemand()
 		}
 
 		s.waitUntilDown(c)

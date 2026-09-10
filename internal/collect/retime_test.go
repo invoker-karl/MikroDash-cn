@@ -290,27 +290,6 @@ var retunable = map[string]string{
 	"arp": "ARP",
 }
 
-// notRetunable is the live target with no Go counterpart, and why.
-//
-// ── IT IS EMPTY, AND THE ENTRY IT HELD IS THE LESSON ───────────────────────
-//
-// `arp` was the one exemption: "this port has NO ARP collector... inventing one
-// so this table could be complete would be a collector with no caller."
-//
-// That was TRUE WHEN WRITTEN and stopped being true without anything failing.
-// `topology.go` declared `ARPIP func(mac) string` and used it at two sites, both
-// behind a nil check nothing ever satisfied; `wireless.go` passed a literal ""
-// where the live collector passed an ARP lookup, so 26 of 26 WiFi clients had no
-// address. The callers existed — they were stubbed, which reads exactly like a
-// caller that does not exist.
-//
-// This ledger could not have caught that: it asks whether a re-tunable key has a
-// collector, not whether a declared seam is filled. The entry is kept as an empty
-// map rather than deleted because the next collector this port skips needs
-// somewhere to say so, and because a reason that expires silently is this
-// repository's most expensive recurring defect.
-var notRetunable = map[string]string{}
-
 // TestEveryReTunedCollectorHasASetter.
 //
 // A LEDGER, failing in both directions. `collection.PollRetunes` names a
@@ -340,17 +319,23 @@ func TestEveryReTunedCollectorHasASetter(t *testing.T) {
 		live[name] = true
 	}
 
-	// Every live target is either mapped or recorded.
+	// ── EVERY LIVE TARGET IS MAPPED. THERE IS NO EXCUSED LIST ──────────────
+	//
+	// `notRetunable` recorded targets with no Go counterpart. It held one entry,
+	// `arp`, whose reason was "inventing one so this table could be complete
+	// would be a collector with no caller" — and that premise expired without
+	// anything failing: two collectors were stubbed out waiting for it. The
+	// collector landed on 2026-09-10 and the map went empty, kept for the next
+	// skipped collector.
+	//
+	// Phase 6.1 deleted it. A live poll target with nothing behind it means the
+	// setting saves, the payload reports the new period, and the collector keeps
+	// polling at the old one — that is a bug, not a state to have a list for.
 	for name := range live {
-		_, mapped := retunable[name]
-		_, excused := notRetunable[name]
-		if !mapped && !excused {
+		if _, mapped := retunable[name]; !mapped {
 			t.Errorf("the live route re-tunes %q and nothing here answers for it -- the "+
 				"setting would save, the payload would report the new period, and the "+
 				"collector would keep polling at the old one", name)
-		}
-		if mapped && excused {
-			t.Errorf("%q is both mapped and excused", name)
 		}
 	}
 	// And nothing here claims a target the live route does not have.
@@ -358,12 +343,6 @@ func TestEveryReTunedCollectorHasASetter(t *testing.T) {
 		if !live[name] {
 			t.Errorf("%q is mapped here but the live route does not re-tune it -- this "+
 				"table has drifted from upstream", name)
-		}
-	}
-	for name := range notRetunable {
-		if !live[name] {
-			t.Errorf("%q is excused here but the live route does not re-tune it either, "+
-				"so the entry describes nothing", name)
 		}
 	}
 }

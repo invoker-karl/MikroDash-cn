@@ -206,6 +206,17 @@ type Join struct {
 	// Merge combines every current holder's command into the one to open with.
 	// Called on every join and every release, so a holder leaving NARROWS the
 	// channel as well as a holder arriving widening it.
+	//
+	// ── NIL MEANS UNSHARED, AND THAT IS THE WHOLE DECLARATION ──────────────
+	//
+	// Thirteen of the fourteen streamed menus have exactly one consumer, and a
+	// second one arriving is a real bug class: two collectors quietly fighting
+	// over one channel. A nil Merge says "this menu has one owner", and a second
+	// `JoinStream` on it is REFUSED rather than merged.
+	//
+	// That refusal used to be a whole second entry point, `FillFromStream`, kept
+	// beside this one because migrating its single caller was work. It is a
+	// property of a fill, not a reason for a second function — phase 6.2.
 	Merge func([]routeros.Cmd) routeros.Cmd
 	// OnRow, if set, receives every row as it arrives — before it is folded into
 	// the round, and never under the fill's lock.
@@ -224,10 +235,6 @@ type Join struct {
 // fastest interval requested, so the gap that ends a round is that interval and
 // not a slower holder's.
 func (c *Cache) JoinStream(j Join) (func(), error) {
-	if j.Merge == nil {
-		return nil, fmt.Errorf("roscache: %s needs a Merge; a shared channel with no "+
-			"merge rule is opened for whichever holder arrived last", j.Menu)
-	}
 	if j.KeyOf == nil {
 		return nil, fmt.Errorf("roscache: %s needs a key function; a rolling map with "+
 			"no key holds one row", j.Menu)
@@ -251,12 +258,19 @@ func (c *Cache) JoinStream(j Join) (func(), error) {
 	f, existing := c.fills[j.Menu]
 	if existing && !f.shared {
 		c.mu.Unlock()
-		return nil, fmt.Errorf("roscache: %s is held by FillFromStream, which is "+
-			"single-owner; both holders must use JoinStream to share it", j.Menu)
+		return nil, fmt.Errorf("roscache: %s already has an owner and declared no "+
+			"merge rule, so it is single-owner; both holders must supply a Merge to "+
+			"share it", j.Menu)
+	}
+	if existing && j.Merge == nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("roscache: %s is shared and this holder declared no "+
+			"merge rule; every holder of one menu must agree how the command is built",
+			j.Menu)
 	}
 	if !existing {
 		f = newFill(j.Cmd, j.KeyOf, j.Boundary, check, stale)
-		f.shared = true
+		f.shared = j.Merge != nil
 		f.holders = map[int]Join{}
 		c.fills[j.Menu] = f
 	}
@@ -346,6 +360,10 @@ func (f *streamFill) mergeLocked() routeros.Cmd {
 		}
 	}
 	if merge == nil {
+		// Unshared: one holder, and its own command is the whole answer.
+		if len(cmds) == 1 {
+			return cmds[0]
+		}
 		return f.cmd
 	}
 	return merge(cmds)
@@ -478,88 +496,22 @@ func (c *Cache) streamTimings() (check, stale time.Duration) {
 	return check, stale
 }
 
-// FillFromStream opens a channel and keeps `menu`'s entry current from it, so
-// `Get` on that menu answers from pushed rows instead of a read.
+// `FillFromStream` and `fillEvery` lived here until phase 6.2.
 //
-// `keyOf` names a row, and the caller MUST supply it. There is no default: an
-// implicit key is how every row lands in one bucket and the entry silently
-// becomes "the last row the router sent".
+// ── ONE ENTRY POINT, NOT TWO ───────────────────────────────────────────────
 //
-// The returned stop closes the channel and drops the fill. It is idempotent.
-func (c *Cache) FillFromStream(menu string, cmd routeros.Cmd,
-	keyOf func(routeros.Reply) string, boundary time.Duration) (func(), error) {
-	check, stale := c.streamTimings()
-	return c.fillEvery(menu, cmd, keyOf, boundary, check, stale)
-}
-
-// fillEvery is FillFromStream with the watchdog's timings injected. Unexported:
-// the intervals are a property of the mechanism, not a caller's choice.
-func (c *Cache) fillEvery(menu string, cmd routeros.Cmd,
-	keyOf func(routeros.Reply) string, boundary, check, stale time.Duration) (func(), error) {
-
-	if why, no := unrollable[menu]; no {
-		return nil, fmt.Errorf("roscache: %s cannot be stream-filled: %s", menu, why)
-	}
-	if keyOf == nil {
-		return nil, fmt.Errorf("roscache: %s needs a key function; a rolling map with no "+
-			"key holds one row", menu)
-	}
-	s, ok := c.ros.(Streamer)
-	if !ok {
-		return nil, fmt.Errorf("roscache: this reader cannot stream")
-	}
-
-	c.mu.Lock()
-	if c.fills == nil {
-		c.fills = map[string]*streamFill{}
-	}
-	if _, dup := c.fills[menu]; dup {
-		c.mu.Unlock()
-		return nil, fmt.Errorf("roscache: %s is already stream-filled", menu)
-	}
-	// ── SILENCE IS RELATIVE TO THE CADENCE, AND A FIXED BOUND IS A BUG ──────
-	//
-	// `streamStale` is ten seconds, which is right for a menu delivering every
-	// second or two. It is WRONG for a slow one: `dhcpNetworks` runs at ten
-	// MINUTES, so its channel is legitimately silent for ten minutes and a fixed
-	// bound calls that death every ten seconds.
-	//
-	// MEASURED, not reasoned. With the fixed bound the DHCP page read "No DHCP
-	// networks on this device" while the router held three, because the watchdog
-	// restarted the channel constantly AND the empty-table rule -- which asks for
-	// two staleness windows of silence -- concluded after twenty seconds that a
-	// ten-minute menu was empty. The Go suite was green and the `=interval=`
-	// probe passed; only the page was wrong.
-	//
-	// So a stream is silent when it has said nothing for longer than two of its
-	// OWN intervals, and never less than the floor. `newFill` applies it, shared
-	// with `JoinStream` so the two entry points cannot drift on the one rule
-	// that a measurement already caught being wrong.
-	f := newFill(cmd, keyOf, boundary, check, stale)
-	c.fills[menu] = f
-	c.mu.Unlock()
-
-	if err := f.open(s); err != nil {
-		c.mu.Lock()
-		delete(c.fills, menu)
-		c.mu.Unlock()
-		return nil, err
-	}
-
-	done := make(chan struct{})
-	go f.watch(s, done)
-
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			close(done)
-			f.close()
-			c.mu.Lock()
-			delete(c.fills, menu)
-			c.mu.Unlock()
-		})
-	}, nil
-}
+// `FillFromStream(menu, cmd, keyOf, boundary)` was the single-owner form and
+// `JoinStream` the shared one. `JoinStream` did everything it did plus merging
+// and fan-out, and thirteen menus stayed on the old form because migrating them
+// was work — through exactly ONE call site, `scheduled.fillIfStreaming`.
+//
+// The single-owner REFUSAL was the thing worth keeping, and it is a property of a
+// fill rather than a reason for a second function: a `Join` with no `Merge`
+// declares "this menu has one owner", and a second holder is refused. See the
+// note on `Join.Merge`.
+//
+// `fillEvery` was its timing-injection twin, and `Cache.StreamTimings` had already
+// replaced what it was for.
 
 // open starts the channel. The caller holds no lock.
 func (f *streamFill) open(s Streamer) error {

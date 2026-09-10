@@ -560,7 +560,20 @@ trade. Build explicitly when you need a binary.
 
 ## Behavioral guidelines
 
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+**Risk appetite: this app is in ACTIVE DEVELOPMENT, not maintenance.** Bias toward
+making the change. The safety here is mechanical — `sh tools/verify.sh`, the ledgers
+that fail in both directions, mutation testing and live verification — and
+hesitation is not a net. A change that is wrong and caught is cheaper than one that
+is never attempted.
+
+**`Collector-Architecture.md` carries the full appetite, the end state and the
+replacing-is-the-default rule, and it applies repo-wide.** It is gated, so unlike
+this section it cannot quietly go stale. Read it before a structural change.
+
+This line used to read "these guidelines bias toward caution over speed", and it
+was measured causing harm: over one long session it produced a rewrite that kept
+three empty maps for hypothetical future callers, kept two entry points where one
+would serve, and re-scoped a step rather than delivering it.
 
 ## 1. Think Before Coding
 
@@ -571,6 +584,11 @@ Before implementing:
 - If multiple interpretations exist, present them - don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.
 - If something is unclear, stop. Name what's confusing. Ask.
+
+**ASK ABOUT THE DESIGN, NOT ABOUT WHETHER TO PROCEED.** The shape of a mechanism, a contract or
+payload change, anything with more than one reasonable end-state, and any time a step's intent no
+longer matches the code — re-scoping a step is a design question, not a local decision. Permission
+to do work already agreed, or to move to the next step, is not.
 
 ## 2. Simplicity First
 
@@ -584,20 +602,26 @@ Before implementing:
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
-## 3. Surgical Changes
+## 3. Replace Rather Than Preserve
 
-**Touch only what you must. Clean up only your own mess.**
+**In a system being rebuilt, preserving is what needs the justification.**
 
-- **A quirk is not automatically worth keeping, but it is worth understanding first.** Plenty of
-  this app's behaviour was inherited verbatim because reproducing it was the job. Some of that is
-  deliberate and load-bearing; some is an accident nobody has questioned since. Find out which
-  before changing it, and say which one you concluded.
+- **SIMPLICITY, UNIFORMITY AND COHERENCE ARE REASONS TO CHANGE A DESIGN, equal with
+  efficiency.** This rule used to read "efficiency remains a reason to depart from the old
+  design; taste alone still is not", which licensed ONE of this project's three stated goals
+  and filed the other two under taste. Only a preference with no goal behind it — "I would
+  have written it differently" — is taste.
+- **Do not keep a mechanism with no instances** because a future caller might want it. Delete
+  it; git history holds the reasoning.
+- **Do not keep two forms of one thing** because unifying them is work. Migrate the callers and
+  delete the old form in the same change.
+- **The Node app is not a reference.** "A departure from live" is not a category that requires
+  defending; that was the port's acceptance criterion and the port ended at the v0.8.0 cutover.
+- **A quirk is worth understanding before changing it — but understanding is a step, not a
+  veto.** Find out whether it is load-bearing, say which you concluded, and act on the answer.
 - **Deliberate changes are fine. Silent ones are not.** If a change moves the rendered page, the
   payload contract or an interaction, that belongs in the commit message and in `Changes.md` --
   along with which gate you re-aimed, if any.
-- **Efficiency remains a reason to depart from the old design; taste alone still is not.** A more
-  direct data path, fewer router channels, a simpler internal shape: all welcome. "I would have
-  written it differently" is not.
 - Match this repo's Go style, even if you'd do it differently.
 
 ## 4. Goal-Driven Execution
@@ -621,5 +645,10 @@ clarification.
 
 ---
 
-**These guidelines are working if:** behaviour is reproduced rather than reinvented, and gaps are
+**These guidelines are working if:** behaviour is deliberate rather than accidental, and gaps are
 visible instead of silent.
+
+That line used to end "behaviour is reproduced rather than reinvented" — the PORT's acceptance
+criterion, which "Hard constraints" above says was retired at cutover. It survived here, in the
+half of this document that shapes how an agent acts, and a section that says "reproduce" beats a
+constraint that says "evolve" every time.

@@ -268,7 +268,14 @@ func (s *scheduled) fillIfStreaming(menu string) {
 			boundary = d
 		}
 	}
-	stop, err := s.cache.FillFromStream(menu, cmd, keyOf, boundary)
+	// NO `Merge`, WHICH IS THE DECLARATION THAT THIS MENU HAS ONE OWNER. A
+	// second holder is refused rather than merged — thirteen of the fourteen
+	// streamed menus have exactly one consumer, and two collectors quietly
+	// sharing a channel is a real bug class. `/interface/monitor-traffic` is the
+	// exception and declares a merge rule; see collect/monitortraffic.go.
+	stop, err := s.cache.JoinStream(roscache.Join{
+		Menu: menu, Cmd: cmd, KeyOf: keyOf, Boundary: boundary,
+	})
 	if err != nil {
 		return // polling, which is what the subscription already does
 	}

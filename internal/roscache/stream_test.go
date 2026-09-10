@@ -75,13 +75,28 @@ func (p *pusher) lastCmd() routeros.Cmd {
 
 func byName(r routeros.Reply) string { return r["name"] }
 
+// fill is a single-owner stream fill: a Join with no Merge, which is how a menu
+// declares that it has one owner. See the note on `Join.Merge`.
 func fill(t *testing.T, c *Cache, menu string) func() {
 	t.Helper()
-	stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName, time.Hour)
+	stop, err := c.JoinStream(Join{
+		Menu: menu, Cmd: routeros.Cmd{Path: menu}, KeyOf: byName, Boundary: time.Hour,
+	})
 	if err != nil {
-		t.Fatalf("FillFromStream(%s): %v", menu, err)
+		t.Fatalf("JoinStream(%s): %v", menu, err)
 	}
 	return stop
+}
+
+// fillEvery was the timing-injection form; `StreamTimings` replaced it. This is
+// the same thing said through the public seam.
+func fillTimed(t *testing.T, c *Cache, menu string, keyOf func(routeros.Reply) string,
+	boundary, check, stale time.Duration) (func(), error) {
+	t.Helper()
+	c.StreamTimings(check, stale)
+	return c.JoinStream(Join{
+		Menu: menu, Cmd: routeros.Cmd{}, KeyOf: keyOf, Boundary: boundary,
+	})
 }
 
 // TestAStreamedMenuAnswersGetWithoutReading is the whole premise of B.1: the
@@ -186,8 +201,7 @@ func TestARowThatLeavesTheTableIsForgotten(t *testing.T) {
 func TestAQuietGapEndsTheRound(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
-		20*time.Millisecond, 5*time.Millisecond, time.Hour)
+	stop, err := fillTimed(t, c, "/interface/monitor-traffic", byName, 20*time.Millisecond, 5*time.Millisecond, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +271,7 @@ func TestTheSnapshotOrderIsStable(t *testing.T) {
 func TestARowsAreEventsMenuIsRefused(t *testing.T) {
 	c := New(&pusher{})
 	for _, menu := range []string{"/tool/ping", "/log/listen"} {
-		stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName, time.Hour)
+		stop, err := c.JoinStream(Join{Menu: menu, Cmd: routeros.Cmd{Path: menu}, KeyOf: byName, Boundary: time.Hour})
 		if err == nil {
 			stop()
 			t.Errorf("%s was accepted for stream-filling. Its rows are distinct "+
@@ -271,7 +285,7 @@ func TestARowsAreEventsMenuIsRefused(t *testing.T) {
 // bucket and the entry quietly becomes "the last row the router sent".
 func TestAFillNeedsAKeyFunction(t *testing.T) {
 	c := New(&pusher{})
-	if _, err := c.FillFromStream("/interface/print", routeros.Cmd{}, nil, time.Hour); err == nil {
+	if _, err := c.JoinStream(Join{Menu: "/interface/print", Cmd: routeros.Cmd{}, KeyOf: nil, Boundary: time.Hour}); err == nil {
 		t.Error("a fill with no key function was accepted")
 	}
 }
@@ -331,7 +345,7 @@ func TestStoppingAFillReleasesTheChannelAndFallsBackToReading(t *testing.T) {
 func TestARefusedStreamIsNotLeftRegistered(t *testing.T) {
 	p := &pusher{refuse: errors.New("no")}
 	c := New(p)
-	if _, err := c.FillFromStream("/x", routeros.Cmd{}, byName, time.Hour); err == nil {
+	if _, err := c.JoinStream(Join{Menu: "/x", Cmd: routeros.Cmd{}, KeyOf: byName, Boundary: time.Hour}); err == nil {
 		t.Fatal("a refused stream reported success")
 	}
 	if got := c.StreamedMenus(); len(got) != 0 {
@@ -345,7 +359,7 @@ func TestTheSameMenuIsNotFilledTwice(t *testing.T) {
 	c := New(&pusher{})
 	stop := fill(t, c, "/interface/monitor-traffic")
 	defer stop()
-	if _, err := c.FillFromStream("/interface/monitor-traffic", routeros.Cmd{}, byName, time.Hour); err == nil {
+	if _, err := c.JoinStream(Join{Menu: "/interface/monitor-traffic", Cmd: routeros.Cmd{}, KeyOf: byName, Boundary: time.Hour}); err == nil {
 		t.Error("a second fill of the same menu was accepted — two channels, one answer")
 	}
 }
@@ -363,8 +377,7 @@ func TestASilentChannelIsRestarted(t *testing.T) {
 	// A SMALL boundary, because staleness is now derived from it: a stream is
 	// silent when it has said nothing for two of its own intervals, never less
 	// than the floor. A one-hour boundary would put the watchdog two hours away.
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
-		2*time.Millisecond, 5*time.Millisecond, 20*time.Millisecond)
+	stop, err := fillTimed(t, c, "/interface/monitor-traffic", byName, 2*time.Millisecond, 5*time.Millisecond, 20*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,8 +418,7 @@ func TestASilentChannelIsRestarted(t *testing.T) {
 func TestAHealthyChannelIsNotRestarted(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
-		2*time.Millisecond, 5*time.Millisecond, 200*time.Millisecond)
+	stop, err := fillTimed(t, c, "/interface/monitor-traffic", byName, 2*time.Millisecond, 5*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +538,7 @@ func TestOnlyRowsThatAreNotReadingsAreRefused(t *testing.T) {
 	c := New(&pusher{})
 
 	for _, menu := range []string{"/tool/ping", "/log/listen"} {
-		stop, err := c.FillFromStream(menu, routeros.Cmd{Path: menu}, byName, time.Hour)
+		stop, err := c.JoinStream(Join{Menu: menu, Cmd: routeros.Cmd{Path: menu}, KeyOf: byName, Boundary: time.Hour})
 		if err == nil {
 			stop()
 			t.Errorf("%s was accepted. Its rows are distinct elements the collector "+
@@ -571,8 +583,7 @@ func unrollableForTest() map[string]string { return unrollable }
 func TestAnEmptiedTableEventuallyPublishesEmpty(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
-		5*time.Millisecond, 5*time.Millisecond, 15*time.Millisecond)
+	stop, err := fillTimed(t, c, "/interface/monitor-traffic", byName, 5*time.Millisecond, 5*time.Millisecond, 15*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,8 +621,7 @@ func TestAnEmptiedTableEventuallyPublishesEmpty(t *testing.T) {
 func TestARowEndsTheSilenceRun(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
-		5*time.Millisecond, 5*time.Millisecond, 30*time.Millisecond)
+	stop, err := fillTimed(t, c, "/interface/monitor-traffic", byName, 5*time.Millisecond, 5*time.Millisecond, 30*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,8 +658,7 @@ func TestASlowMenuIsNotCalledDeadOrEmpty(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
 	// A "slow" menu in miniature: a 300ms cadence against a 10ms floor.
-	stop, err := c.fillEvery("/interface/monitor-traffic", routeros.Cmd{}, byName,
-		300*time.Millisecond, 5*time.Millisecond, 10*time.Millisecond)
+	stop, err := fillTimed(t, c, "/interface/monitor-traffic", byName, 300*time.Millisecond, 5*time.Millisecond, 10*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,7 +687,7 @@ func TestASlowMenuIsNotCalledDeadOrEmpty(t *testing.T) {
 //
 // ── THE RACE THAT EMPTIED THE DHCP PAGE FOR TEN MINUTES ────────────────────
 //
-// `FillFromStream` returns when the channel is OPEN; the first row arrives some
+// `JoinStream` returns when the channel is OPEN; the first row arrives some
 // milliseconds later. The scheduler can deliver inside that window, and `Get`
 // answering "no rows" there is not a cheap wrong answer — it is published to the
 // collector, which builds an EMPTY payload, and the next delivery is a whole
@@ -727,7 +736,7 @@ func TestAnUnwarmedStreamFallsThroughToARead(t *testing.T) {
 //
 // `/interface/monitor-traffic` is the menu two collectors want, and they want
 // different things from it. These tests are about the merge, the fan-out and the
-// narrowing — everything `JoinStream` adds over `FillFromStream`.
+// narrowing — everything a Join with a Merge adds over one without.
 
 // splitList, joinList, sortStrings, atoiOr and itoa keep this file's merge rule
 // standing on the standard library the collectors will use, without importing
@@ -936,11 +945,14 @@ func TestARowHookIsNotCalledUnderTheFillLock(t *testing.T) {
 	}
 }
 
-// TestTheTwoStreamFormsRefuseToMix. `FillFromStream` is single-owner on purpose
-// — two collectors quietly fighting over one channel is a whole class of bug —
-// so sharing has to be opted into by BOTH holders rather than acquired by being
-// second.
-func TestTheTwoStreamFormsRefuseToMix(t *testing.T) {
+// TestAnUnsharedMenuRefusesASecondHolder.
+//
+// A `Join` with no `Merge` declares that this menu has one owner — two
+// collectors quietly fighting over one channel is a whole class of bug — so
+// sharing has to be opted into by BOTH holders rather than acquired by being
+// second. This was a separate entry point, `FillFromStream`, until phase 6.2
+// collapsed the two forms into one.
+func TestAnUnsharedMenuRefusesASecondHolder(t *testing.T) {
 	p := &pusher{}
 	c := New(p)
 	stop := fill(t, c, "/interface/monitor-traffic")
@@ -951,8 +963,9 @@ func TestTheTwoStreamFormsRefuseToMix(t *testing.T) {
 		Cmd:   routeros.Cmd{Path: "/interface/monitor-traffic"},
 		KeyOf: byName, Merge: mergeIfaces,
 	}); err == nil {
-		t.Error("JoinStream took over a menu held by FillFromStream; the single-owner " +
-			"guard is what stops two collectors sharing a channel by accident")
+		t.Error("a second holder took over a menu that declared no merge rule; the " +
+			"single-owner guard is what stops two collectors sharing a channel by " +
+			"accident")
 	}
 }
 
@@ -965,11 +978,8 @@ func TestJoinStreamRefusesWhatItCannotDo(t *testing.T) {
 		Cmd:   routeros.Cmd{Path: "/interface/monitor-traffic"},
 		KeyOf: byName, Merge: mergeIfaces,
 	}
-	noMerge := base
-	noMerge.Merge = nil
-	if _, err := c.JoinStream(noMerge); err == nil {
-		t.Error("a Join with no Merge was accepted")
-	}
+	// A nil Merge is no longer refused: it DECLARES a single-owner menu, which
+	// is what `TestAnUnsharedMenuRefusesASecondHolder` drives. Phase 6.2.
 	noKey := base
 	noKey.KeyOf = nil
 	if _, err := c.JoinStream(noKey); err == nil {

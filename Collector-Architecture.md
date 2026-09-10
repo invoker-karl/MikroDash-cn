@@ -14,6 +14,86 @@ failing, and a document nobody re-measures is exactly that defect in prose.
 
 ---
 
+## Working rules: risk appetite and the end state
+
+**These apply repo-wide, not only to the collector layer.** They live here because
+this file is gated and the plan documents are disposable.
+
+### The end state this is built toward
+
+MikroDash's collector layer exists to be **simple, efficient and uniform**. Those
+are three goals, not one with two decorations:
+
+| goal | what it means here | what violating it looks like |
+|---|---|---|
+| **simple** | one mechanism per job | two entry points for one thing, kept because unifying them is work |
+| **efficient** | fewer router channels, measured | a second channel on a menu already open |
+| **uniform** | every collector answers the same questions the same way | a collector with a hand-written exception nobody else has |
+
+**Efficiency is the only one of the three that a number can settle.** Simplicity
+and uniformity are judged by whether the next person has one shape to learn or
+several, and they are **first-class reasons to change a design** — equal with
+efficiency, not subordinate to it.
+
+### Risk appetite
+
+This app is in **active development**, not maintenance. The safety is mechanical:
+`sh tools/verify.sh`, the ledgers that fail in both directions, mutation testing
+and live verification. Those are the net. **Hesitation is not a net** — measured
+over one long session, stopping to reconsider prevented nothing that the gates did
+not already catch, while the gates caught everything that mattered.
+
+So: **bias toward making the change.** A change that is wrong and caught is
+cheaper than one that is never attempted.
+
+### Replacing is the default
+
+**In a system being rebuilt, preserving is what needs the justification.**
+
+- **Do not keep a mechanism with no instances** because a future caller might want
+  it. Delete it; git history holds the reasoning. Three empty maps were kept this
+  way — `keepAliveFor`, `roomlessCollectors`, `notRetunable` — each with a comment
+  explaining why the empty container was worth having. `keepAliveFor` has entries
+  and stays; the other two were deleted in phase 6.1, and the gates that read them
+  now assert the property directly.
+- **Do not keep two forms of one thing** because unifying them is work. If a new
+  shape supersedes an old one, migrate the callers and delete the old one in the
+  same change.
+- **The Node app is not a reference.** "A departure from live" is not a category
+  that requires defending. It was the acceptance criterion for the port, and the
+  port ended at the v0.8.0 cutover.
+- **Understanding a quirk before changing it is a step, not a veto.** Find out
+  whether it is load-bearing, say which you concluded, and then act on the answer.
+
+What survives from the old rule: **deliberate changes are fine, silent ones are
+not.** A change that moves the rendered page, the payload contract or an
+interaction belongs in the commit message and in `Changes.md`, with the gate you
+re-aimed and why.
+
+### What to ask about, and what not to
+
+The distinction is *what*, never *how often*.
+
+**Ask about the design.** The shape of a mechanism; a contract or payload change;
+anything with more than one reasonable end-state; and — this is the one that was
+missed — **any time a step's intent no longer matches the code.** Re-scoping a
+step is a design question, not a local decision.
+
+**Do not ask whether to proceed.** Permission to do work already agreed, or to
+continue to the next step, is not a design question.
+
+**Do not ask merely because a change is large, touches many files, or removes
+something old.** Those are the job.
+
+**Still always ask** before `git push`, a tag or a release; before anything that
+writes to a router; and before deleting operator data.
+
+### Measuring drift
+
+A step is checked against **the end state**, not against the step before it. When
+a plan's wording stops matching the code, that is a signal the goal moved or the
+plan was wrong — either way it is raised, not quietly re-scoped.
+
 ## The shape, in one picture
 
 ```
@@ -99,9 +179,13 @@ Two mechanisms make it safe:
   channel, so *silence surviving a deliberate restart* is evidence of an empty
   table rather than a broken one.
 
-A menu may be shared by two holders with different needs: `JoinStream` merges
-their commands — the union of the interfaces, the finest interval — and fans each
-row out to holders that asked for one. `/interface/monitor-traffic` is the case:
+**One entry point, `JoinStream`, and a `Join` declares whether the menu is
+shared.** A nil `Merge` means single-owner: thirteen of the fourteen streamed
+menus have exactly one consumer, and a second holder is *refused* rather than
+merged, because two collectors quietly fighting over one channel is a real bug
+class. A non-nil `Merge` means shared — it combines the holders' commands (the
+union of the interfaces, the finest interval) and each row is fanned out to
+holders that asked for one. `/interface/monitor-traffic` is the only shared menu:
 `ifStatus` wants a snapshot, `traffic` wants every packet, and they hold **one
 channel** between them.
 
@@ -170,13 +254,25 @@ and left.
 
 ### Demand
 
-`internal/server/demand.go` holds the whole rule:
+`Session.Wants` in `internal/session/needs.go` holds the whole rule, and it is
+stated **once**:
 
 > a collector runs if anybody is in any room it declares
 
 plus two consumers that occupy no room and never will: **alerting** (the rules are
 not in a room) and the **non-viewer holds** (a session kept alive for history, for
 the Devices page, or merely warm).
+
+**Two appliers ask it, and they differ only in when they act.**
+`internal/server/demand.go` applies it on browser events and defers a suspend by a
+grace period — a page refresh empties every room and refills it a second later.
+`Session.applyDemand` applies it when the session's own reasons change, which is
+already at the end of a grace.
+
+The session's applier returns early while a viewer is present, and that is not a
+second copy of the rule: it says **which applier owns the viewer case**, and the
+answer is the server, because the rooms are not joined yet when the session's
+version runs from the connect path.
 
 Every event that can change the answer re-asks it — a page focus, a page blur, a
 card blur, a router switch, and a socket closing. A suspend waits out a grace
@@ -230,7 +326,7 @@ Three, layered rather than competing:
 
 | gate | asks | where |
 |---|---|---|
-| **demand** | is anybody in a room it feeds, or does a hold need it | `internal/server/demand.go` |
+| **demand** | is anybody in a room it feeds, or does a hold need it | `Session.Wants`, applied from `internal/server/demand.go` and `Session.applyDemand` |
 | **enablement** | has the operator turned it off for this router | `Session.CollectorEnabled` |
 | **dormancy** | has it reported nothing for long enough to back off | `internal/dormancy` |
 
@@ -239,9 +335,11 @@ which knows nothing about dormancy cannot undo it. **`roslimit`** sits underneat
 all three, capping commands in flight per router.
 
 Two gates were retired. The **page-room switchboard** — a hand-written
-page→collector map — is replaced by demand. The **idle collector prune** is
-subsumed by demand, which now hears about a closing socket. The session's idle
-grace remains: it closes the router *connection*, which is a different question.
+page→collector map — is replaced by demand. The **idle collector prune**
+(`applyReasons`) asked the hold half of the same question for a session with no
+viewer; it is now `applyDemand` asking `Wants`, so there is one rule rather than
+two that happened to agree. The session's idle grace remains: it closes the router
+*connection*, which is a different question.
 
 ---
 

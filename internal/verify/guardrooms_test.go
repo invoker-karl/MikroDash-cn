@@ -52,9 +52,12 @@ func TestNoServerHandlerNamesARoomItself(t *testing.T) {
 
 	// And the derivation must actually be in use, or this check passes by
 	// looking at a package that no longer decides anything.
-	demand := stripGoComments(mustRead(t, filepath.Join(dir, "demand.go")))
-	if !strings.Contains(demand, "collect.DemandRooms(") {
-		t.Fatal("demand.go does not call collect.DemandRooms; the rule has stopped " +
+	// THE RULE MOVED TO internal/session IN 6.3. It was stated on both sides —
+	// the server asked about rooms, the session asked about holds, and for a
+	// session with no viewer those are the same question.
+	rule := stripGoComments(mustRead(t, filepath.Join(repoRoot(t), "internal", "session", "needs.go")))
+	if !strings.Contains(rule, "collect.DemandRooms(") {
+		t.Fatal("the demand rule no longer calls collect.DemandRooms; it has stopped " +
 			"deriving its rooms and this check would not notice")
 	}
 	if found == 0 {
