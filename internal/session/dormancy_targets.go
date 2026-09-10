@@ -295,6 +295,42 @@ func (s *Session) ResumeCollector(key string) {
 	}
 }
 
+// SuspendCollector stops one collector by key, the mirror of ResumeCollector.
+//
+// ── PHASE 4.2b: WHY THIS DID NOT EXIST UNTIL NOW ───────────────────────────
+//
+// Suspension was always driven by a hand-written case in `ws.go` that already
+// held the collector's own `Suspend` method as a closure, so a by-key form had
+// no caller. `applyDemand` asks the question for EVERY collector at once and
+// cannot hold twenty closures, so it needs the table -- which has carried both
+// halves since 3.3 and only ever exported one.
+//
+// NO DORMANCY CONSULTATION, deliberately, and that asymmetry is not an
+// oversight. `ResumeCollector` has to check dormancy because waking a dormant
+// collector without clearing the flag leaves the supervisor to re-suspend it on
+// its next tick. Suspending one that is already dormant is simply a no-op, and
+// telling the supervisor about it would be this layer forming an opinion about a
+// judgement that is not its own.
+func (s *Session) SuspendCollector(key string) {
+	if s == nil {
+		return
+	}
+	if t, ok := s.targets()[key]; ok && t.suspend != nil {
+		t.suspend()
+	}
+}
+
+// TargetKeys is every collector the session can start and stop by name.
+//
+// Exported for `applyDemand`, which must ask its question of all of them rather
+// than of the ones a switchboard happened to list. That difference is the whole
+// point: a collector missing from the old list was silently never gated.
+func TargetKeys() []string {
+	out := make([]string, len(targetKeys))
+	copy(out, targetKeys)
+	return out
+}
+
 // WakeForFocus is the live `_wakeForFocus`: somebody just opened the page this
 // collector feeds.
 //

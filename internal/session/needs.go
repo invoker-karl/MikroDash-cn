@@ -171,3 +171,31 @@ func (s *Session) applyReasons() {
 		t.suspend()
 	}
 }
+
+// NeededForHolds reports whether a NON-VIEWER reason wants this collector.
+//
+// ── PHASE 4.2b: THE VIEWER'S HALF MOVED OUT ────────────────────────────────
+//
+// `Needs` answers "given why this session is alive, does this collector run",
+// and its first line is `if why.Viewer { return true }` -- a viewer wants
+// everything, because until now a viewer's demand had no finer expression than
+// "somebody is looking at this router".
+//
+// 4.2b gives it one: a viewer wants the collectors whose ROOMS they occupy. So
+// the demand rule asks occupancy for the viewer half and this for the rest, and
+// the two are no longer the same question.
+//
+// THE HOLDS ARE UNCHANGED and deliberately so. Alerting is not in a room and
+// never will be; a session held for history or warm has no viewer at all. Those
+// consumers cannot be expressed as occupancy and must not be.
+func (s *Session) NeededForHolds(key string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	why := s.reasonsLocked()
+	s.mu.Unlock()
+	// The viewer half is the caller's question now, not this one's.
+	why.Viewer = false
+	return Needs(key, why)
+}
