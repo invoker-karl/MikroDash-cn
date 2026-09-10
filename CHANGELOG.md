@@ -2,6 +2,85 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.8.50] - The collector rewrite: MikroDash asks your routers a lot less
+
+This release rebuilds how MikroDash gets data out of your routers. Nothing about
+the pages changes, but almost everything behind them does, and the result is a
+dashboard that is lighter on your hardware and quicker to fill in.
+
+**Why it mattered.** MikroDash used to have every collector run its own timer and
+ask the router for whatever it needed, whenever it felt like it. Two collectors
+that wanted the same table asked twice. A page you were not looking at kept
+asking anyway. A router nobody had open still ran the full set. RouterOS limits
+how many things can talk to it at once, so all of that competed for the same
+narrow pipe, and on a busy device it showed as pages that filled slowly.
+
+**What it does now.** Collectors say what they need rather than going and getting
+it. One reader per router works out what is due, asks once, and hands the answer
+to everyone who wanted it. Where RouterOS can push updates instead of being
+polled, it does. And nothing runs unless something is actually watching it.
+
+**Measured on a four router fleet, sitting idle: 270 commands a minute down to
+81.** The router being viewed went from 95 to 47.
+
+### Added
+
+- **Device names and IP addresses in more places.** MikroDash now reads the ARP
+  table, which is what connects an IP address to a device. WiFi Clients shows each
+  client's address; Connections can name a device whose DHCP lease is filed under
+  a different address, and shows its MAC either way; Network Topology can locate
+  a neighbour that does not announce an address of its own.
+- **Reverse DNS as a last resort for naming.** A device with a fixed address and
+  no DHCP lease, typically a printer or a server, is looked up by name and appears
+  as that name rather than as a bare MAC.
+- **The Stream / Poll switch does something now.** It has been in the device
+  dialog since the rewrite and nothing read it. Fourteen menus can now be pushed
+  by the router instead of polled, and the switch chooses per device. Both modes
+  honour the same interval slider, so choosing Poll never silently means slower.
+- **`Collector-Architecture.md`**, a plain description of how the collector layer
+  works and why. It is checked by the test suite, so it cannot quietly go out of
+  date.
+
+### Changed
+
+- **Collectors stop when nobody is looking.** Close a page and its collector
+  stops; open it and it starts. This used to be a hand written list of which page
+  meant which collector, and it disagreed with reality five separate times, each
+  one a dashboard card that silently stopped updating.
+- **Routers you are not viewing cost almost nothing.** A device kept online only
+  for alerting runs the handful of collectors the alert rules need, not all of
+  them. One kept online only so the Devices page can say "up" runs none at all.
+- **Two collectors wanting the same table now cost one read.** Connections and
+  Bandwidth share the connection table; Interfaces and the traffic graph share one
+  channel where they used to open two.
+- **Interface rates are read from a live channel** rather than measured by
+  repeatedly asking. That alone removed 52 commands a minute per router.
+- **Ping honours the interval you set.** RouterOS silently ignores a ping interval
+  above five seconds; a 30 second setting delivered a ping every five. Above five
+  seconds MikroDash now polls instead, so the setting means what it says.
+
+### Fixed
+
+- **The Devices page showed no WAN RX/TX.** Three separate causes, including one
+  that hid because most routers use the default interface name and matched by
+  accident.
+- **Dashboard cards that stopped updating** after you visited the page they share
+  a collector with and navigated away.
+- **A closed browser tab left collectors running** until the connection timed out.
+- **The DHCP and Connections pages could lose their device names** on a router
+  where the lease table is keyed by a different address than the one in use.
+- **The ARP poll interval setting was saved, validated and read by nothing.**
+
+### Internal
+
+- Three layer split: acquisition, derivation and views. Every collector's
+  rows-to-payload step is now a plain function that can be tested without a
+  router.
+- 58 static self checks, all failing in both directions: an unrecorded gap fails,
+  and so does a recorded gap that has since closed.
+- The behavioural guidelines were rewritten after they were measured causing
+  harm, and the risk appetite is now stated rather than implied.
+
 ## [0.8.21] - The IPv6 firewall, and the WebSocket works behind a reverse proxy again
 
 The Firewall page gains IPv6, per device and fully editable. MikroDash can be reached
