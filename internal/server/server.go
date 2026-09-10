@@ -167,6 +167,11 @@ type Server struct {
 	// leaves a collector's rooms. Zero means session.DefaultIdleGrace; only
 	// tests set it, because two minutes is not a thing a test can wait for.
 	idleGrace time.Duration
+	// suspendOne replaces `(*session.Session).SuspendCollector` in
+	// `suspendAfterGrace`. Nil in production; only tests set it, for the reason
+	// that helper records — a Session a unit test can build has no collectors
+	// behind the table, so the real call panics rather than reporting anything.
+	suspendOne func(rs *session.Session, key string)
 
 	// changelog fetches RouterOS release notes for the Update dialog. One per
 	// server so its cache is shared across sockets — a changelog is immutable

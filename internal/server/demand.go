@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"mikrodash/internal/collect"
 	"mikrodash/internal/session"
 )
@@ -56,7 +58,14 @@ func (s *Server) wantsCollector(rs *session.Session, routerID, key string) bool 
 	if rs.NeededForHolds(key) {
 		return true
 	}
-	return s.roomsOccupied(routerID, collect.RoomsOf(key))
+	// ── DemandRooms, NOT RoomsOf ────────────────────────────────────────────
+	//
+	// The audience plus the rooms this collector must stay alive FOR. `ifStatus`
+	// is the case: it emits to Interfaces, Topology and the Physical Ports card,
+	// and four more pages borrow its rates without it ever sending them anything.
+	// Asking `RoomsOf` here would suspend it for a viewer on Bridges and blank
+	// every throughput column on the page.
+	return s.roomsOccupied(routerID, collect.DemandRooms(key))
 }
 
 // applyDemand brings every collector's running state into line with who is
@@ -84,6 +93,54 @@ func (s *Server) applyDemand(rs *session.Session, routerID string) {
 			rs.ResumeCollector(key)
 			continue
 		}
-		rs.SuspendCollector(key)
+		s.suspendAfterGrace(rs, routerID, key)
 	}
+}
+
+// suspendAfterGrace stops a collector that nothing wants, a grace period later.
+//
+// ── THE GRACE IS INHERITED, AND IT IS NOT A REFINEMENT ─────────────────────
+//
+// `suspendIfNoRoomOccupied`, which this replaces, waited `s.graceFor()` before
+// suspending and re-read the occupancy when the timer fired. Its reason applies
+// unchanged: a page refresh empties every room this viewer was in and refills
+// them a second later, and suspending on the empty moment stops the collector's
+// stream and starts it again immediately -- churn on the one resource this
+// project conserves, API channels, to save one second of polling.
+//
+// A page NAVIGATION is the same shape and is now far more common a trigger,
+// because demand re-asks about every collector on every focus rather than about
+// one page's collectors on a blur.
+//
+// THE QUESTION IS RE-ASKED WHEN THE TIMER FIRES, which is what makes this safe
+// without tracking timers. Several may be in flight after rapid navigation; each
+// re-asks, and all but the last find the collector wanted again and do nothing.
+// A viewer who did not come back has their collector suspended late rather than
+// never.
+//
+// It re-asks `wantsCollector` rather than re-reading the rooms, so a hold or an
+// alert rule acquired during the grace is seen too -- the old timer read
+// occupancy alone and would have suspended through one.
+func (s *Server) suspendAfterGrace(rs *session.Session, routerID, key string) {
+	time.AfterFunc(s.graceFor(), func() {
+		if s.wantsCollector(rs, routerID, key) {
+			return
+		}
+		// THE SEAM, and it is the same kind as `idleGrace` beside it: a field
+		// only a test sets. `SuspendCollector` reaches every collector in the
+		// session through a table of method values, so it cannot be called on a
+		// Session a unit test can construct -- and the property worth asserting
+		// here is not what Suspend does, it is that this timer re-asks and then
+		// acts.
+		if s.suspendOne != nil {
+			s.suspendOne(rs, key)
+			return
+		}
+		// NO "IS THE SESSION STILL LIVE?" CHECK, for the reason the helper this
+		// replaces recorded: suspending a collector on a torn-down session is
+		// inert, so the guard bought nothing and dereferenced the Manager on a
+		// timer goroutine, where a nil is a dead process rather than a failed
+		// request.
+		rs.SuspendCollector(key)
+	})
 }

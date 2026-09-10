@@ -20,6 +20,7 @@ package session
 // which is exactly the thing netwatch lacked.
 
 import (
+	"mikrodash/internal/collect"
 	"mikrodash/internal/hub"
 	"mikrodash/internal/store"
 	"os"
@@ -121,19 +122,32 @@ func TestEveryCollectorHasAPathThatStartsIt(t *testing.T) {
 		// ── THE FUNNEL IS A START PATH TOO (added 2026-08-28) ───────────────
 		//
 		// `ws.go` used to call `cn.rsession.X().Resume()` directly at twenty
-		// sites, each behind its own `CollectorEnabled` check. They now go
+		// sites, each behind its own `CollectorEnabled` check. They then went
 		// through `Session.ResumeCollector(key)`, which is the live
 		// `_resumeCollector` — one place that checks enabled AND consults the
 		// dormancy veto, so "a gate that knows nothing about dormancy cannot
 		// undo it".
 		//
 		// This gate went red the moment those calls disappeared, which is it
-		// working: the path really did change. Taught rather than relaxed — the
-		// key must be BOTH passed to the funnel in internal/server and present in
-		// `targetKeys`, because an unknown key is a silent no-op.
-		// `TestEveryKeyWsPassesIsInTheTable` pins the second half.
+		// working: the path really did change. Taught rather than relaxed.
+		//
+		// ── AND IT WENT RED AGAIN ON 2026-09-10, FOR THE SAME REASON ────────
+		//
+		// Phase 4.2b deleted the twenty literal keys as well. `applyDemand`
+		// iterates `TargetKeys()` and hands each key to the same funnel, so the
+		// start path is now: the collector has an AUDIENCE, and its key is in the
+		// TABLE. Both halves are required and both are checkable here, which is
+		// what keeps this from being a relaxation:
+		//
+		//	no audience   no room can ever want it, so demand never starts it
+		//	not in table  applyDemand never asks about it, and the funnel would
+		//	              treat the key as an unknown no-op
+		//
+		// `internal/server`'s TestEveryGatedCollectorDeclaresARoom and this
+		// package's TestEveryCollectorWithAnAudienceIsInTheTable pin the two
+		// directions independently.
 		if k := dormancyKeyFor(name); k != "" &&
-			regexp.MustCompile(`ResumeCollector\("`+k+`"\)`).MatchString(srv) {
+			len(collect.DemandRooms(k)) > 0 && inTargetTable(k) {
 			continue
 		}
 		unstarted = append(unstarted, name)
@@ -149,6 +163,18 @@ func TestEveryCollectorHasAPathThatStartsIt(t *testing.T) {
 			"no accessor call in internal/server either. A collector reachable only from "+
 			"Reconnected() polls nothing until the connection drops and returns.", name, name)
 	}
+}
+
+// inTargetTable reports whether `applyDemand` can reach this key at all. A key
+// outside it is a silent no-op in `ResumeCollector`, which is the failure the
+// start-path check above must not accept as a start.
+func inTargetTable(key string) bool {
+	for _, k := range targetKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 // TestTheNotPolledListIsStillTrue — an entry that gained a Start must leave,

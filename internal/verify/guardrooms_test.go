@@ -1,50 +1,85 @@
 package verify
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// TestNoBlurGuardNamesARoomItself is the other half of 4.2's completeness rule.
+// TestNoServerHandlerNamesARoomItself is the other half of 4.2's completeness
+// rule, carried forward through the switchboard's deletion.
 //
-// ── WHAT THIS REPLACED, AND WHY THE REPLACEMENT IS BETTER ───────────────────
+// ── WHAT IT REPLACED, TWICE ─────────────────────────────────────────────────
 //
-// Until 4.2 this test compared two lists: the rooms `pageBlur` waited on, spelled
-// out by hand at each call site, against the rooms the collector emitted to. They
-// had disagreed FIVE times — dhcpNetworks, bandwidth, vpn, firewall, and routing
-// on 2026-08-31 — each time as a dashboard card that silently stopped updating
-// for anybody who had visited the owning page and left.
+// Until 4.2 it compared two lists: the rooms `pageBlur` waited on, spelled out by
+// hand at each call site, against the rooms the collector emitted to. They had
+// disagreed FIVE times — dhcpNetworks, bandwidth, vpn, firewall, and routing on
+// 2026-08-31 — each time as a dashboard card that silently stopped updating for
+// anybody who had visited the owning page and left.
 //
-// Comparing them was the best available check while there were two lists. Now
-// there is one: `collect.Others(collector, blurredPage)` derives the wait list
-// from the declaration, so the two CANNOT disagree.
+// 4.2 made the wait list derived, so the two could not disagree, and this test
+// became a refusal: no call site may go back to writing its own list. 4.2b
+// deleted the call sites entirely — there is one question now,
+// `collect.DemandRooms(key)`, asked in one place. The refusal is unchanged and
+// simply covers more ground: no handler in `internal/server` may name a room a
+// collector feeds.
 //
-// What is left to check is COMPLETENESS — that no call site went back to writing
-// its own list. That is a weaker-sounding property and a stronger position: the
-// old check could only catch a disagreement after somebody wrote one, and this
-// one refuses the shape that makes disagreement possible.
-func TestNoBlurGuardNamesARoomItself(t *testing.T) {
-	src := mustRead(t, filepath.Join(repoRoot(t), "internal", "server", "ws.go"))
+// A weaker-sounding property and a stronger position, for the reason 4.2 gave:
+// the old check could only catch a disagreement after somebody wrote one, and
+// this one refuses the shape that makes disagreement possible.
+func TestNoServerHandlerNamesARoomItself(t *testing.T) {
+	dir := filepath.Join(repoRoot(t), "internal", "server")
 
-	// A room literal handed to the suspend helper, in either of its two forms.
-	lit := regexp.MustCompile(`suspendIfNoRoomOccupied\([^)]*\[\]string\{`)
-	flat := strings.Join(strings.Fields(stripGoComments(src)), " ")
-	if m := lit.FindAllString(flat, -1); len(m) > 0 {
-		t.Errorf("%d blur guard(s) still name their own rooms: %v\n"+
-			"Rooms are declared in internal/collect/rooms.go and the wait list comes "+
-			"from collect.Others(). A hand-written list here is the second statement "+
-			"that this phase removed, and it is how a card silently stops updating.",
-			len(m), m)
+	// A `page-` or `dash-card-` room written as a literal. The room PREFIX
+	// (`"router-" + routerID + "-page-" + page`) is how a handler joins and
+	// leaves its own room and is not what this forbids — that is a room name
+	// being BUILT, not a collector's audience being restated.
+	lit := regexp.MustCompile(`"(page-[a-z-]+|dash-card-[a-z]+)"`)
+
+	found := 0
+	for _, name := range goFilesIn(t, dir) {
+		flat := stripGoComments(mustRead(t, filepath.Join(dir, name)))
+		for _, m := range lit.FindAllStringSubmatch(flat, -1) {
+			found++
+			t.Errorf("%s names the room %q. Rooms are declared in "+
+				"internal/collect/rooms.go and demand reads collect.DemandRooms(); a "+
+				"literal here is the second statement that phase 4.2 removed, and it "+
+				"is how a card silently stops updating.", name, m[1])
+		}
 	}
 
 	// And the derivation must actually be in use, or this check passes by
-	// looking at a file that no longer guards anything.
-	if n := strings.Count(flat, "collect.Others("); n < 8 {
-		t.Errorf("ws.go calls collect.Others %d times, expected at least 8. The guards "+
-			"have stopped deriving their rooms and this check would not notice.", n)
+	// looking at a package that no longer decides anything.
+	demand := stripGoComments(mustRead(t, filepath.Join(dir, "demand.go")))
+	if !strings.Contains(demand, "collect.DemandRooms(") {
+		t.Fatal("demand.go does not call collect.DemandRooms; the rule has stopped " +
+			"deriving its rooms and this check would not notice")
 	}
+	if found == 0 {
+		t.Logf("no room literal in %d server files", len(goFilesIn(t, dir)))
+	}
+}
+
+// goFilesIn lists a package's non-test .go files. `goFiles` in
+// blur_suspend_test.go does the same thing; this one exists because that file
+// may be re-aimed again and a shared helper between two audits is a coupling
+// neither wants.
+func goFilesIn(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	var out []string
+	for _, e := range ents {
+		n := e.Name()
+		if !e.IsDir() && strings.HasSuffix(n, ".go") && !strings.HasSuffix(n, "_test.go") {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // stripGoComments drops // lines, so a comment describing the shape this test

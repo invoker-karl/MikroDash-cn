@@ -61,9 +61,20 @@ elif ! command -v docker >/dev/null 2>&1; then
   skipped=$((skipped + 1))
   note '  NO DOCKER, NOT checked: gofmt, go vet, go test, tsgen'
 else
+  # ── THE BUILD CACHE IS MOUNTED, AND IT IS THE DIFFERENCE BETWEEN 110s AND 1s
+  #
+  # `mikrodash-gomod` has been here since the start and caches the DOWNLOADS. It
+  # does nothing for compilation: a fresh container has an empty
+  # /root/.cache/go-build, so every run rebuilt the whole tree and the test half
+  # of this sweep took a minute and three quarters. With the cache volume, a run
+  # that changed one file finishes in about a second.
+  #
+  # LIKE `mikrodash-gomod`, THIS VOLUME LOOKS UNUSED BETWEEN RUNS. CLAUDE.md's
+  # standing rule covers it: never `docker volume prune` on this daemon.
   out=$(docker run --rm \
     -v "$PWD":/src -w /src \
     -v mikrodash-gomod:/go/pkg/mod \
+    -v mikrodash-gocache:/root/.cache/go-build \
     golang:1.25-alpine \
     sh -c 'set -e
       unformatted=$(gofmt -l .)

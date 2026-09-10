@@ -99,11 +99,17 @@ func TestTheAlertFeedIsStartedBecauseAlertingIsOn(t *testing.T) {
 		t.Error("vpn and routing are no longer started under the alertsEnabled gate, so " +
 			"the alert feed is back to depending on which page somebody opened")
 	}
-	// And the suspend side, which is the other half: a page blur must not stop a
-	// collector the rules still need.
-	ws := stripGoComments(mustRead(t, filepath.Join(repoRoot(t), "internal", "server", "ws.go")))
-	if !strings.Contains(strings.Join(strings.Fields(ws), " "), "rs.NeededForAlerts(key)") {
-		t.Error("the blur guard no longer asks NeededForAlerts, so blurring the VPN page " +
-			"suspends a collector four of the six rules depend on")
+	// And the suspend side, which is the other half: navigating away must not
+	// stop a collector the rules still need.
+	//
+	// IT MOVED IN 4.2b, from `suspendIfNoRoomOccupied` in ws.go to
+	// `wantsCollector` in demand.go. The question is the same and the reason it
+	// has to be asked is stronger now: demand asks about EVERY collector on every
+	// focus and blur, so a rule whose feed occupies no room would be suspended by
+	// somebody merely opening a page, not only by leaving the one it feeds.
+	dem := stripGoComments(mustRead(t, filepath.Join(repoRoot(t), "internal", "server", "demand.go")))
+	if !strings.Contains(strings.Join(strings.Fields(dem), " "), "rs.NeededForAlerts(key)") {
+		t.Error("the demand rule no longer asks NeededForAlerts, so navigating away from " +
+			"the VPN page suspends a collector four of the six rules depend on")
 	}
 }

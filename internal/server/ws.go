@@ -824,17 +824,35 @@ func (cn *conn) rejoinPage() {
 	cn.pageFocus(page)
 }
 
-// resumePage wakes a page's collectors and replays their last payloads.
+// resumePage re-applies demand and replays this page's last payloads.
 //
 // Split out of pageFocus so a DASHBOARD CARD can do the same thing without
 // joining the page room. A card is the only view some collectors get — the
 // Firewall card on a dashboard is, for a viewer who never opens the Firewall
 // page, the whole reason that collector should be running — so the wake has to
 // be the same one, not an approximation of it.
+//
+// ── PHASE 4.2b: IT NO LONGER KNOWS WHICH COLLECTORS THE PAGE HAS ───────────
+//
+// This held 21 `ResumeCollector` calls in a `switch page`, and `pageBlur` held
+// 19 matching suspends. That switchboard stated a fact `internal/collect/rooms.go`
+// already declares — which collector feeds which room — and stating it twice went
+// wrong five times, each one a dashboard card that silently stopped updating.
+//
+// The caller has already joined the room by the time this runs, in BOTH paths:
+// `pageFocus` joins `page-<key>` and `dashCardFocus` joins `dash-card-<key>`. So
+// `applyDemand` sees the new occupant and starts whatever it implies, without
+// this function knowing anything about collectors.
+//
+// WHAT IS LEFT HERE IS THE REPLAY, and it is genuinely page-shaped: which
+// payloads this page needs to render, in which order, with which caps frame in
+// front of them. That cannot come from a room declaration, and it is why this
+// switch still exists.
 func (cn *conn) resumePage(page string) {
 	if cn.rsession == nil {
 		return
 	}
+	cn.srv.applyDemand(cn.rsession, cn.routerID)
 	// Opening a page is the cheapest re-probe available and by far the most
 	// timely; and without the replay the page sits blank for a whole poll
 	// interval on every visit. The replayed `ts` is stamped now, matching the
@@ -855,14 +873,20 @@ func (cn *conn) resumePage(page string) {
 	case "dashboard":
 		// ── THE DASHBOARD CARDS, REPLAYED ───────────────────────────────────
 		//
-		// These three are emitted to `page-dashboard` by collectors that run
-		// from CONNECT, not from focus — so opening the Dashboard replayed
-		// nothing and the cards stayed empty until the next tick, which for
-		// netwatch and talkers is up to a minute. The live app sends all three
-		// in `sendInitialState`.
+		// Opening the Dashboard replayed nothing and the cards stayed empty
+		// until the next tick, which for netwatch and talkers is up to a minute.
+		// The live app sends all three in `sendInitialState`.
 		//
 		// Found by the initial-state audit, alongside the four
 		// router-wide chrome events replayed on the handshake.
+		//
+		// PHASE 4.2b MADE THE REPLAY MATTER MORE, not less. This paragraph used
+		// to say these three "run from CONNECT, not from focus", which was the
+		// reason there was nothing to wake and only something to replay. It is
+		// no longer true: `netwatch` and `talkers` declare `page-dashboard` and
+		// nothing else, so under demand they are suspended until somebody opens
+		// this page — and the payload replayed here is the last one from before
+		// that suspension.
 		if last := cn.rsession.Netwatch().Last(); last != nil {
 			cn.srv.hub.Send(cn.c, "netwatch:update", last)
 		}
@@ -876,16 +900,14 @@ func (cn *conn) resumePage(page string) {
 		}
 		// ── ROUTES AND BGP PEERS ────────────────────────────────────────────
 		//
-		// Unlike the three above, `routing` does NOT run from connect: it is
-		// page-gated, and its only gate was the Routing page. So the Dashboard
-		// has to wake it the way a card focus wakes a card's collector -- and
-		// then replay, or both cards show em dashes until the next tick, which
-		// is up to 60s.
+		// `routing` is fed to two rooms — the Routing page and this one — and
+		// declaring the second is what starts it for a Dashboard viewer. It used
+		// to take an explicit `ResumeCollector("routing")` here, added when the
+		// cards were built and matched by a guarded suspend in `pageBlur`; both
+		// are gone, and the room declaration does the whole job.
 		//
-		// `ResumeCollector` is the right funnel rather than touching the loop
-		// directly: it honours the operator's per-collector enable switch, and
-		// it latches when the router is not connected yet.
-		cn.rsession.ResumeCollector("routing")
+		// The replay is still needed, and for the same reason: without it both
+		// cards show em dashes until the next tick, which is up to 60s.
 		if last := cn.rsession.Routing().Last(); last != nil {
 			cn.srv.hub.Send(cn.c, "routing:update", last)
 		}
@@ -907,63 +929,54 @@ func (cn *conn) resumePage(page string) {
 			}
 		}
 	case "dns":
-		cn.rsession.ResumeCollector("dns")
 		if last := cn.rsession.DNS().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "dns:update", replay)
 		}
 	case "bridges":
-		cn.rsession.ResumeCollector("bridges")
 		if last := cn.rsession.Bridges().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "bridges:update", replay)
 		}
 	case "vlans":
-		cn.rsession.ResumeCollector("vlans")
 		if last := cn.rsession.Vlans().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "vlans:update", replay)
 		}
 	case "wan":
-		cn.rsession.ResumeCollector("wan")
 		if last := cn.rsession.Wan().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "wan:update", replay)
 		}
 	case "packages":
-		cn.rsession.ResumeCollector("packages")
 		if last := cn.rsession.Packages().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "packages:update", replay)
 		}
 	case "routing":
-		cn.rsession.ResumeCollector("routing")
 		if last := cn.rsession.Routing().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "routing:update", replay)
 		}
 	case "ppp":
-		cn.rsession.ResumeCollector("ppp")
 		if last := cn.rsession.PPP().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "ppp:update", replay)
 		}
 	case "vpn":
-		cn.rsession.ResumeCollector("vpn")
 		if last := cn.rsession.VPN().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "vpn:update", replay)
 		}
 	case "users":
-		cn.rsession.ResumeCollector("rosusers")
 		// The caps go FIRST. The page draws its buttons from `permitted`, and a
 		// payload arriving before them renders a read-only table that then has to
 		// be redrawn — visible as a flicker on every visit.
@@ -977,16 +990,17 @@ func (cn *conn) resumePage(page string) {
 			cn.srv.hub.Send(cn.c, "rosusers:update", replay)
 		}
 	case "capsman":
-		cn.rsession.ResumeCollector("capsman")
 		if last := cn.rsession.Capsman().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "capsman:update", replay)
 		}
-	// interfaceStatus is NOT suspended on blur — three other collectors take it
-	// as their rate source, and a bridges viewer who never opens Interfaces
-	// would otherwise see every throughput column go blank. Opening the page
-	// still replays the last payload so it is not empty for a whole poll.
+	// interfaceStatus is the RATE SOURCE for five other collectors, so a bridges
+	// viewer who never opens this page would otherwise see every throughput
+	// column go blank. That used to be handled by never gating it at all; it is
+	// `keepAliveFor["ifStatus"]` in internal/collect/rooms.go now, which gates it
+	// on the four borrowing pages as well as its own. Opening the page still
+	// replays the last payload so it is not empty for a whole poll.
 	case "interfaces":
 		if last := cn.rsession.IfStatus().Last(); last != nil {
 			replay := *last
@@ -1002,17 +1016,16 @@ func (cn *conn) resumePage(page string) {
 	// viewer who is not looking at the map should not be making the router ping
 	// two dozen devices.
 	case "network-topology":
-		cn.rsession.ResumeCollector("topology")
 		if last := cn.rsession.Topology().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "topology:update", replay)
 		}
-	// Page-gated, and it OWNS the connection-table read that bandwidth also
-	// consumes — so opening either page starts it, and it is suspended only when
-	// neither is being watched.
+	// Page-gated. It USED to own the connection-table read that bandwidth also
+	// consumed, which is why opening either page started it; both subscribe to
+	// `/ip/firewall/connection/print` separately now and share one channel at the
+	// cache, so each holds its own demand and this page starts only this one.
 	case "connections":
-		cn.rsession.ResumeCollector("conns")
 		if last := cn.rsession.Conns().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
@@ -1021,17 +1034,12 @@ func (cn *conn) resumePage(page string) {
 	// Page-gated, and the gate matters more here than on most: this collector
 	// reads a table that can hold thousands of rows, and nothing else needs it.
 	case "bandwidth":
-		// The connection table is the input to BOTH, so opening Bandwidth has to
-		// start the collector that reads it.
-		cn.rsession.ResumeCollector("conns")
-		cn.rsession.ResumeCollector("bandwidth")
 		if last := cn.rsession.Bandwidth().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "bandwidth:update", replay)
 		}
 	case "wifi-clients":
-		cn.rsession.ResumeCollector("wireless")
 		if last := cn.rsession.Wireless().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
@@ -1042,14 +1050,12 @@ func (cn *conn) resumePage(page string) {
 			cn.srv.hub.Send(cn.c, "logs:history", last)
 		}
 	case "wifi-networks":
-		cn.rsession.ResumeCollector("wifi")
 		if last := cn.rsession.Wifi().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
 			cn.srv.hub.Send(cn.c, "wifi:update", replay)
 		}
 	case "firewall":
-		cn.rsession.ResumeCollector("firewall")
 		// BEFORE the replay, so the first payload the page receives already
 		// says whether this router does IPv6 and the tab does not flicker in.
 		// One read of /ipv6/settings, cached for the connection; ProbeV6 is a
@@ -1063,7 +1069,6 @@ func (cn *conn) resumePage(page string) {
 			cn.srv.hub.Send(cn.c, "firewall:update", replay)
 		}
 	case "queues":
-		cn.rsession.ResumeCollector("queues")
 		// Caps first, for the reason Router Users gives: the page draws its
 		// buttons from `permitted`, and a payload arriving before them renders a
 		// read-only table that then has to be redrawn.
@@ -1081,11 +1086,13 @@ func (cn *conn) resumePage(page string) {
 		// carries the pool size the gauge divides by, and the leases handler
 		// redraws the gauge as its last act. Replaying the leases first would
 		// draw a gauge against a pool size of zero until the next tick.
-		cn.rsession.ResumeCollector("dhcpNetworks")
-		cn.rsession.ResumeCollector("dhcpLeases")
+		//
+		// `dhcpLeases` emits ROUTER-WIDE and so declares no audience of its own;
+		// it is `keepAliveFor["dhcpLeases"]` in internal/collect/rooms.go that
+		// makes a viewer on this page demand it.
 		// ── NOTHING TO REPLAY MEANS READ, NOT WAIT ────────────────────────
 		//
-		// `Resume` above is `poll.start()`, which waits out the REMAINDER of the
+		// The resume `applyDemand` performs is `poll.start()`, which waits out the REMAINDER of the
 		// interval rather than firing -- deliberately, so page navigation cannot
 		// generate a request per visit. Both these collectors poll every 600s,
 		// so when there is no last payload to replay that gate turns into a TEN
@@ -1140,105 +1147,28 @@ func (cn *conn) pageBlur(page string) {
 	if cn.routerID == "" {
 		return
 	}
-	room := "router-" + cn.routerID + "-page-" + page
-	cn.srv.hub.Leave(cn.c, room)
-	// The finer gate: stop reading for a page whose last viewer just left. The
-	// idle gate in Manager.Release still handles "nobody is watching the router
-	// at all"; this is for somebody who is here but looking elsewhere.
-	if cn.rsession == nil || cn.srv.hub.Occupants(room) != 0 {
-		return
-	}
-	switch page {
-	case "dns":
-		cn.rsession.DNS().Suspend()
-	case "bridges":
-		cn.rsession.Bridges().Suspend()
-	case "vlans":
-		cn.rsession.Vlans().Suspend()
-	case "wan":
-		cn.rsession.Wan().Suspend()
-	case "packages":
-		cn.rsession.Packages().Suspend()
-	case "routing":
-		// The dashboard's Routes and BGP Peers cards read this collector as of
-		// 2026-08-31, so a Routing-page blur no longer means nobody is watching.
-		// `blur-suspend-audit` caught this the moment the second room was added,
-		// which is the third time it has caught exactly this consequence
-		// (dhcpNetworks, bandwidth, vpn, firewall before it).
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "routing",
-			collect.Others("routing", "routing"), cn.rsession.Routing().Suspend)
-	case "dhcp":
-		// dhcpNetworks also feeds the dashboard's Network card AND the
-		// router-wide `lan:wan` chip, which is on every page — so it is
-		// suspended only when nobody is looking at either.
-		//
-		// THE ROUTER-WIDE ROOM IS NOT LISTED, and cannot be: it is the empty
-		// room, which every viewer of this router occupies, so testing it would
-		// mean never suspending at all. The dashboard card is the proxy — the
-		// chip is chrome fed by the same payload, and a viewer on any page has
-		// the value the handshake replayed. Recorded because it is a judgement,
-		// not a mechanism.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "dhcpNetworks",
-			collect.Others("dhcpNetworks", "dhcp"), cn.rsession.DHCPNetworks().Suspend)
-		cn.rsession.DHCPLeases().Suspend()
-	case "dashboard":
-		// ── THE OTHER HALF OF THE ROUTING GUARD ─────────────────────────────
-		//
-		// pageBlur had NO dashboard case, and did not need one: every collector
-		// feeding a dashboard card ran from CONNECT, so there was nothing a blur
-		// could usefully stop.
-		//
-		// `routing` broke that assumption. It is page-gated, and the Dashboard
-		// now wakes it for the Routes and BGP Peers cards -- so without this, a
-		// viewer who glanced at the dashboard once left it polling the router
-		// forever, on a box where concurrent channels are the documented
-		// bottleneck. Suspended only when the Routing page is not also open.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "routing",
-			collect.Others("routing", "dashboard"), cn.rsession.Routing().Suspend)
-	case "ppp":
-		cn.rsession.PPP().Suspend()
-	case "vpn":
-		// The dashboard's VPN card reads the same collector — the live
-		// `_updatePageStream` counts occupancy across ALL of a collector's
-		// stream rooms, which is why the live app never had this. Found by
-		// The blur-suspend audit on its first run, after the same defect
-		// was fixed by hand for dhcpNetworks and bandwidth.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "vpn",
-			collect.Others("vpn", "vpn"), cn.rsession.VPN().Suspend)
-	case "users":
-		cn.rsession.RosUsers().Suspend()
-	case "queues":
-		cn.rsession.Queues().Suspend()
-	case "firewall":
-		// The dashboard card reads the same collector. Its room was added on
-		// 2026-08-29 when the emit-rooms audit found this payload reaching
-		// one room where live sends it to two — and `blur-suspend-audit` caught
-		// the consequence immediately: a page blur says nothing about whether the
-		// CARD is still watching, so suspending here would starve it.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "firewall",
-			collect.Others("firewall", "firewall"), cn.rsession.Firewall().Suspend)
-	case "wifi-networks":
-		cn.rsession.Wifi().Suspend()
-	case "capsman":
-		cn.rsession.Capsman().Suspend()
-	case "network-topology":
-		cn.rsession.Topology().Suspend()
-	case "wifi-clients":
-		// The dashboard card reads the same collector. Its room was added on
-		// 2026-08-29 when the emit-rooms audit found this payload reaching
-		// one room where live sends it to two — and `blur-suspend-audit` caught
-		// the consequence immediately: a page blur says nothing about whether the
-		// CARD is still watching, so suspending here would starve it.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "wireless",
-			collect.Others("wireless", "wifi-clients"), cn.rsession.Wireless().Suspend)
-	case "bandwidth":
-		// The dashboard's bandwidth card reads the same collector.
-		cn.srv.suspendIfNoRoomOccupied(cn.rsession, cn.routerID, "bandwidth",
-			collect.Others("bandwidth", "bandwidth"), cn.rsession.Bandwidth().Suspend)
-		cn.srv.suspendConnsIfIdle(cn.rsession, cn.routerID)
-	case "connections":
-		cn.srv.suspendConnsIfIdle(cn.rsession, cn.routerID)
-	}
+	cn.srv.hub.Leave(cn.c, "router-"+cn.routerID+"-page-"+page)
+	// ── PHASE 4.2b: THE ROOM IS LEFT, AND THAT IS THE WHOLE EVENT ──────────
+	//
+	// This held a 19-case `switch page` of suspends, seven of them wrapped in
+	// `suspendIfNoRoomOccupied` because the collector also fed a dashboard card.
+	// Getting that wrapper wrong — or forgetting it when a collector gained a
+	// second room — is the defect that bit dhcpNetworks, bandwidth, vpn, firewall
+	// and routing, five times in three weeks, each time as a card that silently
+	// stopped updating.
+	//
+	// Leaving the room IS the state change. `applyDemand` then re-asks the only
+	// question that ever mattered — is anybody in any room this collector feeds —
+	// for every collector at once, so a page can no longer suspend one it does
+	// not own, and cannot fail to suspend one it does.
+	//
+	// THE OCCUPANCY TEST IS GONE FROM HERE TOO. `if hub.Occupants(room) != 0`
+	// guarded this switch because a second viewer on the same page must not lose
+	// their collectors; `wantsCollector` reads that same occupancy per collector,
+	// so the guard is now inside the rule rather than in front of it. Keeping it
+	// here would ALSO skip the demand pass for every other collector, which is
+	// what makes a blur the right moment to re-ask about all of them.
+	cn.srv.applyDemand(cn.rsession, cn.routerID)
 }
 
 // trafficSelect moves this viewer's chart to another interface.
@@ -1337,115 +1267,31 @@ func (cn *conn) dropTraffic() {
 	cn.trafficIf = ""
 }
 
-// suspendConnsIfIdle stops the connection-table read only when NOTHING that
-// depends on it has a viewer: either page, or the dashboard's card.
+// `suspendConnsIfIdle` and `suspendIfNoRoomOccupied` used to live here, and both
+// were deleted with the switchboard in phase 4.2b.
 //
-// Two pages, one read: suspending it because one closed would blank the other.
-// The hub's room occupancy is the authority on who is still looking.
+// ── WHAT THEY WERE, AND WHY NOTHING REPLACED THEM ONE FOR ONE ──────────────
 //
-// ── THE CARD ROOM WAS MISSING, AND IT WAS THE REPORTED BUG ──────────────────
+// `suspendIfNoRoomOccupied(rs, routerID, key, rooms, suspend)` stopped a
+// collector only when EVERY room it emits to was empty, after a grace period,
+// re-reading the occupancy when the timer fired. It existed because a page blur
+// says nothing about whether a DASHBOARD CARD fed by the same collector is still
+// being watched — a distinction that cost four separate fixes (dhcpNetworks,
+// bandwidth, vpn, firewall) and a fifth for routing.
 //
-// This listed the two PAGE rooms and not `dash-card-connections`, which
-// `connections.go` emits to on every payload. So: open Connections or Bandwidth,
-// go back to the dashboard, and one idle grace later the timer re-read two empty
-// page rooms and suspended the collector with a viewer watching the card. The
-// emits stopped and the card went stale about twenty seconds after that. It
-// healed on the next visit to the dashboard, which is why it looked intermittent.
+// `suspendConnsIfIdle` was its one specialisation: two pages and a card share the
+// connection-table read, so neither page's blur could suspend it alone. That one
+// carried the sharpest scar in the file — it listed the two page rooms and NOT
+// `dash-card-connections`, so returning to the dashboard from either page
+// suspended the collector with a viewer still watching the card, and the audit
+// written for exactly this defect class could not see it because it only
+// inspected DIRECT suspends.
 //
-// Latent since the cutover: the emit string and this room list were written in
-// the same commit and never agreed. Two things let it survive that long. The
-// header on `suspendIfNoRoomOccupied` NAMED this collector's card as a reason
-// the helper exists, so the code read as if it were covered. And the audit
-// written for exactly this defect class only ever inspected DIRECT suspends, so
-// wrapping the call in this helper put it out of reach. Both are fixed;
-// `TestGuardedSuspendCoversEveryDashboardRoom` is the half that was missing.
-func (s *Server) suspendConnsIfIdle(rs *session.Session, routerID string) {
-	s.suspendIfNoRoomOccupied(rs, routerID, "conns",
-		// No page is being blurred here -- this is the idle check -- so the
-		// whole audience is wanted, plus the keep-alive that `bandwidth` needs.
-		collect.Others("conns", ""),
-		rs.Conns().Suspend)
-}
-
-// suspendIfNoRoomOccupied stops a collector only when EVERY room it emits to is
-// empty.
-//
-// ── THE DEFECT THIS GENERALISES ─────────────────────────────────────────────
-//
-// A collector that feeds more than one room must not be suspended because ONE of
-// them emptied. `conns` was wired through this helper from the start and two
-// collectors that need it just as much were not:
-//
-// THIS PARAGRAPH USED TO SAY `conns` FED "the Connections page and the
-// dashboard's connections card", offered as the example the helper was built
-// for. It was wrong in the one way that mattered: the call passed the two PAGE
-// rooms and never the card. A comment naming the case it does not implement is
-// worse than no comment, because it is what a reader checks INSTEAD of the code.
-// See suspendConnsIfIdle for what that cost.
-//
-//	dhcpNetworks  page-dhcp, dash-card-network, AND the router-wide room
-//	              (`lan:wan`, the WAN chip on every page)
-//	bandwidth     page-bandwidth, dash-card-bandwidth
-//
-// So leaving the DHCP page froze the dashboard's Network card and the WAN chip,
-// and leaving the Bandwidth page froze the dashboard's bandwidth card, for as
-// long as the session lasted. Found 2026-08-28 by comparing this port's blur
-// cases against the live `_PAGE_STREAM_ROOMS`: the port suspends a strict
-// SUPERSET of what the live app does — which is the right direction, fewer
-// channels held, and is why the live app never had this bug.
-//
-// The DASHBOARD ROOMS ARE THE POINT. A page room emptying is what triggers a
-// blur; a `dash-card-*` room emptying is not, so it must be TESTED rather than
-// assumed. `nil` is a collector this session does not have.
-func (s *Server) suspendIfNoRoomOccupied(rs *session.Session, routerID, key string,
-	rooms []string, suspend func()) {
-	if rs == nil || routerID == "" || suspend == nil {
-		return
-	}
-	if s.roomsOccupied(routerID, rooms) {
-		return
-	}
-	// ── ALERTING IS A CONSUMER THAT OCCUPIES NO ROOM ──────────────────────
-	//
-	// Phase 4.3b. This helper asks "is anybody still watching a room this
-	// collector emits to". The alert rules are not in a room and never will be,
-	// so for them the answer is always no -- and suspending `vpn` or `routing`
-	// on a router with alerting ON silently stops four of the six rules.
-	//
-	// THE KEY IS PASSED, not derived from the rooms. Deriving looked tidier and
-	// is wrong: `Others` has already dropped the blurred page, so `page-dashboard`
-	// alone is left by `routing`, `netwatch` and `ping` alike and identifies none
-	// of them.
-	if rs.NeededForAlerts(key) {
-		return
-	}
-	// ── THE SAME GRACE THE SESSION GETS, AND FOR THE SAME EVENT ───────────
-	//
-	// A page refresh empties every room this viewer was in and refills them a
-	// second later. Suspending on the empty moment stops the collector's stream
-	// and starts it again immediately — churn on the one resource this project
-	// conserves, API channels, to save one second of polling.
-	//
-	// THE OCCUPANCY IS RE-READ WHEN THE TIMER FIRES, which is what makes this
-	// safe to do without tracking timers: a viewer who came back is simply seen,
-	// and the suspend is skipped. A viewer who did not is suspended late rather
-	// than never. Several timers may be in flight after rapid page switching;
-	// each re-reads, and all but the last find an occupied room and do nothing.
-	time.AfterFunc(s.graceFor(), func() {
-		if s.roomsOccupied(routerID, rooms) {
-			return
-		}
-		// NO "IS THE SESSION STILL LIVE?" CHECK HERE, deliberately. One was
-		// written and removed: suspending a collector on a torn-down session is
-		// inert, so it guarded nothing, and it could not even shorten the
-		// closure's reach -- `suspend` is a method value on the collector, so
-		// the session is retained by this timer either way. What it did do was
-		// dereference the Manager on a TIMER GOROUTINE, where a nil is a dead
-		// process rather than a failed request. The race suite found that
-		// immediately, on the server tests that build no Manager at all.
-		suspend()
-	})
-}
+// Every one of those bugs is the same shape: a hand-written answer to "who else
+// is watching this collector". `applyDemand` asks `collect.DemandRooms` instead,
+// which is derived from the declarations, and asks it about every collector
+// rather than the one a page happened to name. The grace period survives as
+// `suspendAfterGrace` in demand.go, with the reasoning moved there intact.
 
 // graceFor is the page-level idle window, matching the session's. Zero means
 // the default, so only a test has to know the field exists.

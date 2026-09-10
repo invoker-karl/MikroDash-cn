@@ -161,45 +161,105 @@ func RoomsOf(key string) Rooms {
 // keepAliveFor is rooms where a collector must keep RUNNING for another
 // collector's sake, and which are not part of its own audience.
 //
-// ── IT IS EMPTY, AND THE ONE ENTRY IT HELD IS WHY IT STAYS ─────────────────
+// ── IT EMPTIED ONCE, AND THAT IS WHY THE MECHANISM STAYED ──────────────────
 //
-// `conns` emits to the Connections page and its dashboard card, and to nothing
-// else. But `bandwidth` used to read the connection table `conns` deposited in
-// `ConnTable`, so suspending `conns` while somebody was on the BANDWIDTH page
-// starved a page `conns` never sends to. That was the entry, and modelling it as
-// an audience would have been wrong: nothing is ever emitted there.
+// The first entry was `conns`, which emits to the Connections page and its
+// dashboard card and to nothing else -- but `bandwidth` read the connection
+// table it deposited in `ConnTable`, so suspending `conns` while somebody was on
+// the BANDWIDTH page starved a page `conns` never sends to. Modelling that as an
+// audience would have been wrong: nothing is ever emitted there.
 //
 // `ConnTable` is gone. Both collectors SUBSCRIBE to
 // `/ip/firewall/connection/print` now, so `bandwidth` holds its own demand on
-// the menu and a suspended `conns` starves nothing. The comment here recorded
-// this as "probably safe" and deliberately did not act on it; removing the
-// snapshot is what turned probably into provably, and
+// the menu and a suspended `conns` starves nothing.
 // `TestBothConnectionConsumersShareOneRead` is the proof -- it stops
 // `connections` and asserts the menu still has a subscriber.
 //
-// THE MAP STAYS, EMPTY. The distinction it encodes is real and the next
-// cross-collector dependency will need it; deleting the mechanism because its
-// only instance closed would mean rediscovering the distinction the hard way,
-// which is how the Bandwidth page was starved in the first place.
-var keepAliveFor = map[string]Rooms{}
-
-// Others is the rooms a collector feeds APART from one page: what `pageBlur`
-// must find empty before it may suspend.
+// The map was kept empty rather than deleted, on the grounds that "the next
+// cross-collector dependency will need it". Phase 4.2b is that next one, and it
+// arrived four days later.
 //
-// This is the whole calculation the seven guard call sites used to spell out by
-// hand, and getting it wrong in either direction is a real defect: too few rooms
-// starves a card, too many means the collector never suspends and keeps asking a
-// router nobody is watching.
-func Others(key, pageKey string) []string {
-	var out []string
-	for _, r := range union(RoomsOf(key), keepAliveFor[key]) {
-		if r == "" || r == "page-"+pageKey {
-			continue
-		}
-		out = append(out, r)
-	}
-	return out
+// ── `ifStatus` IS THE ENTRY, AND DEMAND IS WHAT MADE IT NECESSARY ──────────
+//
+// Under the page switchboard `ifStatus` was never gated at all: it ran from
+// connect to teardown, and `resumePage` said so out loud --
+//
+//	interfaceStatus is NOT suspended on blur — three other collectors take it
+//	as their rate source, and a bridges viewer who never opens Interfaces would
+//	otherwise see every throughput column go blank.
+//
+// Demand gates every collector on its rooms, so that sentence stops being a
+// comment and becomes a bug: `ifStatus` emits to Interfaces, Network Topology
+// and the Physical Ports card, and it would suspend for a viewer sitting on
+// Bridges. Its `Rates()` returns an availability flag and the payload renders
+// null rather than breaking, so the failure is not a crash -- it is every
+// throughput column on four pages quietly reading "—".
+//
+// FIVE CONSUMERS take it as their `RateSource`, built in session.go: bridges,
+// vlans, wan, topology and bandwidth. Topology already shares a room with it, so
+// the rooms named here are the other four.
+//
+// This is a DEPENDENCY, not an audience, and the distinction is the whole reason
+// this map is separate from `RoomsOf`: nothing is ever emitted to these rooms by
+// `ifStatus`, and `RoomsOf` must keep meaning "who receives this collector's
+// payload" for the emit-side gates that read it.
+//
+// ── `dhcpLeases` IS THE OTHER ONE, AND IT HAS NO AUDIENCE AT ALL ───────────
+//
+// It emits ROUTER-WIDE — `d.emit("", "leases:list", …)` — because the live app
+// does, and because two consumers live outside the DHCP page: the Connections
+// page names a device by its IP from the lease table, and four collectors read
+// the leases in process. A router-wide emit is not a room, so `RoomsOf` returns
+// nothing for it and demand would suspend it the moment the switchboard stopped
+// resuming it by name. The DHCP page would then sit on "Waiting for lease
+// data…", and every connection would render as a bare address.
+//
+// The rooms named are its real consumers: the DHCP page (through `dhcpNetworks`,
+// which shares it), and the four collectors that take it as a source — conns,
+// wireless, topology and bandwidth, wired in session.go.
+var keepAliveFor = map[string]Rooms{
+	"ifStatus": union(bridgesRooms, vlansRooms, wanRooms, bandwidthRooms),
+	"dhcpLeases": union(dhcpNetworksRooms, connsRooms, connsDetailRooms,
+		wirelessRooms, topologyRooms, bandwidthRooms),
 }
+
+// DeclaredRoomKeys is every collector `RoomsOf` answers for.
+//
+// ── A SWITCH CANNOT BE ENUMERATED, AND SOMETHING HAS TO ────────────────────
+//
+// `RoomsOf` is a switch, so nothing outside it can ask "which collectors have an
+// audience at all". `internal/session` needs exactly that: a collector that
+// declares rooms and is missing from the dormancy target table is one demand
+// never asks about, and it would never start for a viewer — silently, because a
+// collector that is never resumed looks like one with nothing to report.
+//
+// A LIST BESIDE A SWITCH GOES STALE, which is why `rooms_test.go` keeps its own
+// copy and `TestDeclaredRoomKeysMatchesTheSwitch` fails the moment the two
+// disagree. That is the same arrangement `session.targetKeys` has with
+// `session.targets()`, and for the same reason.
+func DeclaredRoomKeys() []string {
+	return []string{
+		"bandwidth", "bridges", "capsman", "conns", "dhcpNetworks", "dns",
+		"firewall", "ifStatus", "logs", "netwatch", "packages", "ping", "ppp",
+		"queues", "rosusers", "routing", "talkers", "topology", "vlans", "vpn",
+		"wan", "wifi", "wireless",
+	}
+}
+
+// DemandRooms is every room whose occupancy should keep a collector RUNNING: its
+// own audience plus whatever it must stay alive for.
+//
+// THE ONE QUESTION `internal/server`'s demand rule asks. Splitting it from
+// `RoomsOf` keeps the audience honest -- a gate that checks where a payload is
+// sent must not be handed a room nothing is ever sent to.
+func DemandRooms(key string) Rooms { return union(RoomsOf(key), keepAliveFor[key]) }
+
+// `Others(key, pageKey)` used to live here: the audience minus one blurred page,
+// which is the calculation `pageBlur`'s seven guard call sites each spelled out
+// by hand before 4.2. Phase 4.2b deleted the switchboard, so there is no blurred
+// page to subtract from anything -- demand asks whether ANY room is occupied,
+// which is `DemandRooms` above. Recorded rather than silently dropped, because
+// the function is named in the port record and in several comments.
 
 func union(sets ...Rooms) Rooms {
 	seen := map[string]bool{}

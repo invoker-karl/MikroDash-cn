@@ -158,6 +158,17 @@ func (cn *conn) dashCardBlur(key string) {
 	// no-op, and refusing to let someone leave because their permissions changed
 	// while they were watching would strand them in it.
 	cn.srv.hub.Leave(cn.c, cn.dashCardRoom(key))
+	// ── PHASE 4.2b: A CARD BLUR NOW STOPS SOMETHING ───────────────────────
+	//
+	// It never did before, and the asymmetry was invisible because the page
+	// switchboard was the only thing that suspended anything. So a collector
+	// whose ONLY viewer was a dashboard card — `netwatch`, `talkers`, the
+	// Physical Ports card's `ifStatus` — ran until the idle gate or dormancy
+	// reached it, however long ago the card was removed from the grid.
+	//
+	// The room is left above; this re-asks the question for every collector, and
+	// the answer for this one changes only if nothing else is watching it.
+	cn.srv.applyDemand(cn.rsession, cn.routerID)
 }
 
 // rejoinCards re-applies the client's card subscriptions to the CURRENT router.

@@ -15,63 +15,67 @@ import (
 // somebody opened its page, and then came back. Half a feature is worse than
 // none here, because the router silently starts answering again.
 //
-// Read from the source for the same reason the session's equivalent is: standing
-// a connection up needs a router. What it catches is a Resume that loses its
-// guard, or gains one naming the wrong collector.
-func TestEveryPageFocusResumeIsGated(t *testing.T) {
-	body, err := os.ReadFile("ws.go")
+// ── THE GUARD MOVED INTO THE FUNNEL (2026-08-28), AND THE CALLER MOVED
+//
+//	OUT OF THIS FILE (2026-09-10) ─────────────────────────────────────────
+//
+// It began as `if CollectorEnabled("k") { X().Resume() }` at twenty page cases,
+// each repeating the check. Those became `cn.rsession.ResumeCollector("k")` —
+// the live `_resumeCollector`, ONE place that checks enabled and consults the
+// dormancy veto, so "a gate that knows nothing about dormancy cannot undo it".
+//
+// Phase 4.2b deleted the twenty call sites. `applyDemand` in demand.go decides
+// what runs, from the room declarations, and it calls the same funnel. So the
+// LIST half of this test is gone — a page no longer names its collectors, and
+// `demand_test.go` holds the frozen record of what the switchboard used to
+// resume plus the gate that every collector is still reachable.
+//
+// WHAT SURVIVES IS THE REGRESSION CHECK, and it is the half that was worth
+// having: no bare `X().Resume()` anywhere in this package. That is a resume
+// which skips both the enabled check and the veto, and the second is the one the
+// live app warns about — it "would wake a dormant collector on the next socket
+// join". A direct call is EASIER to reach for now than it was under the
+// switchboard, because there is no longer an obvious per-page place to add one
+// properly.
+func TestNoCollectorIsResumedOutsideTheFunnel(t *testing.T) {
+	dir := "."
+	ents, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := string(body)
-
-	// ── THE GUARD MOVED INTO THE FUNNEL (2026-08-28) ────────────────────────
-	//
-	// This used to look for `if CollectorEnabled("k") { X().Resume() }` at every
-	// page case — twenty of them, each repeating the check. They now call
-	// `cn.rsession.ResumeCollector("k")`, which is the live `_resumeCollector`:
-	// ONE place that checks enabled and consults the dormancy veto, so "a gate
-	// that knows nothing about dormancy cannot undo it".
-	//
-	// This test went red the moment the shape changed, which is it working. What
-	// it protects is unchanged and is now stronger, because there is one
-	// implementation of the check instead of twenty:
-	//
-	//   1. NO BARE `X().Resume()` may remain in this file. That is the
-	//      regression — a resume that skips both the enabled check and the veto.
-	//   2. Every page that used to resume still does, by key.
-	//
-	// The pairing this used to assert — a guard naming the WRONG collector — is
-	// no longer expressible: the key IS the argument, and
-	// `internal/session.TestEveryKeyWsPassesIsInTheTable` fails if it names
-	// something the session cannot reach.
-	want := []string{
-		"dns", "bridges", "vlans", "wan", "packages", "routing", "ppp", "vpn",
-		"rosusers", "capsman", "topology", "conns", "bandwidth", "wireless",
-		"wifi", "firewall", "queues", "dhcpNetworks", "dhcpLeases",
-	}
-
-	found := map[string]bool{}
-	for _, m := range regexp.MustCompile(`cn\.rsession\.ResumeCollector\("(\w+)"\)`).
-		FindAllStringSubmatch(src, -1) {
-		found[m[1]] = true
-	}
-	for _, key := range want {
-		if !found[key] {
-			t.Errorf("no ResumeCollector(%q) — did the page case move or disappear? A page that "+
-				"stopped resuming its collector renders whatever was last collected, forever.", key)
+	bare := regexp.MustCompile(`(?:cn\.rsession|rs)\.(\w+)\(\)\.Resume\(\)`)
+	scanned := 0
+	for _, e := range ents {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		for _, m := range bare.FindAllStringSubmatch(string(src), -1) {
+			t.Errorf("%s: %s().Resume() is called directly. Every resume goes through "+
+				"ResumeCollector, which checks CollectorEnabled and consults the dormancy "+
+				"veto; a bare call undoes both.", n, m[1])
 		}
 	}
-
-	// AN UNGATED Resume IS THE REGRESSION, and the only one that matters now.
-	// A direct `X().Resume()` skips the enabled check AND the dormancy veto, and
-	// the second is the one the live app warns about: it "would wake a dormant
-	// collector on the next socket join".
-	for _, m := range regexp.MustCompile(`cn\.rsession\.(\w+)\(\)\.Resume\(\)`).
-		FindAllStringSubmatch(src, -1) {
-		t.Errorf("%s().Resume() is called directly. Every resume goes through "+
-			"ResumeCollector, which checks CollectorEnabled and consults the dormancy veto; "+
-			"a bare call undoes both.", m[1])
+	// Finding nothing is the passing state, so the scan has to prove it read
+	// something.
+	if scanned < 20 {
+		t.Fatalf("only %d source files were scanned; the package is larger than that "+
+			"and this check is measuring nothing", scanned)
+	}
+	// AND THE FUNNEL MUST STILL BE REACHED. A package that stopped resuming
+	// anything at all would pass every assertion above.
+	dem, err := os.ReadFile("demand.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dem), "rs.ResumeCollector(key)") {
+		t.Error("demand.go does not call ResumeCollector; nothing in this package " +
+			"starts a collector any more")
 	}
 }
 
@@ -133,7 +137,13 @@ func TestEveryCollectorEntryPointIsGated(t *testing.T) {
 		// them dropped the total from ~35 to 15 and tripped the floor below,
 		// which is this test noticing the shape changed rather than the coverage
 		// falling.
-		checked += len(regexp.MustCompile(`\.ResumeCollector\("\w+"\)`).FindAllString(src, -1))
+		//
+		// THE KEY IS A VARIABLE NOW (2026-09-10). Phase 4.2b deleted the twenty
+		// literal call sites; `applyDemand` passes a key from a loop instead. The
+		// pattern matched `("literal")` only, so it counted 21 and now counts 0
+		// — and this file would otherwise be measuring the funnel by looking at a
+		// shape that no longer exists.
+		checked += len(regexp.MustCompile(`\.ResumeCollector\(`).FindAllString(src, -1))
 
 		for _, loc := range any.FindAllStringSubmatchIndex(src, -1) {
 			method := src[loc[4]:loc[5]]
@@ -148,9 +158,21 @@ func TestEveryCollectorEntryPointIsGated(t *testing.T) {
 			}
 		}
 	}
-	if checked < 30 {
-		t.Errorf("only %d collector entry points examined; this package has far more, so the "+
-			"pattern above has stopped matching", checked)
+	// ── THE FLOOR, AND WHY IT MOVED ────────────────────────────────────────
+	//
+	// It was 30, against a real count of ~40 while the switchboard held 21
+	// literal `ResumeCollector` calls. Phase 4.2b deleted those, and the count
+	// measured immediately afterwards is 20: the direct `Start`/`Tick`/`Refresh`
+	// entry points, plus the one funnel call in demand.go.
+	//
+	// LOWERING A FLOOR IS HOW COVERAGE IS LOST QUIETLY, so the number is stated
+	// with what it was measured against rather than nudged until green. What it
+	// still catches is the thing it was written for: a pattern that has stopped
+	// matching reads as a package with no entry points, and every ungated call
+	// then passes by not being seen.
+	if checked < 18 {
+		t.Errorf("only %d collector entry points examined; 20 were counted on "+
+			"2026-09-10, so the pattern above has stopped matching", checked)
 	}
 }
 

@@ -82,46 +82,157 @@ func TestEveryDeclaredRoomIsAPageOrACard(t *testing.T) {
 	}
 }
 
-// TestOthersDropsTheBlurredPageAndNothingElse pins the calculation the seven
-// guard call sites used to spell out by hand. Getting it wrong in either
-// direction is a real defect: too few rooms starves a card, too many means the
-// collector never suspends and keeps asking a router nobody is watching.
-func TestOthersDropsTheBlurredPageAndNothingElse(t *testing.T) {
+// TestDemandRoomsIsTheAudiencePlusTheDependencies pins the calculation the
+// demand rule asks for, and it is the re-aimed form of
+// `TestOthersDropsTheBlurredPageAndNothingElse`.
+//
+// ── WHAT THE OLD TEST ASSERTED, AND WHY IT STOPPED BEING A QUESTION ────────
+//
+// `Others(key, blurredPage)` was the audience minus one page — the calculation
+// the seven blur guards used to spell out by hand. Phase 4.2b deleted the
+// switchboard, so no page is ever blurred at a collector any more and there is
+// nothing to subtract. The function is gone; the risk it covered moved rather
+// than closed, and it is the same risk in both halves:
+//
+//	too few rooms   the collector suspends while somebody is watching it
+//	too many rooms  the collector never suspends and keeps asking a router
+//	                nobody is looking at
+//
+// So the cases carry over almost unchanged, asserted against the set demand
+// actually reads.
+func TestDemandRoomsIsTheAudiencePlusTheDependencies(t *testing.T) {
 	cases := []struct {
-		key, page string
-		want      []string
+		key  string
+		want []string
 	}{
-		{"vpn", "vpn", []string{"dash-card-vpn"}},
-		{"routing", "routing", []string{"page-dashboard"}},
-		{"routing", "dashboard", []string{"page-routing"}},
-		{"dhcpNetworks", "dhcp", []string{"dash-card-network"}},
-		{"wireless", "wifi-clients", []string{"dash-card-wireless"}},
-		// No page blurred: the whole audience, AND NOTHING ELSE.
-		//
-		// `page-bandwidth` was here until 2026-09-09, as the one `keepAliveFor`
-		// entry: `bandwidth` read the connection table `conns` deposited in
+		{"vpn", []string{"page-vpn", "dash-card-vpn"}},
+		{"routing", []string{"page-routing", "page-dashboard"}},
+		{"dhcpNetworks", []string{"page-dhcp", "dash-card-network"}},
+		{"wireless", []string{"page-wifi-clients", "dash-card-wireless"}},
+		// `page-bandwidth` was a `keepAliveFor` entry on `conns` until
+		// 2026-09-09: `bandwidth` read the connection table `conns` deposited in
 		// `ConnTable`, so suspending `conns` starved a page it never emits to.
 		// Both collectors subscribe to the menu now and `bandwidth` holds its own
 		// demand, so a suspended `conns` starves nothing.
+		{"conns", []string{"page-connections", "dash-card-connections"}},
+		// ── THE ONE KEEP-ALIVE ENTRY, AND THE REASON THE MAP EXISTS ─────────
 		//
-		// THIS IS A BEHAVIOUR CHANGE AND IT IS THE POINT: `conns` may now suspend
-		// on a Connections blur while somebody is on Bandwidth, which is a
-		// collector that stops asking a router about a page nobody is looking at.
-		{"conns", "", []string{"dash-card-connections", "page-connections"}},
-		// A page that this collector does not feed changes nothing.
-		{"vpn", "dns", []string{"dash-card-vpn", "page-vpn"}},
+		// `ifStatus` emits to three rooms and is the `RateSource` for five
+		// collectors. Four of them live on pages it sends nothing to, so demand
+		// reading `RoomsOf` alone would suspend it for a viewer on Bridges and
+		// blank every throughput column there, on VLANs, on WAN and on Bandwidth.
+		//
+		// `page-network-topology` appears once, not twice: topology is both a
+		// consumer AND part of the audience, and `union` is what makes that a
+		// non-event.
+		{"ifStatus", []string{
+			"page-interfaces", "page-network-topology", "dash-card-physports",
+			"page-bridges", "page-vlans", "page-wan",
+			"page-bandwidth", "dash-card-bandwidth",
+		}},
+		// ── AND THE COLLECTOR WITH NO AUDIENCE AT ALL ──────────────────────
+		//
+		// `dhcpLeases` emits router-wide, so `RoomsOf` is empty and every room
+		// here is a keep-alive: the DHCP page it shares with `dhcpNetworks`, and
+		// the four collectors that take it as a source.
+		{"dhcpLeases", []string{
+			"page-dhcp", "dash-card-network",
+			"page-connections", "dash-card-connections",
+			"page-wifi-clients", "dash-card-wireless",
+			"page-network-topology",
+			"page-bandwidth", "dash-card-bandwidth",
+		}},
+		// A collector with no keep-alive entry gets its audience back unchanged.
+		{"dns", []string{"page-dns"}},
 	}
 	for _, c := range cases {
-		got := Others(c.key, c.page)
+		got := append([]string(nil), DemandRooms(c.key)...)
 		sort.Strings(got)
 		want := append([]string(nil), c.want...)
 		sort.Strings(want)
 		if strings.Join(got, ",") != strings.Join(want, ",") {
-			t.Errorf("Others(%q, %q) = %v, want %v", c.key, c.page, got, want)
+			t.Errorf("DemandRooms(%q) = %v, want %v", c.key, got, want)
 		}
 	}
 }
 
+// TestKeepAliveRoomsAreRealAndNotAlreadyTheAudience.
+//
+// ── A KEEP-ALIVE ENTRY THAT SAYS NOTHING IS THE FAILURE MODE ───────────────
+//
+// The map is hand-written — it encodes an in-process dependency that no emit
+// declares — so the two ways it goes wrong are both silent. A room nobody ever
+// occupies keeps a collector running forever; a room already in the audience
+// reads as a dependency being handled when it is merely a duplicate, and
+// deleting the real dependency would then change nothing visible.
+func TestKeepAliveRoomsAreRealAndNotAlreadyTheAudience(t *testing.T) {
+	// Every room any collector declares, so an entry naming a room nothing feeds
+	// is caught rather than believed.
+	real := map[string]bool{}
+	for _, k := range declaredKeys() {
+		for _, r := range RoomsOf(k) {
+			real[r] = true
+		}
+	}
+	if len(keepAliveFor) == 0 {
+		t.Fatal("keepAliveFor is empty; this test is asserting nothing. If the last " +
+			"entry closed, say so here rather than leaving a check that cannot fail.")
+	}
+	for key, rooms := range keepAliveFor {
+		// A collector with NO audience is the case this map exists for at its
+		// strongest -- `dhcpLeases` emits router-wide, so nothing is guardable and
+		// every room it needs is here. So an empty audience is not an error; an
+		// empty ENTRY is, and that is what the length check below catches.
+		if len(rooms) == 0 {
+			t.Errorf("keepAliveFor[%q] is empty, which is the same as having no entry "+
+				"while reading as though a dependency were recorded", key)
+		}
+		own := map[string]bool{}
+		for _, r := range RoomsOf(key) {
+			own[r] = true
+		}
+		for _, r := range rooms {
+			if !real[r] {
+				t.Errorf("keepAliveFor[%q] names room %q, which no collector feeds. "+
+					"Nobody can ever occupy it, so it keeps %s running forever.", key, r, key)
+			}
+			if own[r] {
+				t.Errorf("keepAliveFor[%q] names %q, which is already in its own audience. "+
+					"The entry changes nothing, and reads as though the dependency were "+
+					"covered when removing the real one would be silent.", key, r)
+			}
+		}
+	}
+}
+
+// TestDeclaredRoomKeysMatchesTheSwitch: the exported list and `RoomsOf` must
+// cover the same collectors, in both directions.
+//
+// A key in the list that the switch does not answer for reports an empty
+// audience, and demand then suspends that collector for ever. A key the switch
+// answers for that the list omits is invisible to every caller that enumerates.
+func TestDeclaredRoomKeysMatchesTheSwitch(t *testing.T) {
+	exported := map[string]bool{}
+	for _, k := range DeclaredRoomKeys() {
+		exported[k] = true
+		if len(RoomsOf(k)) == 0 {
+			t.Errorf("DeclaredRoomKeys names %q and RoomsOf answers nothing for it", k)
+		}
+	}
+	for _, k := range declaredKeys() {
+		if !exported[k] {
+			t.Errorf("%q declares rooms and DeclaredRoomKeys omits it, so nothing that "+
+				"enumerates collectors can see it", k)
+		}
+	}
+	if len(DeclaredRoomKeys()) != len(declaredKeys()) {
+		t.Errorf("DeclaredRoomKeys has %d entries, this file's own list has %d",
+			len(DeclaredRoomKeys()), len(declaredKeys()))
+	}
+}
+
+// declaredKeys is this test file's OWN list, deliberately not the exported one:
+// a check that read the list it is checking would prove anything it names.
 func declaredKeys() []string {
 	return []string{
 		"bandwidth", "bridges", "capsman", "conns", "dhcpNetworks", "dns",
