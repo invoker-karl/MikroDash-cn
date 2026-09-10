@@ -32,6 +32,7 @@ is where symbolic navigation earns its keep.
 | Know what RouterOS commands exist | `docs/routeros-api-surface.md` (generated) | grepping by hand |
 | Know what a RouterOS menu *can* hold | **rosetta** (MCP, `.mcp.json`), or `WebFetch` on `help.mikrotik.com` | inferring the property set from a fixture |
 | Know what a collector returns | replay a fixture (`internal/collect` tests) | reading the collector and guessing |
+| Understand the collector layer | `Collector-Architecture.md` — the three layers, gated so it cannot go stale | inferring it from one collector |
 
 - `Glob` and `Grep` are fine for **discovery**; follow up with a symbolic read rather than a whole-file one.
 
@@ -461,7 +462,7 @@ replaced? That question died with the port, and 25 MB of recordings went with it
 
 | | |
 |---|---|
-| `internal/verify/` | 53 Go tests. Static checks over the CURRENT source: credentials, cited paths, the WebSocket vocabulary both ways, endpoints, selectors, module reachability, identity columns, the blur-suspend guard, the fast/slow poll ledger, the shared-menu ledger, fixture schemas, and that every page-key literal still names a real page. |
+| `internal/verify/` | 56 Go tests. Static checks over the CURRENT source: credentials, cited paths, the WebSocket vocabulary both ways, endpoints, selectors, module reachability, identity columns, the blur-suspend guard, the fast/slow poll ledger, the shared-menu ledger, fixture schemas, that every page-key literal still names a real page, and that `Collector-Architecture.md` still describes the collector layer the code actually has. |
 | `web/test/` | 30 test files that bundle the app's TypeScript and run it against a DOM shim. The FILE count is here because it is the one the audit can measure; a case count cannot be derived statically and this one had already drifted from 32 to 35 unnoticed. |
 
 **Two rules carried across, and both are load-bearing:**
@@ -491,7 +492,7 @@ inert.
 - **The two gates are not unit tests.** `cmd/conformance` and `cmd/compat` run against live hardware
   and the live `/data`. They are the go/no-go checks, and a green unit suite does not substitute for
   them.
-- **`internal/verify/`** holds the repository's static self-checks as Go tests — 53 of them. They
+- **`internal/verify/`** holds the repository's static self-checks as Go tests — 56 of them. They
   read the CURRENT source and assert properties still worth holding: no committed credential, every
   cited path present, every emitted event consumed, every multi-room collector behind an occupancy
   guard. They are test-only, so nothing can link them into the binary.

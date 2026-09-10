@@ -77,16 +77,30 @@ func TestEveryCollectorDeclaresItsDerivation(t *testing.T) {
 		// the two lookups its four consumers read. That it emits nothing does not
 		// exempt it — the rows-in, value-out half is exactly what 4.1 asks to be
 		// callable without building the collector.
-		"arp.go":          "BuildARP",
+		"arp.go": "BuildARP",
+		// The two that no `Start()` gate could see until 2026-09-10.
+		"packages.go":     "BuildPackages",
+		"routing.go":      "BuildRouting",
 		"dhcpleases.go":   "BuildLeases,buildLeaseServers",
 		"dhcpnetworks.go": "BuildLanOverview",
 		"firewall.go":     "BuildFirewallRule",
 		"netwatch.go":     "BuildNetwatch",
 	}
 
-	// A collector is a file declaring Start(). Derived rather than listed, so a
-	// new one joins by existing.
-	start := regexp.MustCompile(`(?m)^func \([a-z]+ \*[A-Z]\w*\) Start\(\)`)
+	// A collector is a file declaring Start() OR Resume(). Derived rather than
+	// listed, so a new one joins by existing.
+	//
+	// ── `Resume` WAS ADDED 2026-09-10, AND TWO COLLECTORS HAD BEEN INVISIBLE ──
+	//
+	// `packages` and `routing` declare no `Start()` at all: both are page-gated,
+	// so the session brings them up with `Resume()` and nothing else. They were
+	// therefore not collectors as far as this gate could see, and their
+	// derivations went unchecked for the life of the ledger — the ledger's own
+	// completeness rule ("a new one joins by existing") quietly excluded them.
+	//
+	// Found while writing Collector-Architecture.md, by generating the
+	// per-collector table from the source and noticing two blanks.
+	start := regexp.MustCompile(`(?m)^func \([a-z]+ \*[A-Z]\w*\) (?:Start|Resume)\(\)`)
 	// EXPORTED OR NOT. A derivation being package-level is what makes it callable
 	// from a test without a collector; being exported is a separate question
 	// about who outside this package needs it. Requiring a capital was a third
