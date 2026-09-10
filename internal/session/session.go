@@ -867,7 +867,11 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// DHCP name shows as its MAC — which is what the live app does on a router
 	// that is not the client's DHCP server either.
 	s.wireless = collect.NewWireless(reader{s}, emit, s.dhcpLeases, s.eff.Poll["wireless"]).
-		WithARP(s.arp)
+		WithARP(s.arp).
+		// The last fallback: reverse DNS on the address ARP found, for a device
+		// with a static address and no lease. One cache per session, cleared on
+		// reconnect — see internal/collect/ptr.go.
+		WithPTR(collect.NewPTRCache())
 	// ifStatus names the interface a source arrived on, dhcpLeases names the
 	// device, and dhcpNetworks supplies the LAN ranges the source filter uses.
 	// Each is optional and costs exactly the field it feeds.

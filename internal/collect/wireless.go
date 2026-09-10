@@ -346,6 +346,9 @@ type Wireless struct {
 	// address, so without this the `ip` field is empty for every client — which
 	// is what it was until 2026-09-10.
 	arp ARPByMAC
+	// ptr is the LAST fallback for a name: reverse DNS on the address ARP found.
+	// It is what names a device with a static address and no DHCP lease.
+	ptr NameByIP
 
 	// cache coalesces reads shared with another collector; nil outside a live
 	// session, which is every test. See collect/cache.go.
@@ -469,6 +472,14 @@ func (w *Wireless) Reconnected() {
 	w.managedElsewhere = 0
 	w.lastFp = ""
 	w.mu.Unlock()
+	// The live `_reset` clears the PTR cache on a reconnect, and the reason is
+	// the router may have come back after a DHCP sweep — addresses move, and a
+	// name cached against the old one names the wrong device.
+	if w.ptr != nil {
+		if c, ok := w.ptr.(*PTRCache); ok {
+			c.Reset()
+		}
+	}
 	w.Tick()
 	w.loop.start()
 }
@@ -492,6 +503,92 @@ func (w *Wireless) ipOf(mac string) string {
 func (w *Wireless) WithARP(a ARPByMAC) *Wireless {
 	w.arp = a
 	return w
+}
+
+// WithPTR attaches the reverse-DNS fallback, and subscribes to its answers.
+//
+// THE CALLBACK IS THE HALF THAT MATTERS. A lookup lands after the tick that
+// wanted it, so without this the name would first appear on the NEXT tick —
+// which on this collector's cadence is up to five minutes. The live app polls a
+// 500ms timer for the same reason; this is told instead of asking.
+func (w *Wireless) WithPTR(n NameByIP) *Wireless {
+	w.ptr = n
+	if c, ok := n.(*PTRCache); ok && c != nil {
+		c.OnResolved(w.renameFromPTR)
+	}
+	return w
+}
+
+// nameOf is the client's name: the DHCP lease first, reverse DNS second.
+//
+// ── THE ORDER IS THE LIVE ONE AND IT IS NOT ARBITRARY ──────────────────────
+//
+// A lease name is what the operator's own DHCP server was told the device calls
+// itself; a PTR record is what somebody put in a zone file, which on most LANs
+// is nothing at all. So the lease wins, and this is asked only for what is left.
+//
+// `WantPTR` is called on a MISS, which is what makes the read side able to
+// return immediately: the answer arrives later and `renameFromPTR` delivers it.
+func (w *Wireless) nameOf(mac, ip string) string {
+	if name := w.leaseName(mac); name != "" {
+		return name
+	}
+	if w.ptr == nil || ip == "" {
+		return ""
+	}
+	if name := w.ptr.PTRName(ip); name != "" {
+		return name
+	}
+	w.ptr.WantPTR(ip)
+	return ""
+}
+
+// renameFromPTR fills in names that arrived after the payload went out.
+//
+// ── IT RE-RENDERS RATHER THAN RE-READING THE ROUTER ────────────────────────
+//
+// Nothing about the router has changed — only what this process knows about an
+// address — so re-ticking would cost a registration-table read for a string
+// lookup. The last payload is patched and re-emitted, which is what the live
+// `tryResolve` does from `_knownClients`.
+//
+// THE SLICE IS COPIED. The payload already went to the hub and a browser may be
+// rendering it; patching in place would mutate what a viewer is holding. Same
+// rule `FoldTraffic` records for its ring.
+//
+// SILENT WHEN NOTHING CHANGED, so a lookup that lands for a client which has
+// since left, or whose name was already filled, costs no frame.
+func (w *Wireless) renameFromPTR() {
+	w.mu.Lock()
+	last := w.last
+	if last == nil {
+		w.mu.Unlock()
+		return
+	}
+	clients := append([]WirelessClient(nil), last.Clients...)
+	changed := false
+	for i := range clients {
+		if clients[i].Name != "" || clients[i].IP == "" {
+			continue
+		}
+		if name := w.ptr.PTRName(clients[i].IP); name != "" {
+			clients[i].Name = name
+			changed = true
+		}
+	}
+	if !changed {
+		w.mu.Unlock()
+		return
+	}
+	next := *last
+	next.TS = time.Now().UnixMilli()
+	next.Clients = clients
+	next.SSIDs = withClientStats(w.ssids, clients)
+	w.last = &next
+	w.mu.Unlock()
+
+	// OUTSIDE the lock, like every other emit in this file.
+	w.emit(wirelessRooms.Join(), "wireless:update", &next)
 }
 
 func (w *Wireless) leaseName(mac string) string {
@@ -538,7 +635,11 @@ func (w *Wireless) Tick() {
 			// here from the port until 2026-09-10 and the WiFi Clients page's
 			// address line — `wireless.ts` renders it only `if (c.ip)` — never
 			// drew once. Measured on the live fleet: 26 clients, 0 addresses.
-			clients = append(clients, parseWirelessClient(row, capsman, w.ipOf(mac), w.leaseName(mac)))
+			// THE ADDRESS COMES FROM ARP AND FROM NOWHERE ELSE, and the name
+			// chain needs it: reverse DNS is the last fallback and it resolves
+			// an address, not a MAC.
+			ip := w.ipOf(mac)
+			clients = append(clients, parseWirelessClient(row, capsman, ip, w.nameOf(mac, ip)))
 		}
 	}
 
