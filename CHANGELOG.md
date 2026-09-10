@@ -2,6 +2,20 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [Unreleased]
+
+Changes on `main` that are in the `:latest` image but not yet in a numbered
+release.
+
+### Fixed
+
+- **The dashboard's System card could sit on "Finding out latest version…" for
+  ever.** That is RouterOS still asking MikroTik, not an answer, and MikroDash was
+  meant to come back and look again a minute later. It never did: the retry it
+  scheduled had no caller. Whether you saw it depended only on whether your
+  router's check had finished by the time MikroDash read the result, which is why
+  it hit some devices and not others. Present in 0.8.50.
+
 ## [0.8.50] - The collector rewrite: MikroDash asks your routers a lot less
 
 This release rebuilds how MikroDash gets data out of your routers. Nothing about
