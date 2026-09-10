@@ -454,7 +454,34 @@ func (s *System) preRead() {
 	s.mu.Lock()
 	doStatic := s.firstTick && !s.staticRead
 	doHealth := time.Since(s.healthAt) >= systemHealthEvery
+	// ── AND THE UPDATE CHECK, WHOSE RETRY WAS DEAD UNTIL 2026-09-10 ────────
+	//
+	// `checkForUpdates` schedules its own retry: an answer of "finding out
+	// latest version..." is not a verdict, so it rewinds `updateAt` to come back
+	// in a minute, up to three times. NOTHING EVER CALLED IT AGAIN — `Start` was
+	// its only caller — so the retry was a permission granted to a function
+	// nobody invoked, and a router whose check was still in flight when the
+	// first print ran displayed "finding out latest version…" for the life of
+	// the session.
+	//
+	// Reported by the operator on a router the check was mid-flight on; the
+	// router itself said "New version is available" throughout.
+	//
+	// HERE BECAUSE THIS RUNS ON BOTH DELIVERY PATHS. `Tick` and `apply` both
+	// call `preRead`, so wiring it to `Tick` alone would have fixed the polled
+	// routers and left the streamed ones exactly as they were — which is the
+	// shape of the split that was reported.
+	//
+	// The due-ness test is only an optimisation: `checkForUpdates` re-checks it
+	// under the lock, so a race here cannot produce two checks. Without it this
+	// would spawn a goroutine every tick to do nothing.
+	doUpdate := !s.updateRuns &&
+		(s.updateAt.IsZero() || time.Since(s.updateAt) >= s.updateWindow())
 	s.mu.Unlock()
+
+	if doUpdate {
+		go s.checkForUpdates()
+	}
 
 	if doStatic {
 		s.readStatic()

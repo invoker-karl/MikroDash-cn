@@ -14,7 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"mikrodash/internal/routeros"
 )
@@ -111,4 +113,122 @@ func TestSystemUpdateMatchesTheLiveRule(t *testing.T) {
 		t.Error("no case reports an available update")
 	}
 	t.Logf("%d answers, %d available", answers, available)
+}
+
+// updRetryReader answers the update print with a TRANSIENT row until it is told
+// otherwise, which is what a router whose check is still in flight does.
+type updRetryReader struct {
+	mu      sync.Mutex
+	settled bool
+	prints  int
+	checks  int
+}
+
+func (r *updRetryReader) Connected() bool { return true }
+
+func (r *updRetryReader) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch cmd.Path {
+	case systemUpdateCheckCmd.Path:
+		r.checks++
+		return nil, nil
+	case systemUpdatePrintCmd.Path:
+		r.prints++
+		if !r.settled {
+			// RouterOS's own wording while it is still asking upstream.
+			return []routeros.Reply{{
+				"channel": "stable", "installed-version": "7.24.1",
+				"status": "finding out latest version...",
+			}}, nil
+		}
+		return []routeros.Reply{{
+			"channel": "stable", "installed-version": "7.24.1",
+			"latest-version": "7.24.2", "status": "New version is available",
+		}}, nil
+	case systemResourceCmd.Path:
+		return []routeros.Reply{{"version": "7.24.1 (stable)", "cpu-load": "1",
+			"free-memory": "1", "total-memory": "2", "uptime": "1h"}}, nil
+	}
+	return nil, nil
+}
+
+func (r *updRetryReader) counts() (prints, checks int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prints, r.checks
+}
+
+func (r *updRetryReader) settle() {
+	r.mu.Lock()
+	r.settled = true
+	r.mu.Unlock()
+}
+
+// TestATransientUpdateAnswerIsRetried.
+//
+// ── THE RETRY WAS A PERMISSION NOBODY ACTED ON ─────────────────────────────
+//
+// "finding out latest version..." is not a verdict, so `checkForUpdates` rewinds
+// `updateAt` to come back in a minute, up to three times. `Start` was its ONLY
+// caller, so nothing ever came back: a router whose check was still in flight
+// when the first print ran showed that string for the life of the session, while
+// the router itself said "New version is available" throughout.
+//
+// DRIVEN THROUGH `preRead`, which is the wiring rather than the helper. A test
+// that called `checkForUpdates` twice by hand passes against the bug — the
+// function always worked; nothing invoked it.
+func TestATransientUpdateAnswerIsRetried(t *testing.T) {
+	r := &updRetryReader{}
+	s := NewSystem(r, func(string, string, any) {}, 2000)
+
+	// A resource read first, because the payload is built there and the update
+	// fields ride along on it.
+	s.Tick()
+	// The first check, exactly as Start makes it.
+	s.checkForUpdates()
+	s.Tick()
+	if got := s.Last(); got == nil || got.UpdateStatus != "finding out latest version..." {
+		t.Fatalf("first check did not record the transient answer: %+v", got)
+	}
+
+	// A tick BEFORE the retry window is up must not ask again: the check leaves
+	// the router, and an update server that never settles must not become a poll.
+	prints, _ := r.counts()
+	s.preRead()
+	time.Sleep(50 * time.Millisecond)
+	if p2, _ := r.counts(); p2 != prints {
+		t.Errorf("the check ran again inside its retry window (%d -> %d prints)", prints, p2)
+	}
+
+	// ── THE RETRY IS THE COLLECTOR'S OWN, NOT THE TEST'S ──────────────────
+	//
+	// A transient answer rewinds `updateAt` to `now - 12h + 60s`, so the check
+	// comes back in a minute instead of in twelve hours. Simulating that minute
+	// passing is the ONLY thing this does: it nudges `updateAt` back by exactly
+	// the retry delay.
+	//
+	// Setting it to a flat twelve hours ago instead would make the test pass
+	// against a collector that never rewound — the retry would be the test's,
+	// and a transient answer would really wait out the full window. That
+	// mutation survived until this was written this way.
+	r.settle()
+	s.mu.Lock()
+	s.updateAt = s.updateAt.Add(-systemUpdateRetry)
+	s.mu.Unlock()
+
+	s.preRead()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		s.Tick()
+		if got := s.Last(); got != nil && got.LatestVersion == "7.24.2" {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got := s.Last()
+	t.Errorf("the verdict never replaced the transient answer: status=%q latest=%q\n"+
+		"`preRead` runs on both delivery paths and is what has to call the retry; "+
+		"without it the card reads \"finding out latest version…\" for ever.",
+		got.UpdateStatus, got.LatestVersion)
 }
