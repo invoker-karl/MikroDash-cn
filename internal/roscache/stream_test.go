@@ -2,6 +2,9 @@ package roscache
 
 import (
 	"errors"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +20,10 @@ type pusher struct {
 	stops  int
 	refuse error
 	reads  int
+	// cmds is every command the channel has been opened with, in order. The
+	// merge tests are ABOUT the command, so a fake that discards it could only
+	// check that a reopen happened and not that it opened the right thing.
+	cmds []routeros.Cmd
 }
 
 func (p *pusher) Do(routeros.Cmd) ([]routeros.Reply, error) {
@@ -26,13 +33,14 @@ func (p *pusher) Do(routeros.Cmd) ([]routeros.Reply, error) {
 	return []routeros.Reply{{"from": "a read"}}, nil
 }
 
-func (p *pusher) Stream(_ routeros.Cmd, onRow func(routeros.Reply)) (func(), error) {
+func (p *pusher) Stream(cmd routeros.Cmd, onRow func(routeros.Reply)) (func(), error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.refuse != nil {
 		return nil, p.refuse
 	}
 	p.opens++
+	p.cmds = append(p.cmds, cmd)
 	p.onRow = onRow
 	return func() {
 		p.mu.Lock()
@@ -54,6 +62,15 @@ func (p *pusher) counts() (opens, stops, reads int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.opens, p.stops, p.reads
+}
+
+func (p *pusher) lastCmd() routeros.Cmd {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.cmds) == 0 {
+		return routeros.Cmd{}
+	}
+	return p.cmds[len(p.cmds)-1]
 }
 
 func byName(r routeros.Reply) string { return r["name"] }
@@ -703,5 +720,320 @@ func TestAnUnwarmedStreamFallsThroughToARead(t *testing.T) {
 	}
 	if _, _, reads := p.counts(); reads != 1 {
 		t.Errorf("%d reads; a warmed stream must answer without touching the router", reads)
+	}
+}
+
+// ── SHARED FILLS ───────────────────────────────────────────────────────────
+//
+// `/interface/monitor-traffic` is the menu two collectors want, and they want
+// different things from it. These tests are about the merge, the fan-out and the
+// narrowing — everything `JoinStream` adds over `FillFromStream`.
+
+// splitList, joinList, sortStrings, atoiOr and itoa keep this file's merge rule
+// standing on the standard library the collectors will use, without importing
+// half of it into a test that is about the cache.
+
+func splitList(v string) []string {
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, ",")
+}
+func joinList(v []string) string { return strings.Join(v, ",") }
+func sortStrings(v []string)     { sort.Strings(v) }
+func itoa(n int) string          { return strconv.Itoa(n) }
+func atoiOr(v string, def int) int {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+// mergeIfaces is the monitor-traffic rule, in the shape the collectors use it:
+// the union of every holder's `=interface=` list, and the finest `=interval=`.
+func mergeIfaces(cmds []routeros.Cmd) routeros.Cmd {
+	seen := map[string]bool{}
+	var names []string
+	best := 0
+	for _, c := range cmds {
+		for _, a := range c.Args {
+			switch {
+			case len(a) > 11 && a[:11] == "=interface=":
+				for _, n := range splitList(a[11:]) {
+					if !seen[n] {
+						seen[n] = true
+						names = append(names, n)
+					}
+				}
+			case len(a) > 10 && a[:10] == "=interval=":
+				if n := atoiOr(a[10:], 0); n > 0 && (best == 0 || n < best) {
+					best = n
+				}
+			}
+		}
+	}
+	sortStrings(names)
+	if best == 0 {
+		best = 1
+	}
+	return routeros.Cmd{Path: "/interface/monitor-traffic", Args: []string{
+		"=interface=" + joinList(names), "=interval=" + itoa(best),
+	}}
+}
+
+func joinIfaces(t *testing.T, c *Cache, ifaces string, sec int, onRow func(routeros.Reply)) func() {
+	t.Helper()
+	rel, err := c.JoinStream(Join{
+		Menu: "/interface/monitor-traffic",
+		Cmd: routeros.Cmd{Path: "/interface/monitor-traffic", Args: []string{
+			"=interface=" + ifaces, "=interval=" + itoa(sec),
+		}},
+		KeyOf: byName, Boundary: time.Duration(sec) * time.Second,
+		Merge: mergeIfaces, OnRow: onRow,
+	})
+	if err != nil {
+		t.Fatalf("JoinStream(%s): %v", ifaces, err)
+	}
+	return rel
+}
+
+// TestTwoHoldersShareOneChannel is the whole point of the merge: the menu that
+// was read on two channels per router is read on one.
+func TestTwoHoldersShareOneChannel(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+
+	relA := joinIfaces(t, c, "ether1,ether2", 5, nil) // the rates holder
+	if got := p.lastCmd().Args[0]; got != "=interface=ether1,ether2" {
+		t.Fatalf("first holder opened with %q", got)
+	}
+	relB := joinIfaces(t, c, "ether2,wlan1", 1, nil) // the chart holder
+
+	opens, stops, _ := p.counts()
+	if opens != 2 || stops != 1 {
+		t.Errorf("opens=%d stops=%d; the second holder should have REPLACED the "+
+			"channel, not added one", opens, stops)
+	}
+	// THE UNION, AND THE FINER INTERVAL. Neither holder's set contains the
+	// other's, which is why this is a merge and not a subscription.
+	if got := p.lastCmd().Args[0]; got != "=interface=ether1,ether2,wlan1" {
+		t.Errorf("merged interface list = %q, want the union", got)
+	}
+	if got := p.lastCmd().Args[1]; got != "=interval=1" {
+		t.Errorf("merged interval = %q; a merged channel must deliver at the finest "+
+			"cadence any holder asked for, or the faster one silently loses "+
+			"resolution", got)
+	}
+
+	// A HOLDER LEAVING NARROWS IT. A refcount that only ever widened would keep
+	// the last viewer's selection open for the life of the session.
+	relB()
+	if got := p.lastCmd().Args[0]; got != "=interface=ether1,ether2" {
+		t.Errorf("after the chart holder left, the channel carries %q", got)
+	}
+	opens, stops, _ = p.counts()
+	if opens != 3 {
+		t.Errorf("opens=%d after the narrowing, want 3", opens)
+	}
+
+	relA()
+	_, stops, _ = p.counts()
+	if stops != 3 {
+		t.Errorf("stops=%d after the last holder left; the channel is still open", stops)
+	}
+	if c.Streaming("/interface/monitor-traffic") {
+		t.Error("the fill survived its last holder")
+	}
+}
+
+// TestASubsetHolderCostsNothing. The common case once the sets settle: a holder
+// that wants less than is already open must not restart the channel, because a
+// restart is a gap in every other holder's data.
+func TestASubsetHolderCostsNothing(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	defer joinIfaces(t, c, "ether1,ether2,wlan1", 1, nil)()
+	opens, _, _ := p.counts()
+
+	rel := joinIfaces(t, c, "ether2", 1, nil)
+	defer rel()
+	if got, _, _ := p.counts(); got != opens {
+		t.Errorf("a holder wanting a subset reopened the channel (%d -> %d); every "+
+			"other holder loses a second of data for nothing", opens, got)
+	}
+}
+
+// TestEveryHolderSeesEveryRow — the fan-out `traffic` needs.
+//
+// A snapshot is not enough for it: the chart is built from packets as they
+// arrive, one point per interface per second, and a holder reading the rolling
+// map on its own cadence would see only the latest.
+func TestEveryHolderSeesEveryRow(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	var mu sync.Mutex
+	var a, b []string
+	relA := joinIfaces(t, c, "ether1", 1, func(r routeros.Reply) {
+		mu.Lock()
+		a = append(a, r["name"])
+		mu.Unlock()
+	})
+	defer relA()
+	relB := joinIfaces(t, c, "ether1", 1, func(r routeros.Reply) {
+		mu.Lock()
+		b = append(b, r["name"])
+		mu.Unlock()
+	})
+	defer relB()
+
+	p.push(
+		routeros.Reply{"name": "ether1", "rx-bits-per-second": "1"},
+		routeros.Reply{"name": "ether1", "rx-bits-per-second": "2"},
+		routeros.Reply{"name": "ether1", "rx-bits-per-second": "3"},
+	)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(a) != 3 || len(b) != 3 {
+		t.Errorf("holders saw %d and %d rows, want 3 each — a chart built from a "+
+			"snapshot would draw one point where the router sent three", len(a), len(b))
+	}
+}
+
+// TestARowHookIsNotCalledUnderTheFillLock.
+//
+// ── THE DEADLOCK THIS FORBIDS HUNG THE SUITE ONCE ALREADY ──────────────────
+//
+// A holder's `OnRow` is another collector's delivery path — `traffic`'s takes its
+// own mutex and emits to the hub. Calling it under `f.mu` puts two collector
+// locks in one order here and invites the opposite order elsewhere, which is
+// exactly what `syncRateChannel` and `Tick` did on 2026-09-09: the suite HUNG
+// rather than failing, which is the worst way to find out.
+//
+// So the hook reaches back into the cache for a value that needs the same lock.
+// Held, this never returns; the timeout is what turns a hang into a failure.
+func TestARowHookIsNotCalledUnderTheFillLock(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	done := make(chan bool, 1)
+	rel := joinIfaces(t, c, "ether1", 1, func(routeros.Reply) {
+		// StreamStats takes f.mu. Under the fill's lock this deadlocks.
+		_, ok := c.StreamStats("/interface/monitor-traffic")
+		done <- ok
+	})
+	defer rel()
+
+	go p.push(routeros.Reply{"name": "ether1"})
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Error("StreamStats reported no fill from inside a row hook")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a row hook could not read the cache: absorb is holding the fill " +
+			"lock across the fan-out, which is a deadlock waiting for a second " +
+			"lock order")
+	}
+}
+
+// TestTheTwoStreamFormsRefuseToMix. `FillFromStream` is single-owner on purpose
+// — two collectors quietly fighting over one channel is a whole class of bug —
+// so sharing has to be opted into by BOTH holders rather than acquired by being
+// second.
+func TestTheTwoStreamFormsRefuseToMix(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	stop := fill(t, c, "/interface/monitor-traffic")
+	defer stop()
+
+	if _, err := c.JoinStream(Join{
+		Menu:  "/interface/monitor-traffic",
+		Cmd:   routeros.Cmd{Path: "/interface/monitor-traffic"},
+		KeyOf: byName, Merge: mergeIfaces,
+	}); err == nil {
+		t.Error("JoinStream took over a menu held by FillFromStream; the single-owner " +
+			"guard is what stops two collectors sharing a channel by accident")
+	}
+}
+
+// TestJoinStreamRefusesWhatItCannotDo — a merge rule is not optional, because a
+// shared channel without one is opened for whichever holder arrived last.
+func TestJoinStreamRefusesWhatItCannotDo(t *testing.T) {
+	c := New(&pusher{})
+	base := Join{
+		Menu:  "/interface/monitor-traffic",
+		Cmd:   routeros.Cmd{Path: "/interface/monitor-traffic"},
+		KeyOf: byName, Merge: mergeIfaces,
+	}
+	noMerge := base
+	noMerge.Merge = nil
+	if _, err := c.JoinStream(noMerge); err == nil {
+		t.Error("a Join with no Merge was accepted")
+	}
+	noKey := base
+	noKey.KeyOf = nil
+	if _, err := c.JoinStream(noKey); err == nil {
+		t.Error("a Join with no KeyOf was accepted")
+	}
+	unroll := base
+	unroll.Menu = "/tool/ping"
+	if _, err := c.JoinStream(unroll); err == nil {
+		t.Error("a Join on an unrollable menu was accepted; rows that are distinct " +
+			"measurements cannot back a rolling entry however they are held")
+	}
+}
+
+// TestTheMergedBoundaryIsTheFinestHolderAsksFor.
+//
+// ── A SURVIVING MUTATION IS WHY THIS EXISTS ────────────────────────────────
+//
+// Deleting `tightenBoundaryLocked` from the join path left every other test
+// green. The boundary is how long a quiet gap must be to end a round, and it is
+// derived from the CADENCE — so a fill created by a five-second holder keeps a
+// five-second boundary after a one-second holder widens the channel to one
+// second. The round boundary is then five times the interval, and the staleness
+// window that the empty-table rule doubles is wrong with it.
+//
+// It survives in practice on this menu because the repeat-key signal ends a
+// round anyway — monitor-traffic re-sends every interface every interval — which
+// is exactly the kind of "works by accident on the one menu we tried it on" that
+// stops being true on the next.
+//
+// READ FROM THE FIELDS, and that is the honest description: the boundary is a
+// scalar the mechanism consults, there is no cheaper observable that does not
+// involve waiting out real seconds, and the test is in-package.
+func TestTheMergedBoundaryIsTheFinestHolderAsksFor(t *testing.T) {
+	p := &pusher{}
+	c := New(p)
+	defer joinIfaces(t, c, "ether1", 5, nil)()
+
+	f := c.fillFor("/interface/monitor-traffic")
+	if f == nil {
+		t.Fatal("no fill after the first holder")
+	}
+	f.mu.Lock()
+	first, firstStale := f.boundary, f.stale
+	f.mu.Unlock()
+	if first != 5*time.Second {
+		t.Fatalf("the first holder's boundary is %v, want 5s", first)
+	}
+
+	defer joinIfaces(t, c, "ether1", 1, nil)()
+	f.mu.Lock()
+	after, afterStale := f.boundary, f.stale
+	f.mu.Unlock()
+	if after != time.Second {
+		t.Errorf("after a 1s holder joined a 5s channel the boundary is %v, want 1s — "+
+			"the merged channel delivers every second and a round that takes five to "+
+			"close is four seconds of two rounds counted as one", after)
+	}
+	// The staleness floor must not RISE with the boundary falling, and must not
+	// fall below the floor either: it is max(streamStale, 2*boundary).
+	if afterStale < streamStale {
+		t.Errorf("staleness fell to %v, below the %v floor", afterStale, streamStale)
+	}
+	if afterStale > firstStale {
+		t.Errorf("staleness rose from %v to %v as the cadence got FINER",
+			firstStale, afterStale)
 	}
 }

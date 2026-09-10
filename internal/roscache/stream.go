@@ -154,9 +154,287 @@ type streamFill struct {
 	restarts int
 	// rounds is how many complete rounds have been published.
 	rounds int
+	// openedAt is when the channel was last opened, for `StreamStats`. A
+	// collector that used to run its own watchdog needs to distinguish "silent
+	// for ten seconds" from "opened one second ago and not yet producing".
+	openedAt time.Time
+	// ── SHARING ─────────────────────────────────────────────────────────────
+	//
+	// `shared` is set by `JoinStream` and never by `FillFromStream`, so the two
+	// forms cannot be mixed on one menu by accident. That refusal is the guard
+	// `FillFromStream` has always had — two collectors silently fighting over
+	// one channel is a whole class of bug — and sharing has to be OPTED INTO at
+	// the call site rather than acquired by being second.
+	shared  bool
+	nextID  int
+	holders map[int]Join
 	// quietSince is when the current run of silence began, reset by any row and
 	// by an intentional reopen. See the empty-table rule in watch.
 	quietSince time.Time
+	// done stops the watchdog. Owned by whichever entry point opened the fill.
+	done chan struct{}
+}
+
+// Join is one holder's claim on a SHARED stream-filled menu.
+//
+// ── WHY SHARING NEEDED A SECOND ENTRY POINT ────────────────────────────────
+//
+// `FillFromStream` is single-owner and refuses a second caller, deliberately:
+// two collectors quietly fighting over one channel is a whole class of bug, and
+// thirteen of the fourteen streamed menus have exactly one consumer.
+//
+// `/interface/monitor-traffic` has two, and they want different things.
+// `ifStatus` wants every enabled interface at its own cadence and reads a
+// SNAPSHOT; `traffic` wants the interfaces somebody is watching — which may
+// include a disabled one — at one second, and needs EVERY ROW as it arrives to
+// fan out to per-interface rooms. Neither set contains the other, so this is a
+// merge and not a subscription to somebody else's channel.
+//
+// ── THE MERGE IS THE CALLER'S, AND THAT IS THE POINT ───────────────────────
+//
+// `=interface=` is a comma list and `=interval=` is a minimum. Neither rule
+// belongs in a cache that knows nothing about menus, and putting them here
+// would make the next shared menu's rule the second special case. So holders
+// declare what they want, this package keeps the set, and `Merge` — supplied by
+// the caller and identical for every holder of one menu — turns the set into
+// the command the channel is opened with.
+type Join struct {
+	Menu     string
+	Cmd      routeros.Cmd
+	KeyOf    func(routeros.Reply) string
+	Boundary time.Duration
+	// Merge combines every current holder's command into the one to open with.
+	// Called on every join and every release, so a holder leaving NARROWS the
+	// channel as well as a holder arriving widening it.
+	Merge func([]routeros.Cmd) routeros.Cmd
+	// OnRow, if set, receives every row as it arrives — before it is folded into
+	// the round, and never under the fill's lock.
+	OnRow func(routeros.Reply)
+}
+
+// JoinStream adds a holder to a shared stream-filled menu, opening the channel
+// if this is the first.
+//
+// THE RETURNED RELEASE IS PER HOLDER and idempotent. The channel closes when the
+// last holder releases; before that, a release re-merges and may narrow the
+// command, which is the half a refcount alone would miss.
+//
+// `KeyOf` and `Boundary` come from the FIRST holder, except that the boundary is
+// lowered to the finest any holder asks for — a merged channel delivers at the
+// fastest interval requested, so the gap that ends a round is that interval and
+// not a slower holder's.
+func (c *Cache) JoinStream(j Join) (func(), error) {
+	if j.Merge == nil {
+		return nil, fmt.Errorf("roscache: %s needs a Merge; a shared channel with no "+
+			"merge rule is opened for whichever holder arrived last", j.Menu)
+	}
+	if j.KeyOf == nil {
+		return nil, fmt.Errorf("roscache: %s needs a key function; a rolling map with "+
+			"no key holds one row", j.Menu)
+	}
+	if why, no := unrollable[j.Menu]; no {
+		return nil, fmt.Errorf("roscache: %s cannot be stream-filled: %s", j.Menu, why)
+	}
+	s, ok := c.ros.(Streamer)
+	if !ok {
+		return nil, fmt.Errorf("roscache: this reader cannot stream")
+	}
+
+	c.mu.Lock()
+	if c.fills == nil {
+		c.fills = map[string]*streamFill{}
+	}
+	f, existing := c.fills[j.Menu]
+	if existing && !f.shared {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("roscache: %s is held by FillFromStream, which is "+
+			"single-owner; both holders must use JoinStream to share it", j.Menu)
+	}
+	if !existing {
+		f = newFill(j.Cmd, j.KeyOf, j.Boundary, streamCheck, streamStale)
+		f.shared = true
+		f.holders = map[int]Join{}
+		c.fills[j.Menu] = f
+	}
+	f.mu.Lock()
+	f.nextID++
+	id := f.nextID
+	f.holders[id] = j
+	cmd := f.mergeLocked()
+	f.tightenBoundaryLocked(j.Boundary)
+	f.mu.Unlock()
+	c.mu.Unlock()
+
+	if err := f.reopenFor(s, cmd); err != nil {
+		// The first holder failing leaves nothing behind; a later one failing
+		// leaves the channel as it was, which is right — the holders already
+		// there are still being served.
+		c.mu.Lock()
+		f.mu.Lock()
+		delete(f.holders, id)
+		last := len(f.holders) == 0
+		f.mu.Unlock()
+		if last {
+			delete(c.fills, j.Menu)
+		}
+		c.mu.Unlock()
+		if last {
+			f.close()
+		}
+		return nil, err
+	}
+	if !existing {
+		f.done = make(chan struct{})
+		go f.watch(s, f.done)
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() { c.releaseHolder(j.Menu, f, id, s) })
+	}, nil
+}
+
+// releaseHolder drops one holder, narrowing or closing the channel.
+func (c *Cache) releaseHolder(menu string, f *streamFill, id int, s Streamer) {
+	c.mu.Lock()
+	f.mu.Lock()
+	delete(f.holders, id)
+	last := len(f.holders) == 0
+	var cmd routeros.Cmd
+	if !last {
+		cmd = f.mergeLocked()
+	}
+	f.mu.Unlock()
+	if last {
+		delete(c.fills, menu)
+	}
+	c.mu.Unlock()
+
+	if last {
+		close(f.done)
+		f.close()
+		return
+	}
+	// NARROWING IS NOT OPTIONAL. A holder leaving is exactly when the channel
+	// should stop carrying interfaces nobody is watching, and a refcount that
+	// only ever widens would keep the last viewer's selection open for the life
+	// of the session.
+	_ = f.reopenFor(s, cmd)
+}
+
+// mergeLocked applies the holders' merge rule. Caller holds f.mu.
+//
+// SORTED BY HOLDER ID, so the command a given set of holders produces is stable
+// and `reopenFor` restarts on a real change rather than on map iteration order.
+func (f *streamFill) mergeLocked() routeros.Cmd {
+	ids := make([]int, 0, len(f.holders))
+	for id := range f.holders {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	cmds := make([]routeros.Cmd, 0, len(ids))
+	var merge func([]routeros.Cmd) routeros.Cmd
+	for _, id := range ids {
+		h := f.holders[id]
+		cmds = append(cmds, h.Cmd)
+		if merge == nil {
+			merge = h.Merge
+		}
+	}
+	if merge == nil {
+		return f.cmd
+	}
+	return merge(cmds)
+}
+
+// tightenBoundaryLocked lowers the round boundary to the finest any holder wants.
+func (f *streamFill) tightenBoundaryLocked(b time.Duration) {
+	if b <= 0 {
+		return
+	}
+	if f.boundary <= 0 || b < f.boundary {
+		f.boundary = b
+	}
+	if 2*f.boundary > f.stale {
+		f.stale = 2 * f.boundary
+	}
+}
+
+// reopenFor restarts the channel when the merged command has changed.
+//
+// A NO-OP WHEN IT HAS NOT, which is the common case: a second holder that wants
+// a subset of what is already open costs nothing at all.
+func (f *streamFill) reopenFor(s Streamer, cmd routeros.Cmd) error {
+	f.mu.Lock()
+	if f.stop != nil && sameCmd(f.cmd, cmd) {
+		f.mu.Unlock()
+		return nil
+	}
+	old := f.stop
+	f.stop, f.cmd = nil, cmd
+	f.mu.Unlock()
+	if old != nil {
+		old()
+	}
+	return f.open(s)
+}
+
+func sameCmd(a, b routeros.Cmd) bool {
+	if a.Path != b.Path || len(a.Args) != len(b.Args) {
+		return false
+	}
+	for i := range a.Args {
+		if a.Args[i] != b.Args[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// newFill is the shared constructor for both entry points.
+func newFill(cmd routeros.Cmd, keyOf func(routeros.Reply) string,
+	boundary, check, stale time.Duration) *streamFill {
+	if boundary > 0 && 2*boundary > stale {
+		stale = 2 * boundary
+	}
+	return &streamFill{cmd: cmd, keyOf: keyOf,
+		rows: map[string]routeros.Reply{}, round: map[string]routeros.Reply{},
+		boundary: boundary, check: check, stale: stale}
+}
+
+// StreamStats is one fill's health, for a collector that used to run its own
+// watchdog and still has a health signal to report.
+//
+// `traffic` tints its dashboard card and names a restart count — a real feature
+// that must survive its watchdog being retired in favour of this package's. So
+// the counters it kept move here rather than disappearing.
+type StreamStats struct {
+	Open     bool
+	Restarts int
+	// Silent is how long since the last row arrived.
+	Silent time.Duration
+	// SinceOpen is how long the channel has been up. A channel opened a moment
+	// ago is not stale for having produced nothing yet, which is the distinction
+	// `traffic`'s watchdog drew with `streamStart`.
+	SinceOpen time.Duration
+}
+
+// StreamStats reports one menu's fill, and whether there is one.
+func (c *Cache) StreamStats(menu string) (StreamStats, bool) {
+	f := c.fillFor(menu)
+	if f == nil {
+		return StreamStats{}, false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := StreamStats{Open: f.stop != nil, Restarts: f.restarts}
+	if !f.lastRow.IsZero() {
+		st.Silent = time.Since(f.lastRow)
+	}
+	if !f.openedAt.IsZero() {
+		st.SinceOpen = time.Since(f.openedAt)
+	}
+	return st, true
 }
 
 // FillFromStream opens a channel and keeps `menu`'s entry current from it, so
@@ -212,13 +490,10 @@ func (c *Cache) fillEvery(menu string, cmd routeros.Cmd,
 	// probe passed; only the page was wrong.
 	//
 	// So a stream is silent when it has said nothing for longer than two of its
-	// OWN intervals, and never less than the floor.
-	if boundary > 0 && 2*boundary > stale {
-		stale = 2 * boundary
-	}
-	f := &streamFill{cmd: cmd, keyOf: keyOf,
-		rows: map[string]routeros.Reply{}, round: map[string]routeros.Reply{},
-		boundary: boundary, check: check, stale: stale}
+	// OWN intervals, and never less than the floor. `newFill` applies it, shared
+	// with `JoinStream` so the two entry points cannot drift on the one rule
+	// that a measurement already caught being wrong.
+	f := newFill(cmd, keyOf, boundary, check, stale)
 	c.fills[menu] = f
 	c.mu.Unlock()
 
@@ -257,6 +532,7 @@ func (f *streamFill) open(s Streamer) error {
 		return nil
 	}
 	f.stop, f.lastRow = stop, time.Now()
+	f.openedAt = f.lastRow
 	f.mu.Unlock()
 	return nil
 }
@@ -300,6 +576,20 @@ func (f *streamFill) open(s Streamer) error {
 // it is why the registration tables stay refused: "no wireless clients" is an
 // ordinary state, and ghost clients would be the visible result.
 func (f *streamFill) absorb(r routeros.Reply) {
+	// ── THE FAN-OUT COMES FIRST, AND NOT UNDER THE LOCK ────────────────────
+	//
+	// A holder's `OnRow` is another collector's delivery path: `traffic`'s takes
+	// its own mutex and emits to the hub. Calling it while holding `f.mu` puts
+	// two collector locks in one order here and invites the opposite order
+	// somewhere else — which is exactly the deadlock `syncRateChannel` and
+	// `Tick` produced on 2026-09-09, and it HUNG the suite rather than failing
+	// it.
+	//
+	// Before the fold rather than after, so a row reaches its consumer at the
+	// same moment it always did.
+	for _, fn := range f.rowHooks() {
+		fn(r)
+	}
 	k := f.keyOf(r)
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -329,6 +619,23 @@ func (f *streamFill) absorb(r routeros.Reply) {
 		f.round = map[string]routeros.Reply{}
 	}
 	f.round[k] = r
+}
+
+// rowHooks copies the holders' row callbacks so `absorb` can call them without
+// holding the lock. Nil for every unshared fill, which is thirteen of fourteen.
+func (f *streamFill) rowHooks() []func(routeros.Reply) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.holders) == 0 {
+		return nil
+	}
+	out := make([]func(routeros.Reply), 0, len(f.holders))
+	for _, h := range f.holders {
+		if h.OnRow != nil {
+			out = append(out, h.OnRow)
+		}
+	}
+	return out
 }
 
 // finishRoundLocked publishes the round just received. Caller holds f.mu.
