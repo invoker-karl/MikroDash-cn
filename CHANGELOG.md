@@ -2,10 +2,9 @@
 
 All notable changes to MikroDash will be documented in this file.
 
-## [Unreleased]
+## [0.8.51] - The update check on the dashboard could get stuck
 
-Changes on `main` that are in the `:latest` image but not yet in a numbered
-release.
+A one-fix release on top of 0.8.50.
 
 ### Fixed
 
