@@ -845,9 +845,6 @@ func (s *IfStatus) UseCache(c *roscache.Cache) {
 	s.sched.useCache(c)
 }
 
-// monitorTrafficMenu is the menu both this collector and `traffic` want.
-const monitorTrafficMenu = "/interface/monitor-traffic"
-
 // keyByIfaceName keys a monitor-traffic row. These rows carry no `.id` -- they
 // are a measurement per interface, not a table -- so the interface name is the
 // identity, and a later reading of one interface replaces the earlier.
@@ -856,21 +853,20 @@ func keyByIfaceName(r routeros.Reply) string { return r["name"] }
 // syncRateChannel keeps a channel open on `monitor-traffic` for every interface
 // this collector knows about, so `rates` can read instead of measure.
 //
-// ── WHY THIS COLLECTOR OPENS IT AND NOT `traffic` ──────────────────────────
+// ── NEITHER COLLECTOR OWNS IT; THEY HOLD IT TOGETHER ───────────────────────
 //
-// `traffic` already holds a channel on this menu and is the natural owner: one
-// channel could serve both. It is not the owner YET, and the reason is worth
-// recording rather than leaving as an oddity.
+// There were TWO channels on this menu for most of B.7, deliberately: `traffic`
+// built its chart from a per-row callback and carried its own watchdog, so
+// making either one the owner meant giving the fill a row callback and retiring
+// that machinery — real work on the collector whose failure is most visible.
+// B.0b measured a second channel as free, so B.7 took the additive path and left
+// the merge as its own step.
 //
-// `traffic`'s chart is built from a PER-ROW callback as packets arrive, and it
-// carries its own watchdog and its own restart-on-set-change. Making it the
-// filler means giving the fill a row callback and retiring that machinery --
-// real work on the collector whose failure is most visible. B.0b measured a
-// second channel as free (24 concurrent, no ceiling, no starvation), so this
-// takes the additive path and leaves the merge as its own step.
-//
-// SO THERE ARE TWO CHANNELS ON THIS MENU FOR NOW, deliberately, and the win is
-// unaffected: `ifStatus` stops issuing 52 commands a minute either way.
+// That step is done. `joinMonitorTraffic` is the one call both make, and neither
+// is the authority on the other's needs: the channel carries the UNION of the
+// interfaces asked for at the FINEST interval, and closes when the last holder
+// lets go. See internal/collect/monitortraffic.go for the rule and
+// `roscache.JoinStream` for the sharing.
 //
 // ── REOPENED WHEN THE INTERFACE SET CHANGES ────────────────────────────────
 //
@@ -897,18 +893,7 @@ func (s *IfStatus) syncRateChannel(names []string) {
 		old()
 	}
 
-	sec := int(s.pollMs.duration() / time.Second)
-	if sec < 1 {
-		sec = 1
-	}
-	stop, err := s.cache.FillFromStream(monitorTrafficMenu, routeros.Cmd{
-		Path: monitorTrafficMenu,
-		Args: []string{
-			"=interface=" + key,
-			"=interval=" + strconv.Itoa(sec),
-			"=.proplist=name,rx-bits-per-second,tx-bits-per-second",
-		},
-	}, keyByIfaceName, s.pollMs.duration())
+	stop, err := joinMonitorTraffic(s.cache, names, int(s.pollMs.duration()/time.Second), nil)
 	if err != nil {
 		return // measuring, which is what `rates` already does
 	}

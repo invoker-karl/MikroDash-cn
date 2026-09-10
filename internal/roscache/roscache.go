@@ -94,6 +94,9 @@ type Cache struct {
 	// the caller, which is the only thing that knows which collector owns a menu
 	// and what the router's config says about it. See StreamWhen.
 	streamWhen func(menu string) bool
+	// checkOver and staleOver override the stream watchdog's timings. Zero in
+	// production; see StreamTimings.
+	checkOver, staleOver time.Duration
 
 	// The demand set, on its own lock. SEPARATE FROM `mu` deliberately: `Get`
 	// holds `mu` and must never wait on a page opening or closing, and a

@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
-// The traffic stream's silent-death watchdog.
+// The traffic stream's silent-death recovery, after B.7 split it in two.
 //
 // ── THE FAILURE IT EXISTS FOR ───────────────────────────────────────────────
 //
@@ -18,9 +19,24 @@ import (
 // retries. Reported on issue #126 as a router that "disconnects" and returns
 // only when the device is deleted and re-added.
 //
-// These tests drive the tick directly rather than waiting on the real 5s timer:
-// the point is the DECISION, and a test that slept would be slow and flaky
-// without proving anything more.
+// ── WHAT MOVED, AND WHAT THESE TESTS ASSERT NOW ────────────────────────────
+//
+// The channel is shared with `ifStatus` since B.7, so the RESTARTING is
+// `roscache`'s: one watchdog for all fourteen streamed menus instead of a second
+// one here racing it. `internal/roscache` owns those tests.
+//
+// Two jobs stayed, because only this collector can do them:
+//
+//	the failed-open retry   `JoinStream` returning an error leaves NO fill, so
+//	                        there is nothing for the shared watchdog to watch
+//	the health signal       `stream:health` tints the Dashboard's traffic card
+//	                        and names a restart count that is now somebody
+//	                        else's counter
+//
+// So these drive the tick directly and, where a restart is the subject, drive it
+// END TO END: the fake router goes silent, `roscache` restarts the fill, and this
+// collector turns the rising count into one transition. `Cache.StreamTimings`
+// is what makes that take milliseconds instead of a minute a case.
 
 // wdReader is a connected router whose stream can be counted and silenced.
 type wdReader struct {
@@ -82,10 +98,39 @@ func wdTraffic(t *testing.T) (*wdReader, *Traffic, *[]map[string]any) {
 		mu.Unlock()
 	}
 	tr := NewTraffic(r, emit, "ether1", 1)
+	// THE CHANNEL LIVES IN THE CACHE NOW. A `traffic` without one holds no
+	// channel at all — deliberately, so the raw path cannot survive as a
+	// fallback that only tests exercise.
+	c := roscache.New(r)
+	// Fast enough that a stall is a few milliseconds rather than ten seconds,
+	// and it is the fill's own watchdog being hurried, not a reimplementation.
+	c.StreamTimings(5*time.Millisecond, 20*time.Millisecond)
+	tr.UseCache(c)
 	tr.wdEvery = time.Hour
 	tr.wdStaleMs = 10_000
 	t.Cleanup(tr.Stop)
 	return r, tr, &health
+}
+
+// stall waits for the shared fill to notice silence and reopen the channel, and
+// returns how many times it has.
+//
+// POLLED RATHER THAN SLEPT for a fixed span: the fill's watchdog runs on its own
+// goroutine, and a fixed sleep is the difference between a test that is slow and
+// one that is flaky.
+func stall(t *testing.T, tr *Traffic, want int) int {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, ok := tr.cache.StreamStats(monitorTrafficMenu); ok && st.Restarts >= want {
+			return st.Restarts
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	st, _ := tr.cache.StreamStats(monitorTrafficMenu)
+	t.Fatalf("the shared channel restarted %d times in 3s, want %d — the fill's "+
+		"watchdog is not recovering a silent channel", st.Restarts, want)
+	return 0
 }
 
 // openStream starts the stream WITHOUT arming the watchdog timer.
@@ -105,35 +150,49 @@ func openStream(tr *Traffic) { tr.syncStream() }
 
 // TestAStalledStreamIsRestarted is the bug.
 func TestAStalledStreamIsRestarted(t *testing.T) {
-	r, tr, _ := wdTraffic(t)
+	r, tr, health := wdTraffic(t)
 	openStream(tr)
 	if r.openCount() != 1 {
 		t.Fatalf("opening the stream made %d streams", r.openCount())
 	}
 	r.deliver()
 
-	// A healthy tick changes nothing.
+	// A healthy tick changes nothing, and says nothing.
 	tr.watchdogTick()
 	if r.openCount() != 1 {
 		t.Fatalf("a healthy stream was restarted (%d opens)", r.openCount())
 	}
+	if len(*health) != 0 {
+		t.Fatalf("a healthy stream reported %v", *health)
+	}
 
-	// Now the router goes quiet: age the last reading past the threshold.
-	tr.mu.Lock()
-	tr.lastData = time.Now().UnixMilli() - 30_000
-	tr.streamStart = tr.lastData
-	tr.mu.Unlock()
+	// Now the router simply stops sending. Nothing here does anything about it;
+	// the shared fill's watchdog does, which is the whole point of the merge.
+	stall(t, tr, 1)
+	if r.openCount() < 2 {
+		t.Errorf("a silent channel was not reopened (%d opens) — the chart stops "+
+			"and nothing ever retries", r.openCount())
+	}
 
+	// AND THIS COLLECTOR NOTICES. The restart count is the Dashboard's, and a
+	// recovery nobody reports is indistinguishable from one that never happened.
 	tr.watchdogTick()
-	if r.openCount() != 2 {
-		t.Errorf("a stream silent for 30s was not restarted (%d opens) — the chart "+
-			"stops and nothing ever retries", r.openCount())
+	tr.mu.Lock()
+	seen := tr.seenRestarts
+	tr.mu.Unlock()
+	if seen == 0 {
+		t.Error("the collector did not see the shared channel restart, so the card " +
+			"will never show a degraded stream however often it recovers")
 	}
 }
 
-// TestAStreamThatFailedToOpenIsRetried. `syncStream` gives up silently when
-// Stream returns an error, so without the watchdog a single failed open left the
-// collector with no stream and nothing to start one.
+// TestAStreamThatFailedToOpenIsRetried. `syncStream` gives up silently when the
+// join returns an error, so without this a single failed open left the collector
+// with no stream and nothing to start one.
+//
+// THIS IS THE JOB THAT COULD NOT MOVE. `JoinStream` failing leaves no fill
+// behind, so there is nothing for the shared watchdog to watch: only the
+// collector knows it wanted a holder and has none.
 func TestAStreamThatFailedToOpenIsRetried(t *testing.T) {
 	r, tr, _ := wdTraffic(t)
 	openStream(tr)
@@ -152,14 +211,6 @@ func TestAStreamThatFailedToOpenIsRetried(t *testing.T) {
 func TestADisconnectedRouterIsLeftAlone(t *testing.T) {
 	r, tr, _ := wdTraffic(t)
 	openStream(tr)
-	// BOTH clocks aged, or the tick is not looking at a stale stream at all:
-	// the watchdog compares against whichever of the two is LATER, so a fresh
-	// `streamStart` alone keeps it healthy. Ageing only `lastData` made this
-	// case pass against a watchdog with its connected guard removed.
-	tr.mu.Lock()
-	tr.lastData = time.Now().UnixMilli() - 30_000
-	tr.streamStart = tr.lastData
-	tr.mu.Unlock()
 
 	r.mu.Lock()
 	r.conn = false
@@ -172,8 +223,8 @@ func TestADisconnectedRouterIsLeftAlone(t *testing.T) {
 	// ── AND THE STREAM WAS NOT TORN DOWN EITHER ─────────────────────────────
 	//
 	// Counting opens alone is VACUOUS here: `syncStream` has its own connected
-	// check, so a watchdog that skipped the guard would still fail to reopen and
-	// the open count would look identical. What it WOULD do is close the stream
+	// check, so a tick that skipped the guard would still fail to reopen and the
+	// open count would look identical. What it WOULD do is release the holder
 	// first, leaving the collector with nothing — so the stop count is the
 	// assertion that separates the two. A mutation removing the guard survived
 	// until this existed.
@@ -217,20 +268,24 @@ func TestSuspendStopsTheWatchdog(t *testing.T) {
 
 // TestThreeRestartsReportDegraded — the end-to-end path to the warning the
 // Dashboard has always been able to render and never received.
+//
+// END TO END NOW MEANS ACROSS TWO PACKAGES: the fake router goes silent,
+// `roscache` reopens the fill three times, and this collector turns the rising
+// count into exactly one transition. Under the old shape this collector did the
+// restarting AND the counting, so the test could not tell a real recovery from
+// its own bookkeeping.
 func TestThreeRestartsReportDegraded(t *testing.T) {
-	r, tr, health := wdTraffic(t)
+	_, tr, health := wdTraffic(t)
 	openStream(tr)
 
-	for i := 0; i < 3; i++ {
-		tr.mu.Lock()
-		tr.lastData = time.Now().UnixMilli() - 30_000
-		tr.streamStart = tr.lastData
-		tr.mu.Unlock()
+	// One tick per restart, so each is seen as it happens rather than three at
+	// once — which is what the Dashboard sees, and what makes "exactly one
+	// transition" a real assertion rather than an artefact of batching.
+	for i := 1; i <= 3; i++ {
+		stall(t, tr, i)
 		tr.watchdogTick()
 	}
-	if r.openCount() != 4 {
-		t.Fatalf("%d opens after three stalls", r.openCount())
-	}
+
 	if len(*health) != 1 {
 		t.Fatalf("stream:health sent %d times, want exactly one transition: %v",
 			len(*health), *health)

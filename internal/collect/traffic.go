@@ -56,6 +56,7 @@ import (
 	"sync"
 	"time"
 
+	"mikrodash/internal/roscache"
 	"mikrodash/internal/routeros"
 )
 
@@ -202,6 +203,11 @@ type Traffic struct {
 	defaultIf string
 	maxPoints int
 
+	// cache is where the channel lives. `traffic` used to open a raw stream of
+	// its own; it is one holder of a SHARED fill now — see
+	// internal/collect/monitortraffic.go.
+	cache *roscache.Cache
+
 	mu sync.Mutex
 	// watching is a REFCOUNT per interface, not a set: two viewers on one
 	// interface must not have the first to leave stop the stream for the second.
@@ -227,7 +233,20 @@ type Traffic struct {
 	// instead of waiting out real time.
 	wdEvery   time.Duration
 	wdStaleMs int64
+	// seenRestarts is the fill's restart count as of the last health tick. The
+	// restarting is `roscache`'s now, so a restart is DETECTED here rather than
+	// performed, and this is what turns a rising counter into one transition.
+	seenRestarts int
 }
+
+// UseCache hands this collector the channel it shares with `ifStatus`.
+//
+// REQUIRED, not optional. `traffic` opened its own raw stream until the B.7
+// merge, and keeping that as a fallback would leave two delivery paths alive —
+// the exact thing the merge removes — with the fallback being the one every unit
+// test exercised. So a `traffic` with no cache holds no channel and says so,
+// rather than quietly working a second way.
+func (t *Traffic) UseCache(c *roscache.Cache) { t.cache = c }
 
 // TrafficSub is the room suffix one interface's samples are delivered to.
 //
@@ -439,11 +458,7 @@ func (t *Traffic) ifaceListLocked() []string {
 
 // syncStream restarts the stream when the interface set has changed.
 func (t *Traffic) syncStream() {
-	if !t.ros.Connected() {
-		return
-	}
-	s, ok := t.ros.(Streamer)
-	if !ok {
+	if !t.ros.Connected() || t.cache == nil {
 		return
 	}
 
@@ -465,14 +480,18 @@ func (t *Traffic) syncStream() {
 		return
 	}
 
-	// ── SET B: A STREAM ─────────────────────────────────────────────────────
-	// See acquisition.go. Same menu as ifStatus's measurement above, and a
-	// different question: an open channel the router pushes down, with no result
-	// to hold and no end to hold it until.
-	stop, err := s.Stream(routeros.Cmd{Path: "/interface/monitor-traffic", Args: []string{
-		"=interface=" + key, "=interval=1",
-		"=.proplist=name,rx-bits-per-second,tx-bits-per-second,running,disabled",
-	}}, t.onPacket)
+	// ── SET B: A STREAM, AND SINCE B.7 A SHARED ONE ────────────────────────
+	//
+	// See acquisition.go. Same menu `ifStatus` reads its rates from, and a
+	// different question of it: that one wants a snapshot of every enabled
+	// interface, this one wants EVERY ROW for the interfaces somebody is
+	// watching. Neither set contains the other, so the two are merged rather
+	// than one subscribing to the other's channel.
+	//
+	// ONE SECOND, ALWAYS, and it is this holder that asks for it: the chart draws
+	// a point a second and is the holder with resolution to lose. The merge takes
+	// the finest interval any holder wants.
+	stop, err := joinMonitorTraffic(t.cache, names, 1, t.onPacket)
 	if err != nil {
 		return
 	}
@@ -482,11 +501,10 @@ func (t *Traffic) syncStream() {
 	t.mu.Unlock()
 }
 
-// watchdogTick is the silent-death recovery the live app has and this port did
-// not: `_startWatchdog` in src/collectors/traffic.js, added in PR #91 for the
-// symptoms in issues #55 and #90.
+// watchdogTick is what is LEFT of the silent-death watchdog after B.7, and what
+// it no longer does is the point.
 //
-// ── WHY A STREAM NEEDS WATCHING AT ALL ──────────────────────────────────────
+// ── WHY A STREAM NEEDED WATCHING AT ALL ─────────────────────────────────────
 //
 // `/interface/monitor-traffic` pushes a row a second and nothing acknowledges
 // it. A router that stops sending — after an upgrade, a CPU spike, a menu
@@ -494,45 +512,42 @@ func (t *Traffic) syncStream() {
 // reports Connected, and a chart that simply stops moving. Nothing errors, so
 // nothing retries, and the only cure was for the operator to force a reconnect.
 // Reported on issue #126 as a router that "disconnects" and comes back only
-// when the device is deleted and added again.
+// when the device is deleted and added again. This is `_startWatchdog` in
+// src/collectors/traffic.js, added in PR #91 for issues #55 and #90.
 //
-// This is deliberately about ONE STREAM rather than the connection. A stalled
-// stream is the failure that was actually seen, the connection has its own
-// retry loop, and restarting a stream costs one command where restarting a
-// connection costs every collector's state.
+// ── THE RESTARTING MOVED, THE REPORTING DID NOT ────────────────────────────
 //
-// ── THREE CASES, IN THE LIVE ORDER ──────────────────────────────────────────
+// The channel is `roscache`'s now and so is its recovery: `streamFill.watch`
+// reopens a fill that has gone quiet, and it does it for all fourteen streamed
+// menus instead of this one. Keeping a second watchdog here would mean two
+// things racing to restart one channel, and the loser would find a stream it
+// had not opened.
 //
-//	not connected      do nothing; connectLoop owns that, and restarting a
-//	                   stream on a dead client would fail every tick.
-//	no stream          open one. `syncStream` gives up silently when Stream
-//	                   returns an error, so this is also how a failed open is
-//	                   retried at all.
-//	stale              close and reopen, and count it.
+// What could NOT move is the health signal. `stream:health` tints the traffic
+// card on the Dashboard and names a restart count — a real feature, and the
+// restart count is now somebody else's counter. So this tick DETECTS a restart
+// instead of performing one, and feeds the same `StreamHealth` state machine it
+// always did.
 //
-// Anything else is a healthy tick, which is what eventually clears a degraded
-// stream — see StreamHealth for why that needs the stream to have been up a
-// while rather than merely to have produced a packet.
+// ── AND ONE THING THE FILL DOES NOT DO: RETRY A FAILED OPEN ────────────────
+//
+// `JoinStream` returns an error when the channel will not open, and leaves no
+// fill behind — so there is nothing for its watchdog to watch. That retry was
+// this loop's second job and it stays here, because it is about whether this
+// collector HAS a holder, which is a question only this collector can ask.
+//
+//	not connected   do nothing; connectLoop owns that
+//	no holder       try to join. This is how a failed open is retried at all
+//	holder          read the fill's counters and report any change in health
 func (t *Traffic) watchdogTick() {
-	if !t.ros.Connected() {
-		return
-	}
-	if _, ok := t.ros.(Streamer); !ok {
+	if !t.ros.Connected() || t.cache == nil {
 		return
 	}
 
 	t.mu.Lock()
 	running := t.stop != nil
-	last := t.lastData
-	if t.streamStart > last {
-		last = t.streamStart
-	}
-	start := t.streamStart
 	wanted := len(t.ifaceListLocked()) > 0
-	stale := t.wdStaleMs
 	t.mu.Unlock()
-
-	now := time.Now().UnixMilli()
 
 	if !running {
 		if wanted {
@@ -540,25 +555,46 @@ func (t *Traffic) watchdogTick() {
 		}
 		return
 	}
-	if last > 0 && now-last > stale {
+
+	st, ok := t.cache.StreamStats(monitorTrafficMenu)
+	if !ok {
+		// The fill went away under us — another holder released last, or the
+		// cache was rebuilt. Rejoining is the same action as a failed open.
+		t.stopStream()
+		if wanted {
+			t.syncStream()
+		}
+		return
+	}
+
+	now := time.Now().UnixMilli()
+	t.mu.Lock()
+	seen := t.seenRestarts
+	t.mu.Unlock()
+
+	if st.Restarts > seen {
+		// ONE TRANSITION PER RESTART, however many the fill did between ticks.
+		// `RecordRestart` is the same call the old watchdog made after doing the
+		// restart itself; all that changed is who did it.
 		t.mu.Lock()
+		t.seenRestarts = st.Restarts
 		degraded, changed := t.health.RecordRestart(now)
 		restarts := t.health.Restarts()
 		t.mu.Unlock()
-		log.Printf("[traffic] watchdog: no data for %ds — restarting the stream",
-			(now-last)/1000)
-		// STOPPED AND REOPENED, not `Stop`: that would take the watchdog down
-		// with it and this is the watchdog.
-		t.stopStream()
-		t.syncStream()
+		log.Printf("[traffic] the shared monitor-traffic channel restarted (%d total)",
+			st.Restarts)
 		if changed {
 			t.emitHealth(degraded, restarts)
 		}
 		return
 	}
-	if start > 0 {
+
+	// A stream that has been up a while is recovering. `SinceOpen` is the fill's
+	// own clock, which is what stops a channel opened a moment ago from being
+	// read as a long healthy run.
+	if st.Open && st.SinceOpen > 0 {
 		t.mu.Lock()
-		degraded, changed := t.health.RecordHealthy(now - start)
+		degraded, changed := t.health.RecordHealthy(st.SinceOpen.Milliseconds())
 		restarts := t.health.Restarts()
 		t.mu.Unlock()
 		if changed {

@@ -41,9 +41,13 @@ func TestSetBIsDeclared(t *testing.T) {
 	// both of these menus are -- reads as the two different questions it is.
 	declared := map[string]string{
 		"ifstatus.go: /interface/monitor-traffic": "measurement: interface rates, taken at an instant on a " +
-			"named set of interfaces. ~52 commands a minute, the largest single item left.",
-		"traffic.go: /interface/monitor-traffic": "stream: the traffic chart. Same menu as the line above, " +
-			"different question.",
+			"named set of interfaces. THE FALLBACK since B.7 -- it runs only when the shared " +
+			"channel has no rows for an interface, which is a fresh session or a router that " +
+			"refused the stream. It was ~52 commands a minute and is the largest thing B.7 removed.",
+		"monitortraffic.go: /interface/monitor-traffic": "stream: ONE channel, two holders. The traffic " +
+			"chart wants every row; ifStatus wants a snapshot of the rates. It was two channels " +
+			"and one command per holder until B.7's merge, and the command is built here now " +
+			"precisely so neither collector is the authority on the other's needs.",
 		"ping.go: /tool/ping":     "stream: the configured ping target.",
 		"topology.go: /tool/ping": "measurement: one bounded ping per discovered node.",
 		"logs.go: /log/listen":    "stream: the only one identified by its path rather than an argument.",
@@ -55,13 +59,31 @@ func TestSetBIsDeclared(t *testing.T) {
 	// The classification is KindOf's, restated here against source text because a
 	// gate that imported the collector package would be asserting that a function
 	// agrees with itself.
-	cmd := regexp.MustCompile(`(?s)routeros\.Cmd\{\s*Path:\s*"(/[^"]+)"(.*?)\}\}?`)
+	// ── A PATH MAY BE A CONSTANT, AND IT WAS INVISIBLE UNTIL 2026-09-10 ─────
+	//
+	// This matched a STRING LITERAL after `Path:` and nothing else. When the
+	// monitor-traffic command moved into its own file and named its menu by the
+	// const the two collectors share, the ledger simply stopped seeing it — the
+	// entry read as a gap that had CLOSED, which is the one failure direction
+	// that looks like progress. The menu had not gone anywhere.
+	//
+	// So package-level `const NAME = "/menu"` is resolved first. Same fix as
+	// L.4's in `sharedmenu_test.go`, which resolves `scheduled{menu: xxxCmd.Path}`
+	// for the same reason and after the same kind of miss.
+	consts := menuConsts(t, dir)
+	cmd := regexp.MustCompile(`(?s)routeros\.Cmd\{\s*Path:\s*(?:"(/[^"]+)"|(\w+))(.*?)\}\}?`)
 	arg := regexp.MustCompile(`"(=[^"]*)"`)
 
 	for _, name := range collectGoFiles(t, dir) {
 		src := mustRead(t, filepath.Join(dir, name))
 		for _, m := range cmd.FindAllStringSubmatch(src, -1) {
-			menu, rest := m[1], m[2]
+			menu, rest := m[1], m[3]
+			if menu == "" {
+				var ok bool
+				if menu, ok = consts[m[2]]; !ok {
+					continue // a Path built from something this cannot resolve
+				}
+			}
 			kind := "query"
 			if strings.HasSuffix(menu, "/listen") {
 				kind = "stream"
@@ -115,6 +137,27 @@ func TestSetBIsDeclared(t *testing.T) {
 			len(found), len(declared), sortedStrings(found))
 	}
 	t.Logf("%d table reads, %d measurements and streams", queries, len(found))
+}
+
+// menuConsts maps a package-level constant to the menu path it holds.
+//
+// Only paths: a const whose value does not start with `/` is not a menu, and
+// including it would let an unrelated string be matched as one.
+func menuConsts(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^(?:const\s+)?\s*(\w+)\s*=\s*"(/[^"]+)"`)
+	out := map[string]string{}
+	for _, name := range collectGoFiles(t, dir) {
+		for _, m := range re.FindAllStringSubmatch(mustRead(t, filepath.Join(dir, name)), -1) {
+			out[m[1]] = m[2]
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no menu constant was resolved; a Path named by a const would be " +
+			"invisible to this ledger, which is how the monitor-traffic entry " +
+			"silently read as closed on 2026-09-10")
+	}
+	return out
 }
 
 func collectGoFiles(t *testing.T, dir string) []string {

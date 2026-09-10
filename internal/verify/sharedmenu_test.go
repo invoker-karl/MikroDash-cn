@@ -64,11 +64,24 @@ func TestEverySharedMenuIsRoutedOrExplained(t *testing.T) {
 		// handed back RAW rows. See L.3 for why nothing caught it.
 		"/ip/firewall/connection/print": "",
 
-		"/interface/monitor-traffic": "one side holds a stream and the other takes a bounded " +
-			"=once= measurement, so a by-menu entry would hand one the other's answer. " +
-			"SLATED FOR B.1: a stream can BACK an entry when its rows are successive " +
-			"readings of a keyed value, which these are -- at which point this becomes " +
-			"routed and the entry moves up",
+		// `/interface/monitor-traffic` WAS HERE, and the entry named the condition
+		// under which it would leave: "SLATED FOR B.1: a stream can BACK an entry
+		// when its rows are successive readings of a keyed value, which these are
+		// -- at which point this becomes routed and the entry moves up".
+		//
+		// B.7's merge is that point. Both collectors hold ONE shared fill, the
+		// command is built in `monitortraffic.go` so neither is the authority on
+		// the other's needs, and the menu is declared once rather than twice — so
+		// it is not a shared menu any more in the sense this ledger means.
+		//
+		// The `=once=` measurement in `ifstatus.go` survives as the FALLBACK for
+		// an interface the channel has no rows for, which is what keeps that file
+		// in the set B ledger next door — and it is why this menu is still read by
+		// two files and still belongs here, now as ROUTED rather than exempt.
+		//
+		// "Routed" for a streamed menu means STREAM-FILLED: one channel backs the
+		// entry both holders read, which is what `readVia` means for a polled one.
+		"/interface/monitor-traffic": "",
 		"/tool/ping": "ONE stream and one BOUNDED per-device read (topology sends =count=1), " +
 			"not two streams. Parameterised by address, so the menu is not the question -- " +
 			"and permanently unroutable for a second reason: each row is a DISTINCT " +
@@ -112,11 +125,24 @@ func TestEverySharedMenuIsRoutedOrExplained(t *testing.T) {
 		if _, ok := subscribed[menu]; ok {
 			continue // routed by subscription
 		}
+		// ── A STREAMED MENU IS ROUTED BY ITS FILL, NOT BY `readVia` ─────────
+		//
+		// `readVia` is the polled path: ask the cache, and it reads if it must.
+		// A stream-filled menu is routed a different way — one channel keeps the
+		// entry current and every holder reads that entry — and requiring
+		// `readVia` of it would demand the one shape it cannot have.
+		//
+		// `JoinStream` is the marker because it is the SHARED form: a menu two
+		// files read and one of them opens with `FillFromStream` would be a
+		// single owner refusing the other, which is not routed at all.
+		if streamJoined(t, dir, files) {
+			continue
+		}
 		for _, f := range files {
 			if !strings.Contains(mustRead(t, filepath.Join(dir, f)), "readVia(") {
-				t.Errorf("%s is marked routed, but %s neither calls readVia nor subscribes "+
-					"to it. Either it stopped reading through the cache or the entry is "+
-					"wrong.", menu, f)
+				t.Errorf("%s is marked routed, but %s neither calls readVia, subscribes "+
+					"to it, nor joins a shared fill. Either it stopped reading through the "+
+					"cache or the entry is wrong.", menu, f)
 			}
 		}
 	}
@@ -131,6 +157,22 @@ func TestEverySharedMenuIsRoutedOrExplained(t *testing.T) {
 	}
 }
 
+// streamJoined reports whether one of these files joins a shared stream fill.
+//
+// ONE IS ENOUGH, and that is the shape rather than a concession: the join is
+// written once, in the file that owns the merge rule, and the other holders call
+// it. Demanding the call in every file would demand that each one build the
+// command for itself, which is exactly what having a merge rule removed.
+func streamJoined(t *testing.T, dir string, files []string) bool {
+	t.Helper()
+	for _, f := range files {
+		if strings.Contains(mustRead(t, filepath.Join(dir, f)), "JoinStream(") {
+			return true
+		}
+	}
+	return false
+}
+
 // sharedMenus maps each RouterOS menu declared in more than one collector to the
 // files that declare it.
 //
@@ -143,7 +185,16 @@ func sharedMenus(t *testing.T, dir string) map[string][]string {
 	if err != nil {
 		t.Fatalf("read %s: %v", dir, err)
 	}
-	decl := regexp.MustCompile(`routeros\.Cmd\{\s*Path:\s*"(/[^"]+)"`)
+	// ── A PATH NAMED BY A CONSTANT IS STILL A DECLARATION ──────────────────
+	//
+	// This matched a string literal only. `monitortraffic.go` names its menu by
+	// the const both collectors share, so without resolution a menu could move
+	// behind a const and this ledger would read it as no longer shared — a gap
+	// closing by going invisible, which is the direction that looks like
+	// progress. The same miss hit `acquisition_test.go` on 2026-09-10 and it is
+	// fixed there too.
+	consts := menuConsts(t, dir)
+	decl := regexp.MustCompile(`routeros\.Cmd\{\s*Path:\s*(?:"(/[^"]+)"|(\w+))`)
 	byMenu := map[string]map[string]bool{}
 	for _, e := range entries {
 		n := e.Name()
@@ -152,10 +203,17 @@ func sharedMenus(t *testing.T, dir string) map[string][]string {
 		}
 		src := mustRead(t, filepath.Join(dir, n))
 		for _, m := range decl.FindAllStringSubmatch(src, -1) {
-			if byMenu[m[1]] == nil {
-				byMenu[m[1]] = map[string]bool{}
+			menu := m[1]
+			if menu == "" {
+				var ok bool
+				if menu, ok = consts[m[2]]; !ok {
+					continue
+				}
 			}
-			byMenu[m[1]][n] = true
+			if byMenu[menu] == nil {
+				byMenu[menu] = map[string]bool{}
+			}
+			byMenu[menu][n] = true
 		}
 	}
 	out := map[string][]string{}

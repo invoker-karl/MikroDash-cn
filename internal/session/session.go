@@ -921,6 +921,15 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		// deliveries -- and `vlans` is mechanism A with a residual half that
 		// reads nothing at all. Every dormancy-eligible collector is now here.
 		s.bandwidth, s.vlans,
+		// ── NOT SUBSCRIBED, AND HERE FOR THE CHANNEL ────────────────────────
+		//
+		// `traffic` schedules nothing: it is set B, an open channel with no
+		// result to hold. It takes the cache because B.7's merge made its
+		// channel a SHARED one — `ifStatus` holds the same fill for its rates —
+		// and `UseCache` is how it is handed the thing to join. Without this it
+		// holds no channel at all and every chart is empty, which is why it is
+		// in the list rather than beside it.
+		s.traffic,
 	} {
 		c.UseCache(s.roscache)
 	}

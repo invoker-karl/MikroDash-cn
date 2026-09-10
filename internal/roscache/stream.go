@@ -240,6 +240,10 @@ func (c *Cache) JoinStream(j Join) (func(), error) {
 		return nil, fmt.Errorf("roscache: this reader cannot stream")
 	}
 
+	// BEFORE the lock: `streamTimings` takes `c.mu` too, and taking it twice on
+	// one goroutine is a deadlock rather than a re-entrant read.
+	check, stale := c.streamTimings()
+
 	c.mu.Lock()
 	if c.fills == nil {
 		c.fills = map[string]*streamFill{}
@@ -251,7 +255,7 @@ func (c *Cache) JoinStream(j Join) (func(), error) {
 			"single-owner; both holders must use JoinStream to share it", j.Menu)
 	}
 	if !existing {
-		f = newFill(j.Cmd, j.KeyOf, j.Boundary, streamCheck, streamStale)
+		f = newFill(j.Cmd, j.KeyOf, j.Boundary, check, stale)
 		f.shared = true
 		f.holders = map[int]Join{}
 		c.fills[j.Menu] = f
@@ -437,6 +441,43 @@ func (c *Cache) StreamStats(menu string) (StreamStats, bool) {
 	return st, true
 }
 
+// StreamTimings shortens the stream watchdog for every fill this cache opens.
+//
+// ── A TEST SEAM, AND THE FIELDS IT REACHES ALREADY SAID SO ─────────────────
+//
+// `streamFill.check` and `.stale` are fields rather than the constants directly,
+// and the comment on them has always given the reason: "so a test can drive the
+// restart in milliseconds instead of waiting out ten real seconds -- which is
+// the difference between this recovery being tested and being hoped for".
+// `fillEvery` is how `roscache`'s own tests reach them.
+//
+// A test in another package could not, and one now needs to: `traffic` retired
+// its watchdog in favour of this one and still reports the restart count on the
+// Dashboard card, so the property worth driving is END TO END — the channel
+// stalls, this package restarts it, and `traffic` turns the rising count into a
+// health transition. At the shipped 5s and 10s that test takes a minute a case.
+//
+// Zero means the shipped values. Nothing in the binary calls this.
+func (c *Cache) StreamTimings(check, stale time.Duration) {
+	c.mu.Lock()
+	c.checkOver, c.staleOver = check, stale
+	c.mu.Unlock()
+}
+
+// streamTimings returns the timings a new fill should use.
+func (c *Cache) streamTimings() (check, stale time.Duration) {
+	c.mu.Lock()
+	check, stale = c.checkOver, c.staleOver
+	c.mu.Unlock()
+	if check <= 0 {
+		check = streamCheck
+	}
+	if stale <= 0 {
+		stale = streamStale
+	}
+	return check, stale
+}
+
 // FillFromStream opens a channel and keeps `menu`'s entry current from it, so
 // `Get` on that menu answers from pushed rows instead of a read.
 //
@@ -447,7 +488,8 @@ func (c *Cache) StreamStats(menu string) (StreamStats, bool) {
 // The returned stop closes the channel and drops the fill. It is idempotent.
 func (c *Cache) FillFromStream(menu string, cmd routeros.Cmd,
 	keyOf func(routeros.Reply) string, boundary time.Duration) (func(), error) {
-	return c.fillEvery(menu, cmd, keyOf, boundary, streamCheck, streamStale)
+	check, stale := c.streamTimings()
+	return c.fillEvery(menu, cmd, keyOf, boundary, check, stale)
 }
 
 // fillEvery is FillFromStream with the watchdog's timings injected. Unexported:
