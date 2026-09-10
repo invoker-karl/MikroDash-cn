@@ -41,8 +41,8 @@
 // works, and duplicating it in Go before cutover would mean two writers.
 
 import { el } from '../dom';
-import { cloneLayout, mergeLayout } from './dashboard-grid-layout';
-import { CARD_ROOMS, DEFAULT_LAYOUT, LS_KEY, type GridCard } from '../gen/grid-tables';
+import { cloneLayout, gridRows, mergeLayout } from './dashboard-grid-layout';
+import { CARD_ROOMS, DEFAULT_LAYOUT, LS_KEY, ROWS, type GridCard } from '../gen/grid-tables';
 
 export function loadLayout(): GridCard[] {
   try {
@@ -81,6 +81,25 @@ export function saveLayout(layout: readonly GridCard[]): void {
  * the grid from being positioned.
  */
 export function applyLayout(l: readonly GridCard[]): void {
+  // ── THE TRACK LIST FOLLOWS THE LAYOUT ──────────────────────────────────────
+  //
+  // The stylesheet declares 22 rows. A card placed below them lands in an
+  // IMPLICIT track, which is sized by `grid-auto-rows` rather than by the
+  // explicit `1fr` list, so it would be a different height from every other row
+  // and the arithmetic in `dashboard-grid-layout.ts` — which assumes uniform
+  // rows — would put every drag in the wrong cell.
+  //
+  // Declaring the tracks explicitly is what keeps them uniform. The inline style
+  // is CLEARED at the floor rather than set to the same value, so the stylesheet
+  // stays the single place the row template is written down for the ordinary
+  // case, and a dashboard that has never grown carries no inline override.
+  const root = el('dash-grid-root');
+  if (root) {
+    const rows = gridRows(l);
+    root.style.gridTemplateRows = rows > ROWS
+      ? 'repeat(' + rows + ', minmax(40px, 1fr))'
+      : '';
+  }
   for (const c of l) {
     const node = el(c.id);
     if (!node) continue;
@@ -141,6 +160,10 @@ export async function mergeLayoutFromServer(): Promise<GridCard[] | null> {
     const data = await r.json();
     if (!data || !Array.isArray(data.cards) || !data.cards.length) return null;
     const merged = mergeLayout(data.cards);
+    // `mergeLayout` REPAIRS, which matters here more than at the other call
+    // site: this one writes what it merged back to localStorage, so an
+    // unrepaired merge would re-poison the cache the local path had cleaned.
+    // See `repairOverlaps`.
     localStorage.setItem(LS_KEY, JSON.stringify({ cards: merged }));
     return merged;
   } catch {

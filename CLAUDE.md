@@ -118,7 +118,7 @@ docker run --rm -v "$PWD":/src -w /src golang:1.25-alpine go test ./...
 #   -e MIKRODASH_PROPLIST_FREEZE=1   (internal/collect)
 #   -e MIKRODASH_RESOURCES_FREEZE=1  (internal/resource)
 
-# The frontend's own tests: 31 of them, bundling the app's TypeScript with
+# The frontend's own tests: 32 of them, bundling the app's TypeScript with
 # esbuild and running it against a DOM shim. See web/test/README.md for why they
 # are executed rather than type-checked.
 cd web && npm test
@@ -463,7 +463,7 @@ replaced? That question died with the port, and 25 MB of recordings went with it
 | | |
 |---|---|
 | `internal/verify/` | 58 Go tests. Static checks over the CURRENT source: credentials, cited paths, the WebSocket vocabulary both ways, endpoints, selectors, module reachability, identity columns, the blur-suspend guard, the fast/slow poll ledger, the shared-menu ledger, fixture schemas, that every page-key literal still names a real page, and that `Collector-Architecture.md` still describes the collector layer the code actually has. |
-| `web/test/` | 31 test files that bundle the app's TypeScript and run it against a DOM shim. The FILE count is here because it is the one the audit can measure; a case count cannot be derived statically and this one had already drifted from 32 to 35 unnoticed. |
+| `web/test/` | 32 test files that bundle the app's TypeScript and run it against a DOM shim. The FILE count is here because it is the one the audit can measure; a case count cannot be derived statically and this one had already drifted from 32 to 35 unnoticed. |
 
 **Two rules carried across, and both are load-bearing:**
 
@@ -496,7 +496,7 @@ inert.
   read the CURRENT source and assert properties still worth holding: no committed credential, every
   cited path present, every emitted event consumed, every multi-room collector behind an occupancy
   guard. They are test-only, so nothing can link them into the binary.
-- **`web/test/`** holds 31 frontend tests that bundle the app's TypeScript and run it against a DOM
+- **`web/test/`** holds 32 frontend tests that bundle the app's TypeScript and run it against a DOM
   shim. JavaScript-hosted because testing TypeScript needs a JavaScript runtime.
 - **A gap is documented, never hidden.** Every ledger in those tests fails in BOTH directions: an
   unrecorded gap is a failure, and a recorded gap that has CLOSED is also a failure, so a note cannot

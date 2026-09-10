@@ -25,9 +25,9 @@
 // happens, which is why a swap calls it rather than repeating it.
 
 import { el } from '../dom';
-import { cellToPixel, getCellSize, hasOverlap, inBounds, ptrToCell } from './dashboard-grid-layout';
+import { cellToPixel, getCellSize, gridRows, hasOverlap, inBounds, ptrToCell } from './dashboard-grid-layout';
 import { applyLayout } from './dashboard-grid-store';
-import { CARD_LABELS, COLS, PAD, ROWS, type GridCard } from '../gen/grid-tables';
+import { CARD_LABELS, COLS, PAD, type GridCard } from '../gen/grid-tables';
 import type { GridEditor } from './dashboard-grid-edit';
 
 /** How long the ghost must dwell over a card before the two swap. */
@@ -63,7 +63,11 @@ export function createGridDrag(editor: GridEditor): GridDrag {
     const root = el('dash-grid-root');
     if (!ph || !root) return;
     const r = root.getBoundingClientRect();
-    const pos = cellToPixel(getCellSize(r.width, r.height), x, y, w, h);
+    // The layout's row count, not `ROWS`: on a grown dashboard `r.height`
+    // covers more rows than the constant names, and the placeholder would be
+    // drawn at the wrong size and in the wrong place.
+    const rows = gridRows(editor.getLayout());
+    const pos = cellToPixel(getCellSize(r.width, r.height, rows), x, y, w, h);
     ph.style.left = pos.left + 'px';
     ph.style.top = pos.top + 'px';
     ph.style.width = pos.width + 'px';
@@ -132,14 +136,15 @@ export function createGridDrag(editor: GridEditor): GridDrag {
     // ptrToCell's own padding handling) and collapsing them hides that.
     const relLeft = ghostLeft - gridRect.left - PAD;
     const relTop = ghostTop - gridRect.top - PAD;
-    const sz = getCellSize(gridRect.width, gridRect.height);
-    const cell = ptrToCell(sz, relLeft + PAD, relTop + PAD);
+    const rows = gridRows(editor.getLayout());
+    const sz = getCellSize(gridRect.width, gridRect.height, rows);
+    const cell = ptrToCell(sz, relLeft + PAD, relTop + PAD, rows);
     // Clamped so the card's FAR edge stays on the grid, not just its origin.
     const col = Math.max(1, Math.min(COLS - c.w + 1, cell.col));
-    const row = Math.max(1, Math.min(ROWS - c.h + 1, cell.row));
+    const row = Math.max(1, Math.min(rows - c.h + 1, cell.row));
 
     const candidate = { x: col, y: row, w: c.w, h: c.h };
-    if (inBounds(col, row, c.w, c.h) && !hasOverlap(editor.getLayout(), candidate, ds.cardId)) {
+    if (inBounds(col, row, c.w, c.h, rows) && !hasOverlap(editor.getLayout(), candidate, ds.cardId)) {
       ds.snapX = col;
       ds.snapY = row;
     }

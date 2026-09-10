@@ -30,9 +30,9 @@
 // `includes`. That is what makes a corner handle work without a case of its own.
 
 import { el } from '../dom';
-import { getCellSize, hasOverlap, inBounds } from './dashboard-grid-layout';
+import { getCellSize, gridRows, hasOverlap, inBounds } from './dashboard-grid-layout';
 import { applyLayout } from './dashboard-grid-store';
-import { COLS, GAP, MIN_H, MIN_W, ROWS, type GridCard } from '../gen/grid-tables';
+import { COLS, GAP, MIN_H, MIN_W, type GridCard } from '../gen/grid-tables';
 import type { GridEditor } from './dashboard-grid-edit';
 
 interface ResizeState {
@@ -71,7 +71,12 @@ export function createGridResize(editor: GridEditor): GridResize {
     const root = el('dash-grid-root');
     if (!root) return;
     const r = root.getBoundingClientRect();
-    const sz = getCellSize(r.width, r.height);
+    // THE LAYOUT'S OWN ROW COUNT, not `ROWS`. `r.height` is the root's real
+    // height, so on a dashboard that has grown past 22 rows a fixed divisor
+    // reports a row nearly twice its true size and the card resizes in the
+    // wrong steps.
+    const rows = gridRows(editor.getLayout());
+    const sz = getCellSize(r.width, r.height, rows);
 
     const dx = e.clientX - rs.ptrStartX;
     const dy = e.clientY - rs.ptrStartY;
@@ -86,7 +91,10 @@ export function createGridResize(editor: GridEditor): GridResize {
       nw = Math.max(MIN_W, Math.min(COLS - rs.origX + 1, rs.origW + dCols));
     }
     if (rs.dir.includes('s')) {
-      nh = Math.max(MIN_H, Math.min(ROWS - rs.origY + 1, rs.origH + dRows));
+      // Bounded by the CURRENT grid, so a resize can fill the grown area but
+      // cannot extend it further. Growing is the Add Card path's job; a drag
+      // handle that silently made the page longer would be a surprise.
+      nh = Math.max(MIN_H, Math.min(rows - rs.origY + 1, rs.origH + dRows));
     }
     if (rs.dir.includes('w')) {
       // Clamped on the ORIGIN, not the width: this is what stops the left edge
@@ -102,7 +110,7 @@ export function createGridResize(editor: GridEditor): GridResize {
     }
 
     // REFUSED, not clamped. See the header.
-    if (!inBounds(nx, ny, nw, nh)) return;
+    if (!inBounds(nx, ny, nw, nh, rows)) return;
     if (hasOverlap(editor.getLayout(), { x: nx, y: ny, w: nw, h: nh }, rs.cardId)) return;
 
     c.x = nx; c.y = ny;

@@ -36,7 +36,7 @@ import { el } from '../dom';
 import { cloneLayout, findFreeSlot } from './dashboard-grid-layout';
 import { applyLayout, saveLayout } from './dashboard-grid-store';
 import { CARD_LABELS, CARD_ROOMS, DEFAULT_LAYOUT, GAP, PAD, type GridCard } from '../gen/grid-tables';
-import { getCellSize } from './dashboard-grid-layout';
+import { getCellSize, gridRows } from './dashboard-grid-layout';
 
 export interface GridEditor {
   getLayout(): GridCard[];
@@ -78,7 +78,10 @@ export function createGridEditor(
     const root = el('dash-grid-root');
     if (!root) return;
     const r = root.getBoundingClientRect();
-    const sz = getCellSize(r.width, r.height);
+    // The overlay draws one line per real row, so it needs the layout's own
+    // count: on a grown dashboard `ROWS` would rule the grid into 22 bands
+    // that no card lines up with.
+    const sz = getCellSize(r.width, r.height, gridRows(layout));
     // The overlay draws one line per cell PITCH — cell plus gap — not per cell,
     // which is why the gap is added here and not in getCellSize.
     root.style.setProperty('--grid-cell-w', (sz.colW + GAP) + 'px');
