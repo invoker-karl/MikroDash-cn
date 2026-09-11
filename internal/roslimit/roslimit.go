@@ -17,24 +17,22 @@
 //
 // ── AND WHY THE GATE IS KEYED BY ROUTER ─────────────────────────────────────
 //
-// Three separate pools reach the same devices: the viewing session
-// (`internal/session`), the background pool for unwatched routers
-// (`internal/routers`), and the alerting pool (`internal/alertpool`). A cap
-// inside any one of them is not a cap on the router, because the other two keep
-// their own count -- so a router being watched AND alerted AND polled for the
-// Devices page would see three independent budgets.
+// Two separate readers reach the same devices: the session (`internal/session`),
+// which holds a router whether somebody is watching it or it is kept for
+// alerting and history, and the Devices page's pool (`internal/routers`). A cap
+// inside either one is not a cap on the router, because the other keeps its own
+// count -- so a router being watched AND polled for the Devices page would see
+// two independent budgets.
 //
 // The gate is therefore process-wide and keyed by router id, which is the only
 // key that matches what is actually scarce.
 //
 // ── WHAT THIS IS NOT ────────────────────────────────────────────────────────
 //
-// It is not the single-reader refactor. That remains a costed proposal in
-// docs/architecture-next.md: 40-45 files, of which ~2,250 lines are
-// source-scanning tests pinned to literal text that cannot be adapted, only
-// re-authored. This is a dozen lines at the one function every collector read
-// already passes through, and it delivers the documented goal. Revisit the
-// refactor once this shows whether contention is real.
+// It does not decide WHAT is read. That is `internal/roscache`'s scheduler, one
+// per router, which reads each menu once for every collector that wants it --
+// the single reader this package was originally a cheaper stand-in for. This
+// bounds how many commands are in flight at once, whoever issued them.
 package roslimit
 
 import (

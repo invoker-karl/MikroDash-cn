@@ -50,7 +50,11 @@ func isIllustrative(p string) bool { return strings.Contains(p, "...") }
 // expectedAbsent are paths cited that are EXPECTED not to exist — a note about
 // something deleted, or a file a later change will add. Each needs a reason, and
 // an entry that starts existing is itself a failure, so the list cannot rot.
-var expectedAbsent = map[string]string{}
+var expectedAbsent = map[string]string{
+	"docs/architecture-next.md": "cited by CHANGELOG.md's release notes, which are history and " +
+		"name files as they were when released. Deleted 2026-09-11: its three items were " +
+		"delivered or overtaken, bar the frontend's move onto cmd/tsgen's generated payload types.",
+}
 
 func TestCitedPathsExist(t *testing.T) {
 	root := repoRoot(t)
