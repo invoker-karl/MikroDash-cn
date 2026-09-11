@@ -13,9 +13,9 @@ import (
 
 // ── THE SIXTH MEANING OF A PAGE KEY ─────────────────────────────────────────
 //
-// CLAUDE.md lists five things a page key is at once. There is a sixth, and it is
-// the one that bit: a VISIBILITY GUARD. `isVisible('rosusers')` and
-// `pageVisible('topology')` ask "is this page the one on screen?", comparing
+// CLAUDE.md's page-key table lists six things a page key is at once. The sixth is
+// the one that bit, and the reason this check exists: a VISIBILITY GUARD.
+// `isVisible('rosusers')` and `pageVisible('topology')` ask "is this page the one on screen?", comparing
 // against `currentPage` — so a key renamed anywhere else turns the guard
 // permanently false.
 //

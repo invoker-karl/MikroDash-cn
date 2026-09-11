@@ -85,6 +85,11 @@ func TestDocumentedClaimsAreTrue(t *testing.T) {
 		return docs[name]
 	}
 
+	// ONE CLAIM PER SENTENCE, AND ONE SENTENCE PER NUMBER. CLAUDE.md used to state
+	// the frontend count three times and the verify count twice, each copy added
+	// after another had drifted, and each needing its own claim here. It states
+	// each once now, so there is one place to update and one place to measure.
+	// A count written a second time needs a claim of its own, or it drifts.
 	claims := []docClaim{
 		{
 			label:   "CLAUDE.md table, internal/verify: Go tests",
@@ -92,32 +97,8 @@ func TestDocumentedClaimsAreTrue(t *testing.T) {
 			measure: verifyGoTests,
 		},
 		{
-			// THE SAME NUMBER, TWENTY LINES DOWN, AND IT WAS NOT PINNED. The
-			// table row above was corrected by this audit while this sentence
-			// kept the old count and nothing failed. That is the expired premise
-			// this whole file exists to catch, reproduced inside the document it
-			// audits.
-			label:   "CLAUDE.md prose, internal/verify: Go tests",
-			find:    regexp.MustCompile(`static self-checks as Go tests\s*—\s*(\d+) of them`),
-			measure: verifyGoTests,
-		},
-		{
 			label:   "CLAUDE.md table, web/test: frontend tests",
 			find:    regexp.MustCompile(`\|\s*` + "`web/test/`" + `\s*\|\s*(\d+) test files`),
-			measure: webTestFiles,
-		},
-		{
-			// THE OTHER NUMBER'S PROSE, pinned for the same reason the verify
-			// count's was: adding one frontend test moved FOUR written figures
-			// and the audit saw only two of them. Both survivors said 22 with a
-			// green audit until they were found by hand.
-			label:   "CLAUDE.md prose, web/test: frontend tests",
-			find:    regexp.MustCompile(`holds (\d+) frontend tests that bundle`),
-			measure: webTestFiles,
-		},
-		{
-			label:   "CLAUDE.md commands, web/test: frontend tests",
-			find:    regexp.MustCompile(`The frontend's own tests: (\d+) of them`),
 			measure: webTestFiles,
 		},
 		{
