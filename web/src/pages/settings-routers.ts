@@ -208,11 +208,9 @@ export function initSettingsRoutersTable(d: RouterTableDeps): void {
   // device!!" — from someone who had just got the container running and created
   // an account.
   //
-  // It was not a deliberate omission either: `docs/unwired-elements.md` is the
-  // record of ids this app renders and knowingly does not wire, and this was
-  // never among them. The audit that would have caught it computed its answer by
-  // reading the old implementation directly, and was retired with that source on
-  // 2026-09-01.
+  // It was not a deliberate omission either, and nothing recorded it as one. The
+  // audit that would have caught it computed its answer by reading the old
+  // implementation directly, and was retired with that source on 2026-09-01.
   //
   // BOUND BEFORE THE `rtrTbody` GUARD BELOW, deliberately: Add does not need the
   // table, and the early return would otherwise take the button with it on any

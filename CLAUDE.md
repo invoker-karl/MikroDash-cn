@@ -16,7 +16,6 @@ WebSocket.
 | Which RouterOS commands this app uses | `docs/routeros-api-surface.md` — frozen; extend it by hand from the RouterOS docs |
 | What a RouterOS menu *can* hold | **rosetta** (MCP, configured in `.mcp.json`), or `help.mikrotik.com` |
 | What a collector returns | replay a fixture through its `internal/collect` test, rather than reading the collector and guessing |
-| Which element ids are deliberately inert | `docs/unwired-elements.md` |
 
 Go files here are small and purposeful: read them whole.
 
