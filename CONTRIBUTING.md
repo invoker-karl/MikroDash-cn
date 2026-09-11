@@ -16,15 +16,17 @@ git clone https://github.com/SecOps-7/MikroDash.git
 cd MikroDash
 ```
 
-You need **Go 1.25+** and **Node 20+**. Node is for the frontend build only; nothing Node-related runs at runtime.
+You need **Go 1.25+**. **Node 20+** is needed only to type-check and test the frontend: the frontend itself is built by a Go program, and nothing Node-related runs at runtime.
 
 ```sh
-go run ./cmd/webbuild -dir web                    # the TypeScript frontend
+go run ./cmd/webbuild -dir web                    # build the TypeScript frontend into web/dist
 go build ./cmd/mikrodash                          # the binary
 ./mikrodash -data ./devdata -web web/dist -static web/public
 ```
 
-If you would rather not install a Go toolchain, everything below also runs in a container:
+The dashboard is then at <http://localhost:3082> (`-listen` changes the address).
+
+If you would rather not install a Go toolchain, the Go commands also run in a container:
 
 ```sh
 docker run --rm -v "$PWD":/src -w /src golang:1.25-alpine sh -c "go vet ./... && go build ./..."
@@ -35,40 +37,35 @@ docker run --rm -v "$PWD":/src -w /src golang:1.25-alpine sh -c "go vet ./... &&
 ## Running the checks
 
 ```sh
-go test ./...        # unit tests and the differential gates
-sh tools/verify.sh   # everything: Go (gofmt, vet, tests, tsgen), tsc, web tests
+(cd web && npm ci)   # once: TypeScript and esbuild for the frontend checks
+sh tools/verify.sh   # everything: gofmt, vet, go test, generated code, tsc, web tests
 ```
 
-`tools/verify.sh` is the one to run before opening a PR. It **discovers** what to check rather than working from a list, so a category cannot be forgotten — that rule exists because an audit once sat red for an unknown number of sessions while every sweep ran a list of names typed from memory.
+`tools/verify.sh` is the one to run before opening a PR. Its Go half runs in a `golang` container, so it needs Docker; without Docker it says what it skipped, and `go vet ./... && go test ./...` covers the same ground with a local toolchain.
 
-**You do not need the original Node implementation, and there is nothing to point
-at.** The verification harness that compared this app against a recording of it
-was retired on 2026-09-01. What runs now reads only this repository:
+It **discovers** what to check rather than working from a list, so a new check runs without being registered anywhere:
 
 | | |
 |---|---|
-| `internal/verify/` | 58 Go tests — static checks over the current source. Picked up by `go test ./...`; nothing lists them. |
-| `web/test/` | 32 test files that bundle the app's TypeScript and run it against a DOM shim, via `npm test`. |
+| `internal/verify/` | 58 Go tests — static checks over the current source. Picked up by `go test ./...`. |
+| `web/test/` | 32 test files that bundle the app's TypeScript and run it against a DOM shim, via `npm test` in `web/`. |
 
-Both are discovered by glob, so adding a check needs no edit to `verify.sh`.
-
-
-
-With the reference present each recording is **re-derived and compared against it**, which is the only thing that stops a recording drifting from the source it claims to describe. The generator `--check` runs also need it — they regenerate their corpora from the reference — and the sweep reports them as a skip, saying so, when it is absent.
+Package tests use the standard library `testing` package only.
 
 ## Project Conventions
 
 These are deliberate constraints rather than style preferences:
 
-- **Gates are generated, never transcribed.** `tools/*-cases.js` built their corpora by RUNNING or LIFTING the Node implementation. That source was removed at the cutover, so those corpora are now frozen artefacts and their `--check` runs report a skip. A table retyped by hand is a fork with no update path — if one needs re-deriving, check out `v0.7.40` rather than editing the corpus.
+- **Fewer router channels.** Concurrent API channels, not data volume or CPU, are what strain small hardware, so "more efficient" means asking the router for less. Each menu is read once however many collectors want it, and every collector supports both stream and poll delivery, chosen per router.
+- **Generated code is never edited by hand.** `web/src/gen/` comes from `cmd/tsgen`, `cmd/pagesgen` and `tools/*-ts.js`; change the source and regenerate. The recordings under `testdata/` pin what the app does today, so change them deliberately, never by retyping one.
 - **A check that cannot fail is worse than no check.** Anything that scans a set asserts it actually found something. An audit that silently measures zero reads exactly like one that passed.
+- **A gap is recorded, never hidden.** The ledgers in `internal/verify/` fail in both directions: an unrecorded gap fails, and so does a recorded one that has since closed.
 - **Self-hosted assets.** Everything the browser loads lives in `web/public/vendor/`, so the dashboard works on an isolated network with no internet access. No CDN references.
-- **A small dependency footprint.** There are seven Go dependencies and each has a reason beyond convenience — the newest, `esbuild`, is there because it *removed* a runtime: the frontend build no longer needs Node. New ones are worth discussing first.
-- **Streaming-first.** Prefer RouterOS `/listen` or `=interval=N` streams over polling, so the router does the work of noticing change rather than being asked repeatedly. Concurrent API channels, not data volume, are what strain small hardware.
+- **A small dependency footprint.** There are seven Go dependencies and each has a reason beyond convenience. `esbuild` is used through its Go API, which is why building the frontend needs no JavaScript runtime. New ones are worth discussing first.
 - **Errors are sanitised.** Anything reaching the browser goes through `safe.Message()` first.
-- **Nothing user-visible changes by accident.** The gates compare the rendered page against a recording of how it looked at cutover, so a change to markup or interaction will fail one. That is the point: a deliberate change is welcome and needs the gate re-aimed and the reason written down; an unnoticed one is a bug. The recording cannot be regenerated, so re-aiming is the only route -- deleting the gate is not.
+- **Deliberate changes are welcome; silent ones are not.** If your change alters what a page shows, a WebSocket payload or an interaction, say so in the PR. If it makes a check fail, update the check and explain why in the commit — do not delete it.
 
-Collectors follow established patterns — inflight guards, idle-gating, dirty-check fingerprinting. You do not need to know these before starting: **[AI_CONTEXT.md](AI_CONTEXT.md)** documents each one with examples, and copying the closest existing collector in `internal/collect/` is a perfectly good way to begin.
+The collector layer — how data is read from the router, turned into payloads and sent to the pages that want it — is described in **[Collector-Architecture.md](Collector-Architecture.md)**. You do not need to read it before starting: copying the closest existing collector in `internal/collect/` is a perfectly good way to begin.
 
 ## Submitting a Pull Request
 
