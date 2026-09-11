@@ -65,7 +65,7 @@ MikroDash connects directly to the RouterOS API over a persistent binary TCP con
 ## Features
 
 ### Dashboard
-- **Configurable drag-and-drop grid** — 24×22 layout; drag cards to reposition, resize with 8 handles, or swap positions by hovering one card over another for 1.5 s; add/remove cards via the Add Card panel; layout synced server-side so all browsers and devices share the same arrangement
+- **Configurable drag-and-drop grid** — 24 columns and at least 22 rows, growing downward when an added card needs room; drag cards to reposition, resize with 8 handles, or swap positions by hovering one card over another for 1.5 s; add/remove cards via the Add Card panel; layout synced server-side so all browsers and devices share the same arrangement
 - **Live traffic chart** — per-interface RX/TX Mbps with configurable history window
 - **System card** — CPU, RAM, Storage gauges with colour-coded thresholds (amber >75%, red >90%), board info, temperature, uptime chip. When a newer RouterOS is available it shows an update strip, and with Packages write access an **Update** button: the dialog carries that release's notes in a scrollable box so the decision to reboot is made against what actually changed, and asks for the router's name typed back before it acts
 - **RouterOS update indicator** — shows installed vs available version side by side
@@ -213,7 +213,7 @@ recent release rather than unreleased work on `main`. Each release is a multi-ar
 To pin to a specific release:
 
 ```bash
-docker pull ghcr.io/secops-7/mikrodash:0.8.51
+docker pull ghcr.io/secops-7/mikrodash:0.8.52
 ```
 
 Run with Docker Compose — create a `docker-compose.yml`:

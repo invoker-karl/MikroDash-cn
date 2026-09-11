@@ -2,6 +2,42 @@
 
 All notable changes to MikroDash will be documented in this file.
 
+## [0.8.52] - The update dialog closes itself, and quiet routers stop looking stale
+
+A fixes release on top of 0.8.51.
+
+### Fixed
+
+- **The Update RouterOS dialog closes itself when the router is back.** It used
+  to sit on "Rebooting…" after the router had restarted and MikroDash had
+  reconnected. It now closes once the router has been reachable again for three
+  seconds, so a router that blips back briefly before its real reboot does not
+  close it early.
+- **Settings → Devices shows each router's current RouterOS version.** The
+  Version column (and Model and Serial with it) stopped updating, so a router you
+  had upgraded kept showing its old version. It now updates as soon as MikroDash
+  reads the router.
+- **Top Talkers no longer goes stale on a quiet router.** On a router with little
+  or no traffic the card was marked stale even though the router was answering
+  fine.
+- **Add Card on the Dashboard places new cards properly.** It dropped every added
+  card on top of an existing one. The grid now grows downward to make room.
+- **The API Diagnostics card works.** It was always empty. It now shows how much
+  MikroDash asks each router for, without asking the router for anything extra.
+- **"Clear all" on the alert bell records when the alerts were cleared.** It used
+  the browser's clock instead of the time MikroDash recorded.
+
+### Internal
+
+- Every WebSocket message is declared once in Go with its payload type, and the
+  browser's types are generated from those declarations, so the two sides cannot
+  drift apart without the build failing. A test holds that Go never sends a null
+  array to the browser.
+- Listeners for two alert events that nothing ever sent are removed, along with
+  other reads of fields the server never sends.
+- CLAUDE.md, CONTRIBUTING.md and Collector-Architecture.md describe the Go and
+  TypeScript app as it is; two finished planning documents are removed.
+
 ## [0.8.51] - The update check on the dashboard could get stuck
 
 A one-fix release on top of 0.8.50.
