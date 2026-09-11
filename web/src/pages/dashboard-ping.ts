@@ -22,28 +22,8 @@
 
 import { el } from '../dom';
 import { notePayload } from '../stale';
-
-export interface PingPoint {
-  ts?: number;
-  rtt?: number | null;
-  loss?: number | null;
-}
-export interface PingPayload {
-  target?: string;
-  rtt?: number | null;
-  loss?: number | null;
-  minRtt?: number | null;
-  maxRtt?: number | null;
-  enabled?: boolean;
-  permissionDenied?: boolean;
-  ts?: number;
-}
-export interface PingHistoryPayload {
-  target?: string;
-  history?: PingPoint[];
-  minRtt?: number | null;
-  maxRtt?: number | null;
-}
+import type { PingPayload, PingPoint } from '../gen/payloads';
+import type { HandEvents } from '../events-hand';
 
 interface ChartLike {
   destroy(): void;
@@ -151,7 +131,7 @@ export function renderPingUI(
   updatePingChart(pingChart, pingHistory);
 }
 
-export function onPingHistory(data: PingHistoryPayload): void {
+export function onPingHistory(data: HandEvents['ping:history']): void {
   pingHistory = (data.history || []).slice(-MAX_PING_HIST);
   const lbl = el('pingTargetLabel');
   if (lbl && data.target) lbl.textContent = data.target;
@@ -162,7 +142,6 @@ export function onPingHistory(data: PingHistoryPayload): void {
 }
 
 export function onPingUpdate(data: PingPayload): void {
-  if (data.enabled === false) return; // ping switched off in settings
   // THE NETWORKS CARD'S STALE TIMER, re-armed by every ping.
   //
   // A second `ping:update` handler in the live app does only this, ~100 lines

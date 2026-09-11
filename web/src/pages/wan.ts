@@ -14,26 +14,7 @@
 
 import { esc, el, renderSortHeader, type SortCol, type SortState } from '../dom';
 import type { Socket } from '../socket';
-
-export interface WANDhcp {
-  id: string; status: string; server: string;
-  primaryDns: string; secondaryDns: string; expiresAfter: string; invalid: boolean;
-}
-
-export interface WAN {
-  name: string; type: string; isTunnel: boolean; state: string; since: string;
-  running: boolean | null; address: string; isPublic: boolean | null;
-  gateway: string; routeDistance: string; routeActive: boolean; hasDefaultRoute: boolean;
-  rxMbps: number | null; txMbps: number | null;
-  rxBytes: number | null; txBytes: number | null;
-  dhcp: WANDhcp | null;
-}
-
-export interface WANPayload {
-  ts: number; pollMs: number; wans: WAN[]; ratesAvailable: boolean;
-  activeDefaultWan: string; publicIp: string;
-  detectionEnabled: boolean; available: boolean; denied: boolean;
-}
+import type { WAN, WANPayload } from '../gen/payloads';
 
 const COLS: SortCol[] = [
   { key: '', label: 'Uplink' }, { key: '', label: 'Address' }, { key: '', label: 'Gateway' },
@@ -189,7 +170,7 @@ export function initWanPage(socket: Socket, isVisible: (page: string) => boolean
   }
 
   function renderSummary(): void {
-    const d = data || ({} as Partial<WANPayload>);
+    const d: Partial<WANPayload> = data || {};
     const wans = d.wans || [];
     const set = (id: string, v: string) => { const n = el(id); if (n) n.textContent = v; };
     set('wanSumCount', String(wans.length || '—'));
@@ -242,7 +223,7 @@ export function initWanPage(socket: Socket, isVisible: (page: string) => boolean
     send(v('wanWarnVerb'), v('wanWarnId'), v('wanWarnName'), v('wanWarnAck'));
   });
 
-  socket.on('wan:update', (d: WANPayload) => {
+  socket.on('wan:update', (d) => {
     if (!d) return;
     data = d;
     busy = '';
@@ -250,13 +231,13 @@ export function initWanPage(socket: Socket, isVisible: (page: string) => boolean
     if (isVisible('wan')) render();
   });
 
-  socket.on('wan:caps', (d: { permitted: boolean; routerName: string }) => {
+  socket.on('wan:caps', (d) => {
     if (!d) return;
     caps = d;
     if (isVisible('wan')) render();
   });
 
-  socket.on('wan:ok', (d: { action?: string; name?: string }) => {
+  socket.on('wan:ok', (d) => {
     busy = '';
     // "Requested", not "renewed": the lease settles over the next second or two
     // and the next tick is what reports the outcome.
@@ -264,15 +245,14 @@ export function initWanPage(socket: Socket, isVisible: (page: string) => boolean
       ((d && d.name) || ''));
   });
 
-  socket.on('wan:error', (d: {
-    code?: string; message?: string; name?: string; verb?: string; fingerprint?: string;
-    warning?: { address?: string; wan?: string; certain?: boolean };
-  }) => {
+  socket.on('wan:error', (d) => {
     busy = '';
     const code = d && d.code;
 
     if (code === 'self-cutoff' || code === 'stale-warning') {
-      const w = (d && d.warning) || {};
+      // `warning` is the guard's raw map, so its keys are `unknown` here. Each
+      // is only escaped or tested for truth below, which any value survives.
+      const w: Record<string, unknown> = (d && d.warning) || {};
       const set = (id: string, v: string): void => {
         const n = el<HTMLInputElement>(id);
         if (n) n.value = v;

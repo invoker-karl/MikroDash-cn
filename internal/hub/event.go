@@ -230,6 +230,45 @@ func walkNil(v reflect.Value, path string, omitempty bool, out *[]string) {
 	}
 }
 
+// MayHoldNilSlice is whether a value of type t could carry a nil slice to the
+// wire: NilSlices' question, asked of a type rather than a value.
+//
+// A payload type for which this is false is safe BY CONSTRUCTION, so the
+// payload tests need no builder for it. One for which it is true must be
+// built and checked, and the tests fail if nothing builds it.
+func MayHoldNilSlice(t reflect.Type) bool { return mayHold(t, map[reflect.Type]bool{}) }
+
+func mayHold(t reflect.Type, seen map[reflect.Type]bool) bool {
+	if seen[t] {
+		return false // already being answered further up
+	}
+	seen[t] = true
+	if t.Implements(jsonMarshaler) || reflect.PointerTo(t).Implements(jsonMarshaler) {
+		return false
+	}
+	switch t.Kind() {
+	case reflect.Slice:
+		return true
+	case reflect.Pointer, reflect.Map:
+		return mayHold(t.Elem(), seen)
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() && !f.Anonymous {
+				continue
+			}
+			_, omit, skip := jsonField(f)
+			if skip || (omit && f.Type.Kind() == reflect.Slice) {
+				continue
+			}
+			if mayHold(f.Type, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // jsonField reads a field's json tag the way encoding/json does.
 func jsonField(f reflect.StructField) (name string, omitempty, skip bool) {
 	tag := f.Tag.Get("json")

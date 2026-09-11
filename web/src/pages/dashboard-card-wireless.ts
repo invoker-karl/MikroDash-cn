@@ -27,14 +27,7 @@
 // associates — the row is hidden on the COUNT, not on whether the radio exists.
 
 import { el } from '../dom';
-
-export interface WirelessClient {
-  signal?: string | number;
-  band?: string;
-}
-export interface WirelessPayload {
-  clients?: WirelessClient[];
-}
+import type { WirelessPayload } from '../gen/payloads';
 
 export function renderWirelessCards(data: WirelessPayload): void {
   const clients = data.clients || [];

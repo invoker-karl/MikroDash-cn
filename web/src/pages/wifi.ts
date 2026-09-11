@@ -17,46 +17,7 @@
 
 import { esc, el, bandBadge, ssidColours, installWifiGlobals } from '../dom';
 import type { Socket } from '../socket';
-
-export interface WifiInherits {
-  ssid: string | null;
-  security: string | null;
-  channel: string | null;
-}
-
-export interface WifiNetwork {
-  id: string; name: string; ssid: string; radio: string; master: string;
-  isVirtual: boolean; band: string; bandRaw: string;
-  security: string; authTypes: string;
-  hidden: boolean; vlanId: string; bridge: string;
-  disabled: boolean; running: boolean; clients: number; comment: string;
-  capsManaged: boolean; profile: string; profileUsedBy: number;
-  inherits: WifiInherits | null;
-  readOnlyReason: string; editable: boolean; removable: boolean; resource: string;
-}
-
-export interface WifiRadio {
-  name: string; defaultName: string; mac: string;
-  band: string; bandRaw: string; frequency: string; channelWidth: string;
-  country: string; disabled: boolean; running: boolean;
-  capsManaged: boolean; readOnlyReason: string; profile: string;
-}
-
-export interface WifiSecProfile {
-  id: string; name: string; mode: string; authTypes: string;
-  security: string; isDefault: boolean;
-}
-
-export interface WifiTotals {
-  radios: number; networks: number; clients: number;
-  capsManaged: number; readOnly: number;
-}
-
-export interface WifiPayload {
-  ts: number; pollMs: number; stack: string; available: boolean;
-  radios: WifiRadio[]; networks: WifiNetwork[]; secProfiles: WifiSecProfile[];
-  totals: WifiTotals;
-}
+import type { WifiNetwork, WifiRadio, WifiPayload } from '../gen/payloads';
 
 export function initWifiPage(socket: Socket, isVisible: (page: string) => boolean): void {
   // Published under the names the live app uses, so a LIFTED renderer finds
@@ -270,7 +231,7 @@ export function initWifiPage(socket: Socket, isVisible: (page: string) => boolea
     document.dispatchEvent(new CustomEvent('mikrodash:resmount'));
   }
 
-  socket.on('wifi:update', (d: WifiPayload) => {
+  socket.on('wifi:update', (d) => {
     state = d || null;
     render();
   });

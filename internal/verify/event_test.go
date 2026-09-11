@@ -51,10 +51,23 @@ var eventsUnconsumed = map[string]string{
 // collector BY DESIGN: the numbers are in this process, so a collector would be
 // the wrong mechanism, and what was actually missing was a sender.
 // `internal/server/diagnostics.go` is that sender.
-var eventsUnserved = map[string]string{
-	"alert:fired": "the alerter holds per-router evaluator state and SENDS; the bell renders the " +
-		"stored feed without it.",
-	"alert:resolved": "as alert:fired.",
+//
+// `alert:fired` and `alert:resolved` LEFT ON 2026-09-11, the other way: their
+// listeners were removed rather than a sender added. Nothing had ever sent
+// either, and once every handler was typed by the event Go declares
+// (web/src/socket.ts), a listener for an undeclared event stopped compiling.
+// The list is empty, and stays a check: a page listening for something nobody
+// sends now fails here AND in tsc.
+var eventsUnserved = map[string]string{}
+
+// eventTypeSources are the browser's payload TYPES, and they name every event
+// by construction: the generated map is keyed by each declaration, and the hand
+// ledger must name every map event or tsc fails. Read as consumers, they would
+// make every emitted event "consumed", and the unconsumed half of this test
+// could never fail. A type is not a listener.
+var eventTypeSources = map[string]bool{
+	"web/src/gen/payloads.ts": true,
+	"web/src/events-hand.ts":  true,
 }
 
 var (
@@ -74,7 +87,9 @@ func TestWebSocketVocabulary(t *testing.T) {
 	root := repoRoot(t)
 
 	goSrc := joined(readFiles(t, root, "internal/", func(r string) bool { return hasExt(r, ".go") && !isTestSource(r) }))
-	tsSrc := joined(readFiles(t, root, "web/src/", func(r string) bool { return hasExt(r, ".ts") && !isTestSource(r) }))
+	tsSrc := joined(readFiles(t, root, "web/src/", func(r string) bool {
+		return hasExt(r, ".ts") && !isTestSource(r) && !eventTypeSources[r]
+	}))
 
 	// COMMENTS STRIPPED: internal/hub/event.go documents the form with an
 	// example declaration, and a declaration in prose sends nothing.

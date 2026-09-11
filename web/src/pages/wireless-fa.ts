@@ -12,22 +12,11 @@
  * fleet-wide cap of three and a per-operator cooldown.
  */
 
-export interface FaRow {
-  ch: number;
-  chNum: number | null;
-  chRaw: string | null;
-  nets: number | null;
-  load: number | null;
-  nf: number | null;
-  maxSig: number | null;
-  minSig: number | null;
-}
+import type { WifiscanRow } from '../gen/payloads';
+import type { HandEvents } from '../events-hand';
 
-export interface FaIface {
-  name: string;
-  running: boolean;
-  clients: number;
-}
+/** One radio in the picker, as `wifiscan:interfaces` lists it. */
+export type FaIface = HandEvents['wifiscan:interfaces']['interfaces'][number];
 
 /**
  * Green (open) through red (congested).
@@ -58,7 +47,7 @@ export function congestionColour(load: number | null, alpha = 0.85): string {
  * reported first, or the recommendation moves between scans of an unchanged
  * environment.
  */
-export function bestChannel(rows: FaRow[]): FaRow | null {
+export function bestChannel(rows: WifiscanRow[]): WifiscanRow | null {
   const scored = rows.filter((r) => r.load != null);
   if (!scored.length) return null;
   return scored
@@ -73,7 +62,7 @@ export function bestChannel(rows: FaRow[]): FaRow | null {
  * One spurious bin should not move the reported floor, and a scan across a whole
  * band routinely produces one.
  */
-export function noiseFloor(rows: FaRow[]): number | null {
+export function noiseFloor(rows: WifiscanRow[]): number | null {
   const nf = rows.map((r) => r.nf).filter((v): v is number => v != null);
   if (!nf.length) return null;
   return nf.slice().sort((a, b) => a - b)[Math.floor(nf.length / 2)] ?? null;
@@ -100,7 +89,7 @@ export interface FaStats {
   faNoise: string;
 }
 
-export function statsHTML(rows: FaRow[], currentChannelMhz: number | null): FaStats {
+export function statsHTML(rows: WifiscanRow[], currentChannelMhz: number | null): FaStats {
   const cur = rows.filter((r) => r.ch === currentChannelMhz)[0];
   const best = bestChannel(rows);
   const nets = rows.reduce((n, r) => n + (r.nets || 0), 0);
@@ -116,13 +105,13 @@ export function statsHTML(rows: FaRow[], currentChannelMhz: number | null): FaSt
 }
 
 /** The colour the congestion figure is written in, or '' for none. */
-export function congestionColourFor(rows: FaRow[], currentChannelMhz: number | null): string {
+export function congestionColourFor(rows: WifiscanRow[], currentChannelMhz: number | null): string {
   const cur = rows.filter((r) => r.ch === currentChannelMhz)[0];
   return cur && cur.load != null ? congestionColour(cur.load, 1) : '';
 }
 
 /** The channel grid. */
-export function gridHTML(rows: FaRow[], currentChannelMhz: number | null): string {
+export function gridHTML(rows: WifiscanRow[], currentChannelMhz: number | null): string {
   if (!rows.length) return '';
   return rows.map((r) => {
     const isCur = r.ch === currentChannelMhz;
@@ -253,7 +242,7 @@ export function initFrequencyAnalyser(socket: Socket): void {
   const spinEl = el('faSpin');
   if (!ifaceSel || !durSel || !scanBtn || !stopBtn || !statusEl || !gridEl || !emptyEl) return;
 
-  let rows: FaRow[] = [];
+  let rows: WifiscanRow[] = [];
   let ifaces: FaIface[] = [];
   const state: FaState = { scanning: false, scanId: null, currentChannelMhz: null, endsAt: 0 };
   let tick: ReturnType<typeof setInterval> | null = null;
@@ -369,7 +358,7 @@ export function initFrequencyAnalyser(socket: Socket): void {
   });
   stopBtn.addEventListener('click', () => socket.emit('wifiscan:stop', { scanId: state.scanId }));
 
-  socket.on('wifiscan:interfaces', (d: { permitted?: boolean; interfaces?: FaIface[] }) => {
+  socket.on('wifiscan:interfaces', (d) => {
     if (!d) return;
     // THE BUTTON EXISTS ONLY FOR SOMEONE WHO MAY ACTUALLY SCAN, and only when
     // there is something to scan. Hiding it is not the security boundary — the
@@ -388,26 +377,24 @@ export function initFrequencyAnalyser(socket: Socket): void {
     updateWarning();
   });
 
-  socket.on('wifiscan:state', (d: {
-    scanning?: boolean; scanId?: string; endsAt?: number; currentChannelMhz?: number | null;
-    rows?: FaRow[];
-  }) => {
+  socket.on('wifiscan:state', (d) => {
     if (!d) return;
     state.scanId = d.scanId || null;
     state.endsAt = d.endsAt || 0;
     state.currentChannelMhz = d.currentChannelMhz ?? null;
-    rows = d.rows || [];
+    // A scan starts with no channels, so the table is cleared.
+    rows = [];
     setScanning(!!d.scanning);
     render();
   });
 
-  socket.on('wifiscan:rows', (d: { rows?: FaRow[] }) => {
+  socket.on('wifiscan:rows', (d) => {
     if (!d) return;
     rows = d.rows || [];
     render();
   });
 
-  socket.on('wifiscan:done', (d: { reason?: string; rows?: FaRow[]; sampleCount?: number }) => {
+  socket.on('wifiscan:done', (d) => {
     if (!d) return;
     rows = d.rows || rows;
     setScanning(false);
@@ -421,7 +408,7 @@ export function initFrequencyAnalyser(socket: Socket): void {
         : d.reason === 'aborted' ? 'Stopped' : `Ended: ${d.reason || 'unknown'}`, false);
   });
 
-  socket.on('wifiscan:error', (d: { code?: string; message?: string; iface?: string }) => {
+  socket.on('wifiscan:error', (d) => {
     if (!d) return;
     setScanning(false);
     setStatus(scanErrorText(d), false);
@@ -460,7 +447,7 @@ export function initFrequencyAnalyser(socket: Socket): void {
  * The server answers in codes so the page can say something useful about each;
  * an unknown one falls through to the message rather than being swallowed.
  */
-export function scanErrorText(d: { code?: string; message?: string; iface?: string }): string {
+export function scanErrorText(d: Pick<HandEvents['wifiscan:error'], 'code' | 'message' | 'iface'>): string {
   switch (d.code) {
     case 'busy': return `Already scanning ${d.iface || 'this router'}`;
     case 'fleet-busy': return 'Too many scans running across the fleet — try again shortly';
@@ -490,7 +477,7 @@ export function scanErrorText(d: { code?: string; message?: string; iface?: stri
  * channel's row. The corpus carries an all-zero case for exactly that.
  */
 export function spectrumTooltipLines(
-  row: FaRow | undefined, currentChannelMhz: number | null,
+  row: WifiscanRow | undefined, currentChannelMhz: number | null,
 ): string[] {
   if (!row) return [];
   const out: string[] = [];
@@ -542,7 +529,7 @@ export function spectrumBandGeometry(
 export const FA_FLOOR_DBM = -100;
 
 /** The datasets, rebuilt from the current scan rows. */
-export function spectrumData(rows: FaRow[]): {
+export function spectrumData(rows: WifiscanRow[]): {
   labels: (number | null)[];
   signal: ([number, number] | null)[];
   colours: string[];
@@ -574,7 +561,7 @@ export function spectrumData(rows: FaRow[]): {
  * tooltip on the first result.
  */
 export function spectrumConfig(deps: {
-  rows: () => FaRow[];
+  rows: () => WifiscanRow[];
   currentChannelMhz: () => number | null;
   legendLabels: (chart: unknown) => LegendItem[];
   legendClick: (e: unknown, item: LegendItem, legend: unknown) => void;

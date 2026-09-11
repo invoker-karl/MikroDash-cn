@@ -31,38 +31,8 @@
 
 import { esc, el, renderSortHeader, fmtBytes, type SortCol } from '../dom';
 import type { Socket } from '../socket';
-
-export interface RatePair { up: number | null; down: number | null }
-export interface IntPair { up: number | null; down: number | null }
-
-export interface SimpleQueue {
-  id: string; order: number; name: string; target: string; parent: string;
-  packetMarks: string; priority: string; queueType: string;
-  limitAt: RatePair; maxLimit: RatePair; burstLimit: RatePair;
-  bytes: IntPair; packets: IntPair; dropped: IntPair; queuedBytes: IntPair;
-  disabled: boolean; invalid: boolean; dynamic: boolean; comment: string;
-  rateBps: RatePair; rateSource: string | null; rateWindowMs: number | null;
-}
-
-export interface TreeQueue {
-  id: string; order: number; name: string; parent: string; packetMark: string;
-  priority: string; queueType: string;
-  limitAt: number | null; maxLimit: number | null; burstLimit: number | null;
-  bytes: number | null; packets: number | null; dropped: number | null;
-  queuedBytes: number | null;
-  disabled: boolean; invalid: boolean; dynamic: boolean; comment: string;
-  fasttrackBypassable: boolean;
-  rateBps: number | null; rateSource: string | null; rateWindowMs: number | null;
-}
-
-export interface QueuesPayload {
-  ts: number; pollMs: number;
-  simple: SimpleQueue[]; tree: TreeQueue[];
-  fasttrack: { state: string; count: number; scoped: boolean };
-  stats: string; available: boolean; denied: boolean;
-}
-
-export interface QueuesCaps { permitted: boolean; routerName: string }
+import type { SimpleQueue, TreeQueue, QueuesPayload } from '../gen/payloads';
+import type { HandEvents } from '../events-hand';
 
 // Order first, and it is not cosmetic — see the header.
 //
@@ -96,7 +66,7 @@ export function initQueuesPage(socket: Socket, isVisible: (page: string) => bool
   const treeTb: HTMLElement = treeTbEl;
 
   let data: QueuesPayload | null = null;
-  let caps: QueuesCaps = { permitted: false, routerName: '' };
+  let caps: HandEvents['queues:caps'] = { permitted: false, routerName: '' };
   let tab = 'simple';
   let busy = '';
 
@@ -526,10 +496,7 @@ export function initQueuesPage(socket: Socket, isVisible: (page: string) => bool
     submit(el<HTMLInputElement>('qf_ack')?.value || undefined);
   });
 
-  socket.on('queues:error', (d: {
-    code?: string; message?: string; fingerprint?: string;
-    warning?: { address?: string; target?: string; maxLimit?: { up?: number | null; down?: number | null } };
-  }) => {
+  socket.on('queues:error', (d) => {
     busy = '';
     const code = d && d.code;
 
@@ -538,14 +505,21 @@ export function initQueuesPage(socket: Socket, isVisible: (page: string) => bool
     // fingerprint is recomputed server-side from a fresh read every time, which
     // is what stops an acknowledgement being carried to a harsher queue.
     if (code === 'self-throttle' || code === 'stale-warning') {
-      const w = (d && d.warning) || {};
-      const cap = w.maxLimit || {};
+      // `warning` is the guard's raw map, so its keys are `unknown` here. The
+      // strings are only escaped, which any value survives; the rate is checked
+      // at runtime, and anything but a number reads as null — which bpsToShort
+      // renders exactly as it renders a missing one.
+      const w: Record<string, unknown> = (d && d.warning) || {};
+      const cap = w.maxLimit;
+      const capUp = cap && typeof cap === 'object' && 'up' in cap && typeof cap.up === 'number' ? cap.up : null;
+      const capDown = cap && typeof cap === 'object' && 'down' in cap && typeof cap.down === 'number'
+        ? cap.down : null;
       const e = el('qf_warn');
       if (!e) return;
       e.innerHTML = '<strong>This queue covers MikroDash\'s own connection to this router.</strong><br>' +
         'MikroDash reaches ' + esc(caps.routerName || 'this router') + ' from <code>' + esc(w.address || '') + '</code>, ' +
         'which is inside <code>' + esc(w.target || '') + '</code>, and this queue caps traffic at <code>' +
-        esc(bpsToShort(cap.up) + '/' + bpsToShort(cap.down)) + '</code>.<br>' +
+        esc(bpsToShort(capUp) + '/' + bpsToShort(capDown)) + '</code>.<br>' +
         'The dashboard\'s own polling will be throttled and this page may become slow. ' +
         'You will still be able to edit or remove the queue from its row.' +
         (code === 'stale-warning' ? '<br><em>The values changed since you confirmed, so please confirm again.</em>' : '') +
@@ -582,7 +556,7 @@ export function initQueuesPage(socket: Socket, isVisible: (page: string) => bool
     if (isVisible('queues')) render();
   });
 
-  socket.on('queues:update', (d: QueuesPayload) => {
+  socket.on('queues:update', (d) => {
     if (!d) return;
     data = d;
     busy = '';
@@ -593,13 +567,13 @@ export function initQueuesPage(socket: Socket, isVisible: (page: string) => bool
     if (isVisible('queues')) render();
   });
 
-  socket.on('queues:caps', (d: QueuesCaps) => {
+  socket.on('queues:caps', (d) => {
     if (!d) return;
     caps = d;
     if (isVisible('queues')) render();
   });
 
-  socket.on('queues:ok', (d: { action?: string; name?: string }) => {
+  socket.on('queues:ok', (d) => {
     busy = '';
     el('qFormWrap')?.classList.remove('open');
     const what: Record<string, string> = {

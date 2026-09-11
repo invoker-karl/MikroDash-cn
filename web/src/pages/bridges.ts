@@ -10,33 +10,7 @@ import { esc, el, resRow, debounce, renderSortHeader, sortMul, fmtMbps,
          type SortCol, type SortState } from '../dom';
 import type { Socket } from '../socket';
 import { mountAdds, mountRows } from '../resource';
-
-export interface Bridge {
-  id: string; name: string; protocolMode: string;
-  vlanFiltering: boolean; igmpSnooping: boolean; dhcpSnooping: boolean;
-  fastForward: boolean; priority: string; ageingTime: string; macAddress: string;
-  mtu: number | null; running: boolean; disabled: boolean; comment: string;
-  portCount: number; rxMbps: number | null; txMbps: number | null;
-}
-
-export interface BridgePort {
-  id: string; bridge: string; interface: string; pvid: number | null;
-  role: string; edge: string; learn: string; horizon: string;
-  pathCost: number | null; frameTypes: string;
-  disabled: boolean; inactive: boolean; dynamic: boolean;
-}
-
-export interface BridgeHost {
-  mac: string; onInterface: string; bridge: string; vid: number | null;
-  dynamic: boolean; local: boolean; external: boolean; age: string;
-}
-
-export interface BridgesPayload {
-  ts: number; pollMs: number;
-  bridges: Bridge[]; ports: BridgePort[]; hosts: BridgeHost[];
-  hostTotal: number; hostCap: number; ratesAvailable: boolean;
-  available: boolean; hostsAvailable: boolean;
-}
+import type { Bridge, BridgesPayload } from '../gen/payloads';
 
 const COLS_B: SortCol[] = [
   { key: 'name', label: 'Bridge' },
@@ -253,7 +227,7 @@ export function initBridgesPage(socket: Socket, isVisible: (page: string) => boo
     });
   }
 
-  socket.on('bridges:update', (d: BridgesPayload) => {
+  socket.on('bridges:update', (d) => {
     if (!d) return;
     data = d;
     renderSummary();

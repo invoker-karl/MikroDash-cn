@@ -35,8 +35,9 @@ import { isRosDisconnected } from '../banners';
 import {
   MAX_CLIENT_POINTS, RIGHT_BUFFER_MS, anchorMs, axisWindow, needsFullRedraw, pruneAndMax,
   pushSample, smoothMax, smoothOffset, windowedPoints,
-  type TrafficSample, type XYPoint,
+  type XYPoint,
 } from './dashboard-traffic-buffer';
+import type { TrafficHistory, TrafficPoint, TrafficSample } from '../gen/payloads';
 
 /** How far the right edge sits behind the anchor, so the newest point is not clipped. */
 
@@ -53,7 +54,7 @@ interface ChartLike {
 declare const Chart: undefined | (new (canvas: HTMLElement, cfg: unknown) => ChartLike);
 
 let chart: ChartLike | null = null;
-let allPoints: TrafficSample[] = [];
+let allPoints: TrafficPoint[] = [];
 let currentIf = '';
 let windowSecs = 60;
 let lastSampleTs = 0, serverOffset = 0;
@@ -185,7 +186,7 @@ function makeChartObj(): void {
 // The alternative — a second buffer fed from the same `traffic:update` — is the
 // thing the port record warns against: two arrays pruned by two rules drift apart,
 // and the drift only shows up as two charts disagreeing about the same second.
-export function sharedPoints(): TrafficSample[] { return allPoints; }
+export function sharedPoints(): TrafficPoint[] { return allPoints; }
 
 /** The shared clock the keepalives anchor to: `Date.now() + serverOffset`, and
  *  zero for `lastSampleTs` until the first sample has arrived. Both are updated
@@ -223,7 +224,7 @@ export function applyWindow(secs: number): void {
   redrawChart();
 }
 
-export function initChart(points: TrafficSample[] | undefined): void {
+export function initChart(points: TrafficPoint[] | undefined): void {
   allPoints = (points || []).slice(-MAX_CLIENT_POINTS);
   if (!chart) makeChartObj();
   redrawChart();
@@ -293,7 +294,7 @@ function flushTraffic(): void {
   // Scale advance and rendering are the keepalive's job.
 }
 
-export function noteTrafficUpdate(sample: TrafficSample & { ifName?: string }): void {
+export function noteTrafficUpdate(sample: TrafficSample): void {
   if (!currentIf || sample.ifName !== currentIf) return;
   // Buffered ALWAYS, even hidden or on another page: only the DOM update is
   // deferred, so history survives a backgrounded tab rather than developing a
@@ -331,7 +332,7 @@ export function shouldRestorePick(
   return options.indexOf(picked) !== -1;
 }
 
-export function onTrafficHistory(data: { ifName?: string; points?: TrafficSample[] }): void {
+export function onTrafficHistory(data: TrafficHistory): void {
   currentIf = data.ifName || '';
   const sel = el<HTMLSelectElement>('ifaceSelect');
   if (sel) sel.value = data.ifName || '';
@@ -468,8 +469,8 @@ export function resetTraffic(): void {
 
 export function initTraffic(socket: Socket): void {
   requestInterface = (ifName) => socket.emit('traffic:select', { ifName });
-  socket.on('traffic:history', (d) => onTrafficHistory(d as { ifName?: string; points?: TrafficSample[] }));
-  socket.on('traffic:update', (d) => noteTrafficUpdate(d as TrafficSample & { ifName?: string }));
+  socket.on('traffic:history', (d) => onTrafficHistory(d));
+  socket.on('traffic:update', (d) => noteTrafficUpdate(d));
 
   const sel = el<HTMLSelectElement>('ifaceSelect');
   if (sel) {

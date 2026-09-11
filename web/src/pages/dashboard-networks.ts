@@ -30,22 +30,12 @@
 // previous ROUTER's networks, sitting under the new one's name indefinitely.
 
 import { esc, el } from '../dom';
-
-export interface LanNetwork {
-  cidr?: string;
-  gateway?: string;
-  dns?: string;
-  leaseCount?: number;
-}
-export interface LanOverviewPayload {
-  internetIfaces?: { name?: string; ip?: string }[];
-  networks?: LanNetwork[];
-}
+import type { LanPayload } from '../gen/payloads';
 
 /** The live app's `DOT`, a middle dot separator. */
 const DOT = '·';
 
-export function renderNetworks(data: LanOverviewPayload): void {
+export function renderNetworks(data: LanPayload): void {
   const ifaceEl = el('netInternetIfaces');
   if (ifaceEl) {
     const ifaces = data.internetIfaces || [];

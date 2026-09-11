@@ -25,30 +25,25 @@ import {
 import {
   SPARK_LEN, syncCountryList, portListHTML, portsFromDests,
   countriesFromSourceDests, clientOptions,
-  type ConnCountry, type ConnDestEntry, type ConnPort, type ConnSource,
 } from './connections-lists';
-import { createSankeyThrottle, renderSankey, type SankeyDest } from './connections-sankey';
+import { createSankeyThrottle, renderSankey } from './connections-sankey';
+import type {
+  ConnCountry, ConnCountryProto, ConnDestEntry, ConnPort, ConnsPayload, ConnsUpdate, Lease,
+} from '../gen/payloads';
 
-interface ConnPayload {
-  ts: number; total: number; newSinceLast: number;
-  topSources: ConnSource[];
-  topDestinations: Array<ConnDestEntry & { proto?: Record<string, number> }>;
-  topCountries: ConnCountry[];
-  topPorts: ConnPort[];
-  countryDests?: Record<string, ConnDestEntry[]>;
-  countryPorts?: Record<string, ConnPort[]>;
-  sourceDests?: Record<string, ConnDestEntry[]>;
-  sourcePorts?: Record<string, ConnPort[]>;
-}
+// The last `conn:update`, with the per-country indexes that arrive on their own
+// event (`conn:country-data`) carried forward onto it. A view over two payloads,
+// so it is composed from their generated types rather than restated.
+type ConnView = ConnsUpdate & Partial<Pick<ConnsPayload, 'countryDests' | 'countryPorts'>>;
 
 export function initConnectionsPage(socket: Socket, isVisible: (page: string) => boolean): void {
   const mapSvg = el('worldMap') as unknown as SVGElement | null;
   const listEl = el('connMapList');
   if (!mapSvg && !listEl) return;
 
-  let last: ConnPayload | null = null;
+  let last: ConnView | null = null;
   let counts: Record<string, number> = {};
-  const protoOf: Record<string, Record<string, number>> = {};
+  const protoOf: Record<string, ConnCountryProto> = {};
   const cityOf: Record<string, string> = {};
   const sparks: Record<string, number[]> = {};
   let sourceDests: Record<string, ConnDestEntry[]> = {};
@@ -56,7 +51,7 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
   let selectedCC: string | null = null;
   let filteredBySrc = '';
   let localCC = 'ZZ';
-  let leases: Array<{ ip: string; name?: string; hostName?: string }> = [];
+  let leases: Lease[] = [];
 
   const sankeySvg = el('sankeySvg') as unknown as SVGElement | null;
   const sankeyEmpty = el('sankeyEmpty');
@@ -179,7 +174,7 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
       setBadge(last.total || 0);
       renderPorts(last.topPorts || []);
       sankey.setFiltered(false);
-      sankey.update(srcs, (last.topDestinations || []).slice(0, 10) as SankeyDest[]);
+      sankey.update(srcs, (last.topDestinations || []).slice(0, 10));
       setSub((last.topCountries || []).length + ' countries active');
       return;
     }
@@ -194,7 +189,7 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
     setBadge(counts[cc] || 0);
     renderPorts(ports);
     sankey.setFiltered(true);
-    sankey.redrawWith(srcs, dests.slice(0, 10) as SankeyDest[]);
+    sankey.redrawWith(srcs, dests.slice(0, 10));
     setSub(iso2Flag(cc) + ' ' + (CC_NAMES[cc] || cc) + ' — ' + dests.length +
       ' destination' + (dests.length !== 1 ? 's' : ''));
   }
@@ -219,7 +214,7 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
       redrawMap();
       sankey.setFiltered(false);
       sankey.update((last.topSources || []).slice(0, 8),
-        (last.topDestinations || []).slice(0, 10) as SankeyDest[]);
+        (last.topDestinations || []).slice(0, 10));
       setSub((last.topCountries || []).length + ' countries active');
       return;
     }
@@ -241,7 +236,7 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
     sankey.setFiltered(true);
     sankey.redrawWith(
       [{ ip, name: srcObj ? (srcObj.name || ip) : ip, count: srcCount || 1 }],
-      dests.slice(0, 10) as SankeyDest[]);
+      dests.slice(0, 10));
   }
 
   function countsFrom(list: ConnCountry[]): Record<string, number> {
@@ -269,7 +264,7 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
     selectSource(this.value);
   });
 
-  socket.on('conn:update', (data: ConnPayload) => {
+  socket.on('conn:update', (data) => {
     if (!data) return;
 
     // Asked for HERE rather than at init — see fetchLocalCCOnce. Connection
@@ -277,7 +272,7 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
     fetchLocalCCOnce();
 
     (data.topCountries || []).forEach((e) => {
-      protoOf[e.cc] = (e.proto || {}) as Record<string, number>;
+      protoOf[e.cc] = e.proto || {};
       cityOf[e.cc] = e.city || '';
       pushSpark(e.cc, e.count);
     });
@@ -290,8 +285,6 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
     last = data;
     if (prevCountryDests && !last.countryDests) last.countryDests = prevCountryDests;
     if (prevCountryPorts && !last.countryPorts) last.countryPorts = prevCountryPorts;
-    if (data.sourceDests) sourceDests = data.sourceDests;
-    if (data.sourcePorts) sourcePorts = data.sourcePorts;
 
     populateClients();
 
@@ -326,20 +319,18 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
       renderCountries(data.topCountries || []);
       renderPorts(data.topPorts || []);
       sankey.update((data.topSources || []).slice(0, 8),
-        (data.topDestinations || []).slice(0, 10) as SankeyDest[]);
+        (data.topDestinations || []).slice(0, 10));
     }
   });
 
-  socket.on('conn:country-data', (d: { countryDests?: Record<string, ConnDestEntry[]>;
-    countryPorts?: Record<string, ConnPort[]> }) => {
+  socket.on('conn:country-data', (d) => {
     if (!d || !last) return;
     if (d.countryDests) last.countryDests = d.countryDests;
     if (d.countryPorts) last.countryPorts = d.countryPorts;
     if (selectedCC) selectCountry(selectedCC);
   });
 
-  socket.on('conn:source-data', (d: { sourceDests?: Record<string, ConnDestEntry[]>;
-    sourcePorts?: Record<string, ConnPort[]> }) => {
+  socket.on('conn:source-data', (d) => {
     if (!d) return;
     if (d.sourceDests) sourceDests = d.sourceDests;
     if (d.sourcePorts) sourcePorts = d.sourcePorts;
@@ -348,7 +339,7 @@ export function initConnectionsPage(socket: Socket, isVisible: (page: string) =>
 
   // The DHCP leases fill the client picker with devices that have no traffic
   // right now — which is how you find out they have none.
-  socket.on('leases:list', (d: { leases?: Array<{ ip: string; name?: string; hostName?: string }> }) => {
+  socket.on('leases:list', (d) => {
     leases = (d && d.leases) || [];
     populateClients();
   });

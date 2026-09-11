@@ -10,6 +10,24 @@
 // namespaces, no binary frames. What Socket.IO was actually providing here was
 // reconnection, and that is the part below with any substance to it.
 
+import type { Events } from './gen/payloads';
+import type { HandEvents } from './events-hand';
+
+// ── EVERY HANDLER IS TYPED BY ITS EVENT ─────────────────────────────────────
+//
+// `on('routing:update', (d) => …)` gives `d` the payload Go declared for
+// routing:update. Events is generated from the Go declarations by cmd/tsgen,
+// so a field renamed in Go is a type error in every page that reads it, and
+// listening for an event Go does not send does not compile.
+//
+// A map payload has no struct to generate from, so its type is written by hand
+// in events-hand.ts, which tsc holds to exactly the map events Go declares.
+// The three lifecycle events are this class's own and carry nothing.
+interface Lifecycle { connect: null; disconnect: null; connect_error: null }
+
+/** Every event a page can listen for, and its payload. */
+export type AllEvents = Events & HandEvents & Lifecycle;
+
 type Handler = (data: any) => void;
 
 export class Socket {
@@ -42,10 +60,15 @@ export class Socket {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
-  on(event: string, cb: Handler): void {
+  /**
+   * Listen for an event. `cb` receives exactly the payload declared for it —
+   * see AllEvents — so no handler needs a cast, and one that casts is hiding a
+   * disagreement with the Go side rather than resolving it.
+   */
+  on<E extends keyof AllEvents>(event: E, cb: (data: AllEvents[E]) => void): void {
     const list = this.handlers.get(event);
-    if (list) list.push(cb);
-    else this.handlers.set(event, [cb]);
+    if (list) list.push(cb as Handler);
+    else this.handlers.set(event, [cb as Handler]);
   }
 
   emit(event: string, data?: unknown): void {

@@ -20,50 +20,25 @@
  */
 
 import { esc, el } from '../dom';
-
-/** One row of the `routers:stats` payload. Absent is null, never zero. */
-export interface RouterStatsRow {
-  id: string;
-  label: string;
-  host: string;
-  isActive: boolean;
-  connected: boolean;
-  /**
-   * Whether either pool has actually LOOKED at this router yet.
-   *
-   * `connected` is a bool and cannot express "not asked". Rendering its zero
-   * value as a red "Offline" is a claim the server never made, and on first
-   * open of this page that was every device but the selected one. Treat
-   * `!known` as a third state everywhere `connected` is displayed.
-   */
-  known: boolean;
-  lastError: string | null;
-  openAlerts: number;
-  cpu: number | null;
-  uptime: string | null;
-  memPct: number | null;
-  hddPct: number | null;
-  version: string | null;
-  boardName: string | null;
-  arch: string | null;
-  serial: string | null;
-  licenseLevel: string | null;
-  rxMbps: number | null;
-  txMbps: number | null;
-  clients: number | null;
-  siteId: string | null;
-  siteName: string | null;
-  // #117: a device may belong to SEVERAL sites. `siteId`/`siteName` above are
-  // the server's backward-compatible mirrors of the first entry, kept because
-  // the payload still sends them.
-  //
-  // THE TWO ARRAYS CAN DIFFER IN LENGTH: the server drops a name it cannot
-  // resolve but keeps the id, so nothing may zip them.
-  siteIds?: string[];
-  siteNames?: string[];
-  geo: { lat: number; lon: number; source: string; label: string;
-         accuracyKm?: number | null; wanIp?: string } | null;
-}
+import type { Socket } from '../socket';
+/*
+ * RouterStatsRow is one row of the `routers:stats` payload. Absent is null,
+ * never zero.
+ *
+ * `known` is whether either pool has actually LOOKED at this router yet.
+ * `connected` is a bool and cannot express "not asked". Rendering its zero
+ * value as a red "Offline" is a claim the server never made, and on first
+ * open of this page that was every device but the selected one. Treat
+ * `!known` as a third state everywhere `connected` is displayed.
+ *
+ * #117: a device may belong to SEVERAL sites. `siteId`/`siteName` are the
+ * server's backward-compatible mirrors of the first entry of `siteIds` /
+ * `siteNames`, kept because the payload still sends them.
+ *
+ * THE TWO ARRAYS CAN DIFFER IN LENGTH: the server drops a name it cannot
+ * resolve but keeps the id, so nothing may zip them.
+ */
+import type { RouterStatsRow } from '../gen/payloads';
 
 type View = 'comfortable' | 'compact' | 'list' | 'map';
 
@@ -574,7 +549,8 @@ export function layout(located: RouterStatsRow[]): MapGroup[] {
   const buckets: Record<string, MapGroup> = {};
   const order: string[] = [];
   located.forEach((r) => {
-    const geo = r.geo as { lat: number; lon: number };
+    const geo = r.geo;
+    if (!geo) return; // `located` holds only placed routers
     const p = project(geo.lon, geo.lat);
     const k = Math.round(p[0] / MAP_GRID) + ':' + Math.round(p[1] / MAP_GRID);
     if (!buckets[k]) { buckets[k] = { key: k, x: 0, y: 0, routers: [] }; order.push(k); }
@@ -612,7 +588,7 @@ export function dotColour(r: RouterStatsRow): string {
 }
 
 export function popHtml(r: RouterStatsRow): string {
-  const g = r.geo || ({} as NonNullable<RouterStatsRow['geo']>);
+  const g: Partial<NonNullable<RouterStatsRow['geo']>> = r.geo || {};
   const up = r.uptime ? String(r.uptime) : '—';
   // Where the position came from, stated plainly and without alarm. The map
   // itself no longer distinguishes them.
@@ -643,7 +619,8 @@ export function popHtml(r: RouterStatsRow): string {
  * settings. Without it a cluster would be a dead end.
  */
 export function groupPopHtml(g: MapGroup): string {
-  const first = g.routers[0] as RouterStatsRow;
+  const first = g.routers[0];
+  if (!first) return '';
   if (g.routers.length === 1) return popHtml(first);
   const place = (first.geo && first.geo.label) || 'this location';
   // KNOWN and not connected. Counting `!connected` made a cluster announce
@@ -903,7 +880,7 @@ export function applyView(v: string): void {
  * wraps it: a browser with site data blocked throws on access rather than
  * returning null, and an unreadable preference must not stop the page loading.
  */
-export function mountRouters(socket: { on(ev: string, cb: (d: unknown) => void): void }): void {
+export function mountRouters(socket: Socket): void {
   // THE SVG HALF IS MOUNTED BY `main.ts`, NOT FROM HERE.
   //
   // A `import('./routers-map')` here worked and was wrong twice over: the
@@ -917,7 +894,7 @@ export function mountRouters(socket: { on(ev: string, cb: (d: unknown) => void):
   // `main.ts` imports both and mounts both, which is neither cyclic nor
   // deferred.
   socket.on('routers:stats', (rows) => {
-    renderRoutersStats(rows as RouterStatsRow[]);
+    renderRoutersStats(rows);
   });
 
   const head = document.querySelector('.routers-list thead');

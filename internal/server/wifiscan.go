@@ -174,7 +174,7 @@ func (cn *conn) wifiscanStart(raw json.RawMessage) {
 	EvWifiscanState.Send(cn.srv.hub, cn.c, map[string]any{
 		"scanning": true, "scanId": scan.ID, "iface": scan.Iface,
 		"durationSec": scan.DurationSec, "startedAt": scan.StartedAt,
-		"endsAt": scan.EndsAt, "currentChannelMhz": currentChannel, "rows": []any{},
+		"endsAt": scan.EndsAt, "currentChannelMhz": currentChannel,
 	})
 	log.Printf("[%s][wifiscan] %s for %ds — clients on that radio will drop",
 		cn.routerLabel(), scan.Iface, scan.DurationSec)

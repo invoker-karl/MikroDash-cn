@@ -19,19 +19,7 @@
 
 import { esc, el } from '../dom';
 import { getVpnDashTopN } from '../caps';
-
-export interface VpnTunnel {
-  type?: string;
-  state?: string;
-  name?: string;
-  interface?: string;
-  endpoint?: string;
-  lastHandshake?: string;
-}
-
-export interface VpnPayload {
-  tunnels?: VpnTunnel[];
-}
+import type { VPNPayload } from '../gen/payloads';
 
 /**
  * A RouterOS duration — `2w3d4h5m6s` — as seconds.
@@ -70,7 +58,7 @@ export function parseDurationSec(s: string | undefined | null): number {
   return total || Infinity;
 }
 
-export function renderVpnCard(data: VpnPayload): void {
+export function renderVpnCard(data: VPNPayload): void {
   const table = el('vpnTable');
   if (!table) return;
   const wgPeers = (data.tunnels || []).filter((t) => t.type === 'WireGuard');

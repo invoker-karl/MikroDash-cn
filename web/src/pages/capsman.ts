@@ -24,71 +24,10 @@
 import { esc, el, resRow, debounce, renderSortHeader, sortMul,
   type SortCol, type SortState } from '../dom';
 import type { Socket } from '../socket';
-
-export interface CapsRadio { radioMac: string; interface: string; disabled: boolean }
-
-export interface CapsClient {
-  mac: string; interface: string; ssid: string; signal: number | null; uptime: string;
-}
-
-export interface Cap {
-  identity: string; address: string; boardName: string; serial: string; version: string;
-  baseMac: string; commonName: string; state: string; connectedTime: string; uptime: string;
-  radios: CapsRadio[]; clients: CapsClient[]; clientCount: number;
-}
-
-export interface CapsProvisioningRule {
-  id: string; identity: string; supportedBands: string[]; action: string;
-  masterConfiguration: string; slaveConfigurations: string[]; nameFormat: string;
-  radioMac: string; identityRegexp: string; comment: string; disabled: boolean;
-}
-
-export interface CapsConfigProfile {
-  id: string; name: string; ssid: string; mode: string; country: string; hideSsid: boolean;
-  security: string; channel: string; datapath: string; manager: string;
-  comment: string; disabled: boolean;
-}
-
-export interface CapsSecurityProfile {
-  id: string; name: string; authTypes: string; wps: string; ft: boolean;
-  comment: string; disabled: boolean;
-}
-
-export interface CapsChannelProfile {
-  id: string; name: string; band: string; frequency: string; width: string;
-  secondaryFrequency: string; skipDfsChannels: string; comment: string; disabled: boolean;
-}
-
-export interface CapsDatapathProfile {
-  id: string; name: string; bridge: string; vlanId: string; clientIsolation: boolean;
-  localForwarding: boolean; trafficProcessing: string; comment: string; disabled: boolean;
-}
-
-export interface CapsTotals {
-  caps: number; capsOk: number; radios: number; clients: number;
-  clientsOnCaps: number; clientsLocal: number;
-}
-
-export interface CapsmanPayload {
-  ts: number; pollMs: number; role: string;
-  manager: {
-    enabled: boolean; interfaces: string[]; caCertificate: string; certificate: string;
-    requirePeerCertificate: boolean; upgradePolicy: string; packagePath: string;
-  };
-  cap: {
-    enabled: boolean; discoveryInterfaces: string[]; capsManAddresses: string[];
-    currentAddress: string; currentIdentity: string; certificate: string; slavesDatapath: string;
-  };
-  caps: Cap[];
-  provisioning: CapsProvisioningRule[];
-  localRadios: CapsRadio[];
-  totals: CapsTotals;
-  profiles: {
-    configuration: CapsConfigProfile[]; security: CapsSecurityProfile[];
-    channel: CapsChannelProfile[]; datapath: CapsDatapathProfile[];
-  };
-  available: boolean;
-}
+import type {
+  CapsClient, Cap, CapsProvisioning, CapsConfigProfile, CapsSecurityProfile,
+  CapsChannelProfile, CapsDatapathProfile, CapsTotals, CapsmanPayload,
+} from '../gen/payloads';
 
 const COLS: SortCol[] = [
   { key: 'identity', label: 'Identity' },
@@ -249,7 +188,7 @@ export function initCapsmanPage(socket: Socket, isVisible: (page: string) => boo
   function renderRolePanel(): void {
     const panel = el('capsmanRolePanel'), body = el('capsmanRoleBody');
     if (!panel || !body || !data) return;
-    const c = data.cap || ({} as CapsmanPayload['cap']);
+    const c = data.cap;
     if (data.role === 'cap' || (data.role === 'both' && c.currentIdentity)) {
       panel.style.display = '';
       body.innerHTML = '<div class="kv-grid">' +
@@ -269,7 +208,7 @@ export function initCapsmanPage(socket: Socket, isVisible: (page: string) => boo
 
   function renderSummary(): void {
     if (!data) return;
-    const t = data.totals || ({} as Partial<CapsTotals>);
+    const t = data.totals;
     const modes: Record<string, string> = {
       manager: 'Manager', cap: 'CAP', both: 'Manager + CAP', none: 'Off',
     };
@@ -298,7 +237,7 @@ export function initCapsmanPage(socket: Socket, isVisible: (page: string) => boo
     return (p && p[t]) || [];
   }
 
-  function provRow(p: CapsProvisioningRule, at: number, last: number, canMove: boolean): string {
+  function provRow(p: CapsProvisioning, at: number, last: number, canMove: boolean): string {
     // data-res-move, not a name of this card's own: the engine owns the reorder
     // flow, including the guard prompt it can raise. Order is meaning here —
     // the first rule whose bands match a joining radio wins.
@@ -382,7 +321,7 @@ export function initCapsmanPage(socket: Socket, isVisible: (page: string) => boo
     if (t === 'provisioning') {
       const canMove = !!writable['capsProvisioning'];
       const last = rows.length - 1;
-      tbody.innerHTML = (rows as CapsProvisioningRule[])
+      tbody.innerHTML = (rows as CapsProvisioning[])
         .map((p, i) => provRow(p, i, last, canMove)).join('');
       return;
     }
@@ -436,7 +375,7 @@ export function initCapsmanPage(socket: Socket, isVisible: (page: string) => boo
     if (btn) setTab(btn.dataset.capstab || '');
   });
 
-  socket.on('capsman:update', (d: CapsmanPayload) => {
+  socket.on('capsman:update', (d) => {
     // The two halves differ here and the difference is kept: the table ignores a
     // falsy update, the card treats it as "no data" and redraws its waiting
     // state. One variable serves both, so a falsy update clears it and the table
@@ -450,7 +389,7 @@ export function initCapsmanPage(socket: Socket, isVisible: (page: string) => boo
 
   // Every engine event is filtered by the active tab, so an acknowledgement for
   // a tab you have left cannot redraw the one you are on.
-  socket.on('res:schema', (d: { key?: string; permitted?: boolean }) => {
+  socket.on('res:schema', (d) => {
     const key = d && d.key;
     if (!key || !CAPS_RES[tab]) return;
     if (!Object.keys(CAPS_RES).some((t) => CAPS_RES[t] === key)) return;
@@ -458,7 +397,7 @@ export function initCapsmanPage(socket: Socket, isVisible: (page: string) => boo
     if (CAPS_RES[tab] === key) renderTab(tab);
   });
 
-  socket.on('res:error', (d: { resource?: string }) => {
+  socket.on('res:error', (d) => {
     if (d && CAPS_RES[tab] === d.resource) renderTab(tab);
   });
 

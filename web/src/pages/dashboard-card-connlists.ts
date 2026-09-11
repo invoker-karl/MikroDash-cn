@@ -27,29 +27,16 @@
 import { el } from '../dom';
 import { dcEsc, dcFlag } from './dashboard-cards-util';
 import { DC_CC_NAMES, DC_PORT_NAMES } from '../gen/dccards-tables';
+// A country's `proto` is REQUIRED, and that is the wire contract rather than
+// optimism: `Proto` is a VALUE type on the Go side (`ConnCountryProto`, not a
+// pointer), so it is always marshalled. The live card reads `e.proto.tcp` with no
+// guard and would throw on an entry without it — killing the whole handler,
+// including the Top Ports list below. The generated type has it required, which
+// keeps this side reading like the original instead of quietly surviving a
+// payload the original cannot.
+import type { ConnCountry, ConnPort, ConnsUpdate } from '../gen/payloads';
 
-export interface CountryEntry {
-  cc?: string;
-  country?: string;
-  count?: number;
-  // REQUIRED, and that is the wire contract rather than optimism: `Proto` is a
-  // VALUE type on the Go side (`ConnCountryProto`, not a pointer), so it is
-  // always marshalled. The live card reads `e.proto.tcp` with no guard and would
-  // throw on an entry without it — killing the whole handler, including the Top
-  // Ports list below. Typing it required keeps this side reading like the
-  // original instead of quietly surviving a payload the original cannot.
-  proto: { tcp?: number; udp?: number; other?: number };
-}
-export interface PortEntry {
-  port?: number | string;
-  count?: number;
-}
-export interface ConnCardsPayload {
-  topCountries?: CountryEntry[];
-  topPorts?: PortEntry[];
-}
-
-export function renderTopCountries(countries: CountryEntry[]): void {
+export function renderTopCountries(countries: ConnCountry[]): void {
   const containerEl = el('dc-connTopMapList');
   if (!containerEl) return;
   if (!countries.length) {
@@ -67,7 +54,7 @@ export function renderTopCountries(countries: CountryEntry[]): void {
     return '<div class="conn-map-row">' +
       '<span class="conn-map-flag">' + flag + '</span>' +
       '<div style="flex:1;min-width:0">' +
-        '<div class="conn-map-label">' + dcEsc(DC_CC_NAMES[e.cc as string] || e.country || e.cc) + '</div>' +
+        '<div class="conn-map-label">' + dcEsc(DC_CC_NAMES[e.cc] || e.cc) + '</div>' +
         '<div class="conn-proto-bar">' +
           '<div class="conn-proto-tcp" style="flex:' + tcpPct + '"></div>' +
           '<div class="conn-proto-udp" style="flex:' + udpPct + '"></div>' +
@@ -79,7 +66,7 @@ export function renderTopCountries(countries: CountryEntry[]): void {
   }).join('');
 }
 
-export function renderTopPorts(ports: PortEntry[]): void {
+export function renderTopPorts(ports: ConnPort[]): void {
   const portsEl = el('dc-connPortList');
   if (!portsEl) return;
   if (!ports.length) {
@@ -90,7 +77,7 @@ export function renderTopPorts(ports: PortEntry[]): void {
   // The card does not sort — it trusts the collector to send them ranked.
   const maxP = ports[0]!.count || 1;
   portsEl.innerHTML = ports.slice(0, 12).map((p) => {
-    const pct = Math.round(((p.count as number) / maxP) * 100);
+    const pct = Math.round((p.count / maxP) * 100);
     const name = DC_PORT_NAMES[String(p.port)] || '';
     return '<div class="conn-port-row">' +
       '<span class="conn-port-num">' + dcEsc(p.port) + '</span>' +
@@ -101,7 +88,7 @@ export function renderTopPorts(ports: PortEntry[]): void {
   }).join('');
 }
 
-export function renderConnListCards(data: ConnCardsPayload): void {
+export function renderConnListCards(data: ConnsUpdate): void {
   renderTopCountries(data.topCountries || []);
   renderTopPorts(data.topPorts || []);
 }

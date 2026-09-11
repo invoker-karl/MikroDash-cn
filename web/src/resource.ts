@@ -18,39 +18,15 @@
 
 import { esc, el } from './dom';
 import type { Socket } from './socket';
+import type { HandEvents, ResSchema, ResSchemaField } from './events-hand';
 
-interface SchemaField {
-  name: string;
-  label: string;
-  type: string;
-  input: string;
-  required: boolean;
-  options: string[] | null;
-  placeholder: string;
-  help: string;
-  showIf: { field: string; in: string[] } | null;
-  min: number | null;
-  max: number | null;
-}
-
-interface HistState {
-  canUndo: boolean; canRedo: boolean; undoLabel: string; redoLabel: string;
-}
-
-interface Schema {
-  key: string;
-  label: string;
-  title: string;
-  identity: string;
-  fields: SchemaField[];
-  actions: Array<{ key: string; label: string }>;
-  // Answered by the SOCKET, not the registry: whether THIS viewer may write
-  // THIS router. The collector payload is shared by every viewer of the router,
-  // so it can never answer this.
-  permitted: boolean;
-  unsupported: boolean;
-  ordered: boolean;
-}
+// The schema, its fields and the undo state are the `res:schema` and
+// `res:history` payloads, typed once in events-hand.ts from the Go that builds
+// them. Local names, one definition. `permitted` on the schema is answered by
+// the SOCKET, not the registry: whether THIS viewer may write THIS router.
+type SchemaField = ResSchemaField;
+type HistState = HandEvents['res:history'];
+type Schema = ResSchema;
 
 const schemas = new Map<string, Schema>();
 // Callers waiting on a schema that has been asked for and not yet answered, so
@@ -227,17 +203,17 @@ function close(): void {
  * another row or replayed against a later write. A `stale-warning` means the
  * ground moved between the prompt and the answer.
  */
-function showWarning(d: {
-  code: string;
-  fingerprint?: string;
-  warning?: { interface?: string; address?: string; action?: string };
-}): void {
+function showWarning(d: HandEvents['res:error']): void {
   const box = el('res_warn');
   if (!box) return;
-  const w = d.warning || {};
-  const why = 'The router sees MikroDash at <code>' + esc(w.address || '?') +
-    '</code>, which arrives on <code>' + esc(w.interface || '?') + '</code> — the interface this ' +
-    'change ' + (w.action === 'delete' ? 'removes' : 'alters') + '.';
+  // The guard's detail arrives as the raw map it built (guard.Verdict.Detail),
+  // so its keys are read by type rather than trusted. For the self-cutoff guard
+  // they are all strings, and this renders exactly as before.
+  const w = d.warning ?? {};
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const why = 'The router sees MikroDash at <code>' + esc(str(w.address) || '?') +
+    '</code>, which arrives on <code>' + esc(str(w.interface) || '?') + '</code> — the interface this ' +
+    'change ' + (str(w.action) === 'delete' ? 'removes' : 'alters') + '.';
   box.innerHTML =
     '<strong>This may cut MikroDash off from this router.</strong><br>' + why +
     (d.code === 'stale-warning'
@@ -777,26 +753,26 @@ function wire(socket: Socket): void {
   if (wired) return;
   wired = true;
 
-  socket.on('res:row', (d: any) => {
+  socket.on('res:row', (d) => {
     const schema = schemas.get(d.resource);
     if (!schema) return;
     show(schema, d.values || {}, { id: d.id, identity: d.identity }, !!d.readOnly,
          d.options || {}, d.actions || []);
   });
 
-  socket.on('res:history', (d: any) => {
+  socket.on('res:history', (d) => {
     if (!d || !d.resource) return;
-    hist.set(d.resource, d as HistState);
+    hist.set(d.resource, d);
     mountAddSlots();
   });
 
-  socket.on('res:schema', (d: any) => {
+  socket.on('res:schema', (d) => {
     if (!d || !d.key) return;
-    schemas.set(d.key, d as Schema);
+    schemas.set(d.key, d);
     mountAddSlots();
     const q = waiting.get(d.key) || [];
     waiting.delete(d.key);
-    q.forEach((cb) => cb(d as Schema));
+    q.forEach((cb) => cb(d));
   });
 
   // Schemas are PER-ROUTER: switching routers can change whether the viewer may
@@ -839,7 +815,7 @@ function wire(socket: Socket): void {
     mountAddSlots();
   });
 
-  socket.on('res:new', (d: any) => {
+  socket.on('res:new', (d) => {
     const schema = schemas.get(d.resource);
     if (!schema) return;
     show(schema, null, null, false, d.options || {}, []);
@@ -847,7 +823,7 @@ function wire(socket: Socket): void {
 
   socket.on('res:ok', () => close());
 
-  socket.on('res:error', (d: any) => {
+  socket.on('res:error', (d) => {
     if (d && (d.code === 'self-cutoff' || d.code === 'stale-warning')) {
       showWarning(d);
       return;
@@ -863,7 +839,7 @@ function wire(socket: Socket): void {
       'guard-not-ported': 'This change needs a safety check that is not available yet, so it was refused.',
     };
     if (d && d.code === 'invalid' && Array.isArray(d.errors)) {
-      setError(d.errors.map((e: { message: string }) => e.message).join('; '));
+      setError(d.errors.map((e) => e.message).join('; '));
       return;
     }
     setError((d && codes[d.code]) || (d && d.message) || 'The change was refused.');
@@ -886,7 +862,7 @@ function wire(socket: Socket): void {
     });
   });
 
-  socket.on('res:preview', (d: { resource?: string; command?: string }) => {
+  socket.on('res:preview', (d) => {
     // Guarded on `resource`, as the original is: a reply for a form the operator
     // has since closed and reopened elsewhere must not paint into this one.
     if (!d || !current || d.resource !== current.key) return;

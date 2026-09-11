@@ -29,7 +29,15 @@
 
 import { esc, el as byId, fmtMbps } from '../dom';
 import type { Socket } from '../socket';
-import type { TopoEdge, TopologyPayload, TopoNode, TopoClientNode } from './topology-types';
+import type { TopoEdge, TopologyPayload, TopoClient } from '../gen/payloads';
+
+// A node is one of three Go structs: the core carries gauges, a neighbour
+// carries discovery fields, a client carries its association. `kind` is a
+// plain string in all three, so testing it does not narrow the union — the
+// fields only one kind carries do: `'attrib' in n` for a client, `'cpuLoad' in
+// n` for the core, `'clientCount' in n` for the core or a neighbour. Each sits
+// beside the `kind` test it narrows for, so the runtime test is still the kind.
+type TopoNode = TopologyPayload['nodes'][number];
 
 export const NS = 'http://www.w3.org/2000/svg';
 
@@ -325,10 +333,10 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
   function isFiltered(n: TopoNode): boolean {
     if (n.kind === 'core') return false;
     if (typeFilter && n.type !== typeFilter) return true;
-    if (vlanFilter && n.kind === 'client' &&
+    if (vlanFilter && n.kind === 'client' && 'attrib' in n &&
         (n.vlans || []).indexOf(Number(vlanFilter)) === -1) return true;
     if (!filter) return false;
-    const vlanNames = n.kind === 'client' ? (n.vlanNames || []).join(' ') : '';
+    const vlanNames = n.kind === 'client' && 'attrib' in n ? (n.vlanNames || []).join(' ') : '';
     const hay = [n.name, n.identity, n.ip, n.mac, n.board, n.platform, vlanNames]
       .join(' ').toLowerCase();
     return hay.indexOf(filter) === -1;
@@ -342,7 +350,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
    * rather than appearing to find nothing.
    */
   function clientShown(n: TopoNode): boolean {
-    if (n.kind !== 'client') return true;
+    if (n.kind !== 'client' || !('attrib' in n)) return true;
     if ((filter || vlanFilter) && !isFiltered(n)) return true;
     return showClients || !!expanded[n.parent];
   }
@@ -371,7 +379,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
   }
 
   function applyPositions(nodes: TopoNode[]): void {
-    const auto = computeLayout(nodes as unknown as LayoutNode[], saved);
+    const auto = computeLayout(nodes, saved);
     const next: Record<string, Pos> = {};
     nodes.forEach((n) => {
       // Precedence: an explicit drag, then wherever the node was last PLACED,
@@ -450,7 +458,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
     return bits.join(' · ');
   }
 
-  function clientTooltip(n: TopoClientNode): string {
+  function clientTooltip(n: TopoClient): string {
     return [n.name || n.mac, n.ip,
       (n.vlanNames || []).length ? 'VLAN ' + n.vlanNames.join('/') : '',
       n.type === 'wifi-client'
@@ -469,7 +477,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
       const p = pos[n.key] || { x: 0, y: 0 };
       attr(g, 'transform', 'translate(' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ')');
 
-      if (n.kind === 'client') {
+      if (n.kind === 'client' && 'attrib' in n) {
         let ccls = 'topo-node is-client ' + (n.type === 'wifi-client' ? 'is-wifi' : 'is-wired');
         if (sel === n.key) ccls += ' is-sel';
         if (isFiltered(n)) ccls += ' is-dim';
@@ -498,7 +506,8 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
 
       const chipG = g.querySelector('.topo-chip-g') as SVGElement | null;
       if (chipG) {
-        const count = (n.kind === 'core' || n.kind === 'neighbor') ? (n.clientCount || 0) : 0;
+        const count = (n.kind === 'core' || n.kind === 'neighbor') && 'clientCount' in n
+          ? (n.clientCount || 0) : 0;
         const open = showClients || !!expanded[n.key];
         chipG.style.display = count ? '' : 'none';
         if (count) {
@@ -811,7 +820,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
     if (data) renderNodes(visibleNodes(data.nodes));
   }
 
-  function renderClientPanel(panel: HTMLElement, n: TopoClientNode): void {
+  function renderClientPanel(panel: HTMLElement, n: TopoClient): void {
     panel.innerHTML =
       '<div class="topo-panel-hdr" style="color:var(' +
         (n.type === 'wifi-client' ? '--accent-rx' : '--accent-tx') + ')">' +
@@ -861,7 +870,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
       if (c) c.addEventListener('click', () => selectNode(null));
     };
 
-    if (n.kind === 'client') {
+    if (n.kind === 'client' && 'attrib' in n) {
       renderClientPanel(panel, n);
       panel.className = 'topo-panel open';
       closeBtn();
@@ -885,7 +894,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
       live += row('Latency', data.pingDenied ? 'unavailable (test policy)'
         : (n.rtt !== null && isFinite(n.rtt) ? n.rtt.toFixed(1) + ' ms' : '—'));
       live += row('Loss', n.loss !== null && isFinite(n.loss) ? n.loss + '%' : '—');
-    } else {
+    } else if ('cpuLoad' in n) {
       live += row('CPU', n.cpuLoad !== null && isFinite(n.cpuLoad) ? n.cpuLoad + '%' : '');
       live += row('Memory', n.memPct !== null && isFinite(n.memPct) ? n.memPct + '%' : '');
     }
@@ -1265,7 +1274,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
   wireInteraction();
   renderEmpty();
 
-  socket.on('topology:update', (p: TopologyPayload & { routerId?: string }) => {
+  socket.on('topology:update', (p) => {
     if (!p) return;
     // A ROUTER SWITCH resets the layout, not just the data: positions are saved
     // per router, and keeping them would draw one network with another's map.
@@ -1289,7 +1298,7 @@ export function initTopologyPage(socket: Socket, isVisible: (page: string) => bo
   // Link rates ride in on the INTERFACE collector, which the browser already
   // receives router-wide — no extra subscription and no extra router load.
   socket.on('ifstatus:update',
-    (p: { interfaces?: Array<{ name: string; rxMbps: number; txMbps: number; running: boolean }> }) => {
+    (p) => {
       if (!p || !Array.isArray(p.interfaces)) return;
       const next: Record<string, Rate> = {};
       p.interfaces.forEach((i) => {

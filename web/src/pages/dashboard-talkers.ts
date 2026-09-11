@@ -17,18 +17,7 @@
 // router that was never asked.
 
 import { esc, el, fmtMbps } from '../dom';
-
-export interface TalkerDevice {
-  name?: string;
-  mac?: string;
-  rx_mbps?: number;
-  tx_mbps?: number;
-}
-
-export interface TalkersPayload {
-  devices?: TalkerDevice[];
-  available?: boolean;
-}
+import type { TalkersPayload } from '../gen/payloads';
 
 export function renderTalkers(data: TalkersPayload): void {
   const table = el('talkersTable');

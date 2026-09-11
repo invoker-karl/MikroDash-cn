@@ -15,32 +15,8 @@
 import { esc, el, renderSortHeader, sortMul, debounce, fmtBytes,
          type SortCol, type SortState } from '../dom';
 import type { Socket } from '../socket';
-
-export interface Package {
-  id: string; name: string; version: string; buildTime: string;
-  size: number | null; scheduled: string; scheduledAction: string;
-  disabled: boolean; onServer: boolean; state: string;
-}
-
-export interface Firmware {
-  isRouterboard: boolean; boardName: string; model: string; serial: string;
-  firmwareType: string; currentFirmware: string; upgradeFirmware: string;
-  minimumFirmware: string; upgradeAvailable: boolean;
-}
-
-export interface Update {
-  channel: string; installedVersion: string; latestVersion: string;
-  status: string; updateAvailable: boolean;
-}
-
-export interface PackagesPayload {
-  ts: number; pollMs: number;
-  packages: Package[]; firmware: Firmware; update: Update;
-  counts: { total: number; installed: number; disabled: number; available: number; scheduled: number };
-  pendingReboot: boolean; available: boolean;
-}
-
-export interface PackagesCaps { permitted: boolean; routerName: string }
+import type { Package, Firmware, Update, PackagesPayload } from '../gen/payloads';
+import type { HandEvents } from '../events-hand';
 
 const COLS: SortCol[] = [
   { key: 'name', label: 'Package' },
@@ -72,7 +48,7 @@ export function initPackagesPage(socket: Socket, isVisible: (page: string) => bo
   if (!tbody || !theadRow) return;
 
   let data: PackagesPayload | null = null;
-  let caps: PackagesCaps = { permitted: false, routerName: '' };
+  let caps: HandEvents['packages:caps'] = { permitted: false, routerName: '' };
   // Default to state, not name: what is scheduled matters most, then what is
   // actually on the router. Alphabetical order buries both under the packages
   // MikroTik merely offers.
@@ -213,7 +189,7 @@ export function initPackagesPage(socket: Socket, isVisible: (page: string) => bo
 
   function renderSummary(): void {
     if (!data) return;
-    const c = data.counts || ({} as PackagesPayload['counts']);
+    const c = data.counts;
     const set = (id: string, v: string): void => { const e = el(id); if (e) e.textContent = v; };
     set('pkgSumInstalled', c.installed === undefined ? '—' : String(c.installed));
     set('pkgSumAvailable', c.available === undefined ? '—' : String(c.available));
@@ -223,7 +199,7 @@ export function initPackagesPage(socket: Socket, isVisible: (page: string) => bo
       : (data.update && data.update.installedVersion) || '—');
   }
 
-  socket.on('packages:update', (d: PackagesPayload) => {
+  socket.on('packages:update', (d) => {
     if (!d) return;
     data = d;
     busy = '';
@@ -231,19 +207,19 @@ export function initPackagesPage(socket: Socket, isVisible: (page: string) => bo
     if (isVisible('packages')) render();
   });
 
-  socket.on('packages:caps', (d: PackagesCaps) => {
+  socket.on('packages:caps', (d) => {
     if (!d) return;
     caps = d;
     if (isVisible('packages')) render();
   });
 
-  socket.on('packages:ok', (d: { action?: string }) => {
+  socket.on('packages:ok', (d) => {
     busy = '';
     if (d && d.action === 'apply') setStatus('Applying changes — the router is rebooting');
     else if (d && d.action === 'check') setStatus('Update check finished');
   });
 
-  socket.on('packages:error', (d: { code?: string; message?: string }) => {
+  socket.on('packages:error', (d) => {
     busy = '';
     const msg: Record<string, string> = {
       denied: 'You do not have write access to this router',

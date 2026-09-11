@@ -14,28 +14,7 @@
 import { esc, el, resRow } from '../dom';
 import type { Socket } from '../socket';
 import { mountAdds, mountRows } from '../resource';
-
-export interface Lease {
-  ip: string; name: string; mac: string; hostName: string; comment: string;
-  status: string; server: string; iface: string; vlanId: string;
-  id: string; dynamic: boolean;
-}
-
-export interface LeaseServer {
-  name: string; iface: string; vlanId: string; count: number;
-}
-
-export interface LeasesPayload { ts: number; leases: Lease[]; servers: LeaseServer[] }
-
-export interface LanNetwork {
-  cidr: string; gateway: string; dns: string; leaseCount: number; poolSize: number;
-}
-
-export interface LanPayload {
-  ts: number; lanCidrs: string[]; networks: LanNetwork[]; wanIp: string;
-  totalPoolSize: number; totalLeases: number; pollMs: number;
-  internetIfaces: Array<{ name: string; ip: string }>;
-}
+import type { Lease, LeaseServer, Network } from '../gen/payloads';
 
 const SORT_COLS = [
   { id: 'dhcpThName', key: 'name' },
@@ -234,7 +213,7 @@ export function initDhcpPage(socket: Socket, isVisible: (page: string) => boolea
     sel.value = leaseServerFilter;
   }
 
-  function renderSubnets(nets: LanNetwork[]): void {
+  function renderSubnets(nets: Network[]): void {
     const host = el('dhcpSubnetTable');
     if (!host) return;
     // A ROUTER WITH NO DHCP NETWORKS SAYS SO. An access point is the ordinary
@@ -286,13 +265,13 @@ export function initDhcpPage(socket: Socket, isVisible: (page: string) => boolea
   // `.split('/')[0]` because the collector reports the WAN address WITH its
   // prefix and the diagram shows a bare address; the em dash is the original's
   // empty case, not a guard added here.
-  socket.on('lan:wan', (d: { ts?: number; wanIp?: string }) => {
+  socket.on('lan:wan', (d) => {
     const node = el('ndWanIp');
     if (!node) return;
     node.textContent = ((d && d.wanIp) || '').split('/')[0] || '\u2014';
   });
 
-  socket.on('lan:overview', (d: LanPayload) => {
+  socket.on('lan:overview', (d) => {
     const nets = (d && d.networks) ? d.networks : [];
     // ── THIS USED TO RETURN EARLY ON AN EMPTY PAYLOAD ──────────────────────
     //
@@ -319,7 +298,7 @@ export function initDhcpPage(socket: Socket, isVisible: (page: string) => boolea
     renderDhcpGauge();
   });
 
-  socket.on('leases:list', (d: LeasesPayload) => {
+  socket.on('leases:list', (d) => {
     allLeases = d.leases || [];
     renderServerOptions(d.servers);
     renderDhcp(allLeases);

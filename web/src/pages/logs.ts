@@ -22,10 +22,7 @@
 
 import { esc, el, debounce } from '../dom';
 import type { Socket } from '../socket';
-
-export interface LogEntry {
-  ts: number; time: string; topics: string; message: string; severity: string;
-}
+import type { LogEntry } from '../gen/payloads';
 
 interface Buffered { html: string; severity: string; text: string }
 
@@ -112,16 +109,15 @@ export function initLogsPage(socket: Socket, isVisible: (page: string) => boolea
   // before the first payload.
   updateLogCounts();
 
-  socket.on('logs:history', (data: LogEntry[] | { entries?: LogEntry[] }) => {
-    const lines = Array.isArray(data) ? data : ((data && data.entries) || []);
-    logBuffer = lines.map(bufferedOf);
+  socket.on('logs:history', (data) => {
+    logBuffer = data.map(bufferedOf);
     if (logBuffer.length > MAX_LOG_LINES) {
       logBuffer.splice(0, logBuffer.length - MAX_LOG_LINES);
     }
     flushLogs();
   });
 
-  socket.on('logs:new', (line: LogEntry) => {
+  socket.on('logs:new', (line) => {
     const entry = bufferedOf(line);
     logBuffer.push(entry);
     if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift();

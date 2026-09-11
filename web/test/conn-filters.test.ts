@@ -138,6 +138,7 @@ function mount(run) {
     // for ids this shim does not provide, would make every assertion below a
     // statement about an untouched document.
     assert.ok(handlers['conn:update'], 'the page registered no conn:update handler');
+    assert.ok(handlers['conn:source-data'], 'the page registered no conn:source-data handler');
     assert.equal(doc.unknown.size, 0,
       'the page looked up ids this gate does not provide: ' + [...doc.unknown].join(', '));
     return run({ handlers, doc, listEl });
@@ -159,17 +160,31 @@ const P = (o) => Object.assign({
     { ip: '198.51.100.11', name: 'pc2', count: 4 },
   ],
   topPorts: [], topDestinations: [],
-  // The per-source index, keyed by `country` and NOT by `cc` -- which is what
-  // `countriesFromSourceDests` reads (`connections-lists.ts:335`). A `cc` here
-  // is silently skipped, the client-filtered list comes back empty, and that
-  // reads as the page failing to render rather than as a payload written from
-  // memory. It cost a run to notice.
+}, o);
+
+// The per-source index, keyed by `country` and NOT by `cc` -- which is what
+// `countriesFromSourceDests` reads (`connections-lists.ts`). A `cc` here is
+// silently skipped, the client-filtered list comes back empty, and that reads as
+// the page failing to render rather than as a payload written from memory. It
+// cost a run to notice.
+//
+// It arrives on `conn:source-data`, NOT on `conn:update`: Go sends the light
+// payload there and the heavy indexes on their own events (collect.LightOf).
+// This gate once fed it inside `conn:update`, and passed only because the page
+// also read it from there — a read of a key Go never sent.
+const SRC = {
   sourceDests: {
     '198.51.100.10': [{ country: 'US', org: 'Example', cat: 'cdn', count: 5 }],
     '198.51.100.11': [{ country: 'NO', org: 'Other', cat: 'dns', count: 4 }],
   },
   sourcePorts: { '198.51.100.10': [{ port: 443, count: 5 }] },
-}, o);
+};
+
+/** One poll, as Go delivers it: the light payload, then the per-source index. */
+const poll = (w) => {
+  w.handlers['conn:update'](P({}));
+  w.handlers['conn:source-data'](SRC);
+};
 
 /** What the two filters look like from outside. */
 const state = (w) => ({
@@ -205,7 +220,7 @@ const check = (name, got, want) => {
 
 // ---- NOTHING CHOSEN --------------------------------------------------------
 mount((w) => {
-  w.handlers['conn:update'](P({}));
+  poll(w);
   const s = state(w);
   check('no filter', s, { srcValue: '', srcActive: false, rows: ['US', 'NO'] });
   // BELIEVABILITY: two countries must actually render, or every case below is
@@ -215,7 +230,7 @@ mount((w) => {
 
 // ---- A COUNTRY, THEN A CLIENT ---------------------------------------------
 mount((w) => {
-  w.handlers['conn:update'](P({}));
+  poll(w);
   clickCountry(w, 'US');
   check('country chosen', state(w), { label: '', srcValue: '', srcActive: false });
 
@@ -228,7 +243,7 @@ mount((w) => {
 
 // ---- A CLIENT, THEN A COUNTRY ---------------------------------------------
 mount((w) => {
-  w.handlers['conn:update'](P({}));
+  poll(w);
   chooseSource(w, '198.51.100.10');
   check('client chosen', state(w), { srcValue: '198.51.100.10', srcActive: true });
 
@@ -242,14 +257,14 @@ mount((w) => {
 
 // ---- CLEARING EACH ---------------------------------------------------------
 mount((w) => {
-  w.handlers['conn:update'](P({}));
+  poll(w);
   clickCountry(w, 'US');
   clickCountry(w, 'US');   // the same country again toggles it off
   check('country toggled off', state(w), { label: 'none', srcValue: '', srcActive: false });
 });
 
 mount((w) => {
-  w.handlers['conn:update'](P({}));
+  poll(w);
   chooseSource(w, '198.51.100.10');
   chooseSource(w, '');     // "All clients"
   check('client cleared', state(w), { srcValue: '', srcActive: false });
@@ -260,9 +275,9 @@ mount((w) => {
 // `conn:update` arrives every few seconds. A filter has to survive it, or the
 // operator's selection blinks out on its own.
 mount((w) => {
-  w.handlers['conn:update'](P({}));
+  poll(w);
   chooseSource(w, '198.51.100.10');
-  w.handlers['conn:update'](P({}));
+  poll(w);
   // `label` is UNDEFINED, not 'none', and the difference matters. The page
   // hides the country label only when a client filter REPLACES a country one
   // (`if (ip && selectedCC)`); with no country ever chosen, nothing writes to it
@@ -274,9 +289,9 @@ mount((w) => {
 });
 
 mount((w) => {
-  w.handlers['conn:update'](P({}));
+  poll(w);
   clickCountry(w, 'NO');
-  w.handlers['conn:update'](P({}));
+  poll(w);
   check('a poll during a country filter', state(w),
     { label: '', srcValue: '', srcActive: false });
 });

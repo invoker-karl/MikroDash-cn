@@ -12,6 +12,8 @@
 // proportional estimate, which is why hovering a ribbon names the pair rather
 // than quoting a count.
 
+import type { ConnDestEntry, ConnSource } from '../gen/payloads';
+
 const NS = 'http://www.w3.org/2000/svg';
 
 /** Category colours, matching the svc-badge palette so a service reads the same
@@ -30,11 +32,9 @@ const CAT_COLOUR: Record<string, string> = {
 /** Source nodes cycle a palette: they are hosts, with no category to colour by. */
 const SRC_COLOURS = ['#38bdf8', '#818cf8', '#a78bfa', '#67e8f9', '#93c5fd', '#6ee7b7'];
 
-export interface SankeySource { ip: string; name: string; count: number }
-export interface SankeyDest {
-  key?: string; ip?: string; count: number;
-  country?: string; org?: string | null; cat?: string | null;
-}
+/** A source bar: a `topSources` row — or, under a client filter, one the page
+ *  BUILDS by summing that client's destinations, which has no MAC. */
+export type SankeySource = Pick<ConnSource, 'ip' | 'name' | 'count'>;
 
 interface Node {
   label: string; count: number; cat?: string | null;
@@ -73,11 +73,11 @@ export function linkPath(x0: number, y0: number, x1: number, y1: number,
  * because a diagram with nine Google rows tells you less than one that says
  * Google is nine.
  */
-export function foldDestinations(destinations: SankeyDest[]): Array<{ label: string; count: number; cat: string }> {
+export function foldDestinations(destinations: ConnDestEntry[]): Array<{ label: string; count: number; cat: string }> {
   const byLabel: Record<string, { label: string; count: number; cat: string }> = {};
   const order: string[] = [];
   destinations.forEach((d) => {
-    const key = d.org || (d.country ? '[' + d.country + ']' : (d.key || d.ip || '?'));
+    const key = d.org || (d.country ? '[' + d.country + ']' : (d.key || '?'));
     if (!byLabel[key]) {
       byLabel[key] = { label: key, count: 0, cat: d.cat || 'other' };
       order.push(key);
@@ -108,7 +108,7 @@ function nodeColour(node: Node, idx: number): string {
  */
 export function renderSankey(
   svg: SVGElement, empty: HTMLElement,
-  sources: SankeySource[], destinations: SankeyDest[], availH?: number,
+  sources: SankeySource[], destinations: ConnDestEntry[], availH?: number,
 ): void {
   svg.innerHTML = '';
   const total = sources.reduce((n, s) => n + s.count, 0);
@@ -235,16 +235,16 @@ export function renderSankey(
  * recorded, so lifting the filter draws the latest.
  */
 export function createSankeyThrottle(
-  draw: (sources: SankeySource[], destinations: SankeyDest[]) => void,
+  draw: (sources: SankeySource[], destinations: ConnDestEntry[]) => void,
   throttleMs = 5000,
 ): {
-  update: (sources: SankeySource[], destinations: SankeyDest[]) => void;
+  update: (sources: SankeySource[], destinations: ConnDestEntry[]) => void;
   setFiltered: (on: boolean) => void;
   redraw: () => void;
-  redrawWith: (sources: SankeySource[], destinations: SankeyDest[]) => void;
+  redrawWith: (sources: SankeySource[], destinations: ConnDestEntry[]) => void;
 } {
   let lastSrcs: SankeySource[] = [];
-  let lastDsts: SankeyDest[] = [];
+  let lastDsts: ConnDestEntry[] = [];
   let fp = '';
   let lastAt = 0;
   let pending = false;

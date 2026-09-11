@@ -22,11 +22,12 @@
 // is also where they can be read next to the thing they constrain.
 
 import { el } from '../dom';
-import { renderSankey, type SankeyDest, type SankeySource } from './connections-sankey';
+import { renderSankey, type SankeySource } from './connections-sankey';
+import type { ConnDestEntry } from '../gen/payloads';
 
 export function renderConnFlowCard(
   sources: SankeySource[] | undefined,
-  destinations: SankeyDest[] | undefined,
+  destinations: ConnDestEntry[] | undefined,
 ): void {
   const svg = el('dc-sankeySvg') as unknown as SVGElement | null;
   const empty = el('dc-sankeyEmpty');

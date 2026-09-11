@@ -13,17 +13,8 @@ import { esc, el, resRow, debounce, renderSortHeader, sortMul, fmtMbps, fmtBytes
          parseUptime, type SortCol, type SortState } from '../dom';
 import type { Socket } from '../socket';
 import { mountAdds, mountRows } from '../resource';
-
-export interface PppSession {
-  id: string; name: string; service: string; address: string; callerId: string;
-  uptime: string; encoding: string; sessionId: string;
-  limitIn: number | null; limitOut: number | null;
-  rx: number; tx: number;
-  rxRate: number | null; txRate: number | null;
-}
-
-/**
- * One /ppp/secret row — an ACCOUNT, not a session.
+/*
+ * PPPSecret is one /ppp/secret row — an ACCOUNT, not a session.
  *
  * THERE IS NO PASSWORD FIELD, AND THERE MUST NEVER BE ONE. The collector's
  * proplist does not ask the router for it, so nothing on this side could carry
@@ -33,31 +24,7 @@ export interface PppSession {
  * `connected` is joined server-side against /ppp/active by name — it is not a
  * property of the account.
  */
-export interface PppSecret {
-  id: string; name: string; service: string; profile: string;
-  localAddress: string; remoteAddress: string; callerId: string;
-  routes: string; limitIn: number | null; limitOut: number | null;
-  comment: string; disabled: boolean; connected: boolean;
-}
-
-export interface PppProfile {
-  id: string; name: string; localAddress: string; remoteAddress: string;
-  rateLimit: string; onlyOne: string; encryption: string;
-}
-
-export interface PppServer {
-  serviceName: string; interface: string; maxSessions: string;
-  auth: string; disabled: boolean;
-}
-
-export interface PppPayload {
-  ts: number; pollMs: number;
-  sessions: PppSession[]; secrets: PppSecret[];
-  profiles: PppProfile[]; servers: PppServer[];
-  byService: Record<string, number>;
-  totalRxRate: number | null; totalTxRate: number | null;
-  available: boolean;
-}
+import type { PPPSession, PPPSecret, PPPPayload } from '../gen/payloads';
 
 /**
  * Which resource each tab's Add button means, and which panel it shows.
@@ -102,7 +69,7 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
   // called from four places and none of them can re-check.
   const tbody: HTMLElement = tbodyEl;
 
-  let data: PppPayload | null = null;
+  let data: PPPPayload | null = null;
   const sort: SortState = { col: 'name', dir: 'asc' };
   // The secrets table sorts independently of the sessions table above it: they
   // are different lists answering different questions, and one shared SortState
@@ -119,7 +86,7 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
    * lexicographically and puts "10m" before "2h". Reported upstream; reproduced
    * here because the ordering is on screen.
    */
-  function sortVal(s: PppSession, key: string): string | number {
+  function sortVal(s: PPPSession, key: string): string | number {
     if (key === 'rate') return (s.rxRate || 0) + (s.txRate || 0);
     if (key === 'total') return s.rx + s.tx;
     if (key === 'uptime') return parseUptime(s.uptime);
@@ -134,7 +101,7 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
    * a connected account and an idle one in the same bucket, which is the
    * distinction the column exists to draw.
    */
-  function secretSortVal(s: PppSecret, key: string): string | number {
+  function secretSortVal(s: PPPSecret, key: string): string | number {
     if (key === 'state') return s.disabled ? 2 : s.connected ? 0 : 1;
     return String((s as unknown as Record<string, unknown>)[key] || '').toLowerCase();
   }
@@ -297,11 +264,13 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
 
     // Plain lexicographic sort, not localeCompare: `Object.keys(...).sort()` in
     // the original, which is the bare comparison.
-    const svc = Object.keys(data.byService || {}).sort();
+    // `byService` is a Go map and may be null; `svc` is empty then.
+    const byService = data.byService || {};
+    const svc = Object.keys(byService).sort();
     const services = el('pppSumServices');
     if (services) {
       services.textContent = svc.length
-        ? svc.map((k) => k + ' ' + (data as PppPayload).byService[k]).join('  ') : '—';
+        ? svc.map((k) => k + ' ' + byService[k]).join('  ') : '—';
     }
 
     const toMbps = (v: number | null): number | null => (v === null ? null : (v * 8) / 1e6);
@@ -315,7 +284,7 @@ export function initPppPage(socket: Socket, isVisible: (page: string) => boolean
     if (txEl) txEl.innerHTML = tx === null ? '&mdash;' : fmtMbps(tx);
   }
 
-  socket.on('ppp:update', (d: PppPayload) => {
+  socket.on('ppp:update', (d) => {
     if (!d) return;
     data = d;
     // The summary updates whether or not the page is showing; the table only

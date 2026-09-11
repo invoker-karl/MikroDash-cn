@@ -37,8 +37,9 @@ import { el } from '../dom';
 import {
   layout, groupPopHtml, renderTray, clampTranslate, fitToMarkers,
   mapViewState, setMapView, applyTransform, onAfterTransform, onMapApply, lastRows,
-  type RouterStatsRow, type MapGroup,
+  type MapGroup,
 } from './routers';
+import type { RouterStatsRow } from '../gen/payloads';
 
 const NS = 'http://www.w3.org/2000/svg';
 const MIN_SCALE = 1, MAX_SCALE = 8;

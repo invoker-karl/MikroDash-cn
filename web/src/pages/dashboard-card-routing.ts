@@ -23,19 +23,7 @@
 // tooltip and legend have nothing to offer for it at all.
 
 import { el } from '../dom';
-
-export interface RouteCounts {
-  connect?: number | null;
-  static?: number | null;
-  dynamic?: number | null;
-  bgp?: number | null;
-  ospf?: number | null;
-  total?: number | null;
-}
-export interface RoutingPayload {
-  routeCounts?: RouteCounts;
-  summary?: { total?: number | null; established?: number | null; down?: number | null };
-}
+import type { RouteCounts, RoutingPayload } from '../gen/payloads';
 
 interface ChartLike {
   data: { labels: string[]; datasets: { data: number[]; backgroundColor: string[] }[] };

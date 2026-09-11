@@ -16,23 +16,7 @@ import { esc, el, bandBadge, standardBadge, ssidColours, installWifiGlobals,
   renderSortHeader, type SortState } from '../dom';
 import type { Socket } from '../socket';
 import { initFrequencyAnalyser } from './wireless-fa';
-
-export interface WirelessClient {
-  mac: string; signal: number; iface: string; txRate: string; band: string;
-  standard: string;
-  ip: string; rxRate: string; uptime: string; ssid: string; name: string;
-  source?: string;
-}
-
-export interface WirelessSSID {
-  ssid: string; ifaces: string[]; bands: string[];
-  disabled: boolean; running: boolean; clients: number;
-}
-
-export interface WirelessPayload {
-  ts: number; clients: WirelessClient[]; mode: string; pollMs: number;
-  capsmanAvailable: boolean; ssids: WirelessSSID[]; ssidsManagedElsewhere: number;
-}
+import type { WirelessClient, WirelessPayload } from '../gen/payloads';
 
 /** The signal column's four bars, from app.js's `signalBars`. */
 export function signalBars(dbm: number): string {
@@ -364,7 +348,7 @@ export function initWirelessPage(socket: Socket, isVisible: (page: string) => bo
     renderSsids(data);
   }
 
-  socket.on('wireless:update', (data: WirelessPayload) => {
+  socket.on('wireless:update', (data) => {
     clients = (data && data.clients) || [];
     renderCards(data);
     renderWireless();

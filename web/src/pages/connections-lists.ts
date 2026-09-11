@@ -7,18 +7,9 @@
 
 import { esc } from '../dom';
 import { CC_NAMES, PORT_NAMES, iso2Flag } from './connections-map';
-
-export interface ConnPort { port: string; count: number }
-
-export interface ConnOrg { org: string; count: number; cat: string | null }
-
-export interface ConnCountry {
-  cc: string;
-  city: string;
-  count: number;
-  proto: { tcp?: number; udp?: number; other?: number };
-  orgs: ConnOrg[];
-}
+import type {
+  ConnCountry, ConnCountryProto, ConnDestEntry, ConnPort, ConnSource, Lease,
+} from '../gen/payloads';
 
 /** How many readings a country's sparkline keeps. */
 export const SPARK_LEN = 20;
@@ -302,14 +293,6 @@ export function portsFromDests(dests: Array<{ key: string; count: number }>): Co
     .slice(0, 10);
 }
 
-export interface ConnDestEntry {
-  key: string; count: number;
-  country: string; city: string;
-  org: string | null; cat: string | null;
-}
-
-export interface ConnSource { ip: string; name: string; mac: string; count: number }
-
 /**
  * The countries one client is talking to, derived from ITS destination list.
  *
@@ -324,7 +307,7 @@ export interface ConnSource { ip: string; name: string; mac: string; count: numb
  */
 export function countriesFromSourceDests(
   dests: ConnDestEntry[],
-  protoOf: Record<string, { tcp?: number; udp?: number; other?: number }>,
+  protoOf: Record<string, ConnCountryProto>,
   cityOf: Record<string, string>,
 ): ConnCountry[] {
   const counts: Record<string, number> = {};
@@ -373,7 +356,7 @@ export function countriesFromSourceDests(
  */
 export function clientOptions(
   active: ConnSource[],
-  leases: Array<{ ip: string; name?: string; hostName?: string }>,
+  leases: Lease[],
 ): Array<{ ip: string; name: string }> {
   const seen = new Set<string>();
   const devices: Array<{ ip: string; name: string }> = [];

@@ -9,46 +9,7 @@ import { esc, el, resRow, debounce, renderSortHeader, sortMul,
          type SortCol, type SortState } from '../dom';
 import type { Socket } from '../socket';
 import { mountAdds, mountRows } from '../resource';
-
-export interface DNSSettings {
-  servers: string[];
-  dynamicServers: string[];
-  dohEnabled: boolean;
-  dohUrl: string;
-  dohVerifyCert: boolean;
-  dohMaxServerConnections: number | null;
-  dohMaxConcurrentQueries: number | null;
-  dohTimeout: string;
-  allowRemoteRequests: boolean;
-  cacheSize: number | null;
-  cacheUsed: number | null;
-  cacheMaxTtl: string;
-  maxUdpPacketSize: number | null;
-  maxConcurrentQueries: number | null;
-  queryServerTimeout: string;
-  queryTotalTimeout: string;
-  mdnsRepeatIfaces: string[];
-  vrf: string;
-}
-
-export interface DNSStaticEntry {
-  id: string;
-  name: string;
-  regexp: string;
-  address: string;
-  type: string;
-  ttl: string;
-  disabled: boolean;
-  comment: string;
-}
-
-export interface DNSPayload {
-  ts: number;
-  pollMs: number;
-  settings: DNSSettings;
-  staticEntries: DNSStaticEntry[];
-  available: boolean;
-}
+import type { DNSStaticEntry, DNSPayload } from '../gen/payloads';
 
 const COLS_S: SortCol[] = [
   { key: 'name', label: 'Name' },
@@ -154,7 +115,7 @@ export function initDnsPage(socket: Socket, isVisible: (page: string) => boolean
     if (remote) remote.textContent = s.allowRemoteRequests ? 'allowed' : 'blocked';
   }
 
-  socket.on('dns:update', (d: DNSPayload) => {
+  socket.on('dns:update', (d) => {
     if (!d) return;
     data = d;
     renderSummary();

@@ -20,17 +20,7 @@
 
 import { el } from '../dom';
 import { dcEsc } from './dashboard-cards-util';
-
-export interface FwRule {
-  action?: string;
-  disabled?: boolean;
-}
-export interface FirewallPayload {
-  filter?: FwRule[];
-  nat?: FwRule[];
-  mangle?: FwRule[];
-  raw?: FwRule[];
-}
+import type { FirewallPayload } from '../gen/payloads';
 
 const ACTION_COLOUR: Record<string, string> = {
   accept: 'rgba(52,211,153,.8)', drop: 'rgba(248,113,113,.8)',

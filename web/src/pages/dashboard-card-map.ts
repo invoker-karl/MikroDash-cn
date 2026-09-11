@@ -33,13 +33,9 @@ import { el } from '../dom';
 import { esc } from '../dom';
 import { mapArcD, applyMapHighlights, mapMaxCount } from './dashboard-map-geometry';
 import { DC_CC_NAMES } from '../gen/dccards-tables';
+import type { ConnCountry } from '../gen/payloads';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-
-export interface MapCountry {
-  cc?: string;
-  count?: number;
-}
 
 interface MapWindow {
   _worldMapPathDs?: Record<string, string>;
@@ -49,8 +45,8 @@ interface MapWindow {
 
 export interface ConnMap {
   init(): void;
-  apply(topCountries: MapCountry[]): void;
-  onConnUpdate(topCountries: MapCountry[]): void;
+  apply(topCountries: ConnCountry[]): void;
+  onConnUpdate(topCountries: ConnCountry[]): void;
   isReady(): boolean;
   reset(): void;
 }
@@ -63,7 +59,7 @@ export function createConnMap(rng: () => number = Math.random): ConnMap {
   let lblLayer: SVGElement | null = null;
   let counts: Record<string, number> = {};
   let ready = false;
-  let pending: MapCountry[] | null = null;
+  let pending: ConnCountry[] | null = null;
 
   const w = (): MapWindow => window as unknown as MapWindow;
 
@@ -150,9 +146,9 @@ export function createConnMap(rng: () => number = Math.random): ConnMap {
     }
   }
 
-  function apply(topCountries: MapCountry[]): void {
+  function apply(topCountries: ConnCountry[]): void {
     const cc2n: Record<string, number> = {};
-    for (const e of topCountries) cc2n[e.cc as string] = e.count as number;
+    for (const e of topCountries) cc2n[e.cc] = e.count;
     counts = cc2n;
     applyMapHighlights(pathEls as unknown as Record<string, { classList: { add(c: string): void; remove(...c: string[]): void } }>, cc2n);
     updateArcs(cc2n);

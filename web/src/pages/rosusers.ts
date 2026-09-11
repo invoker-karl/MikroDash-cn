@@ -32,37 +32,8 @@
 
 import { esc, el, renderSortHeader, sortMul, type SortCol, type SortState } from '../dom';
 import type { Socket } from '../socket';
-
-export interface RosUser {
-  id: string; name: string; group: string; address: string; comment: string;
-  disabled: boolean; expired: boolean; lastLogin: string;
-  inactivityTimeout: string; inactivityPolicy: string; protected: boolean;
-}
-
-export interface RosGroup {
-  id: string; name: string; granted: string[]; denied: string[];
-  skin: string; comment: string; protected: boolean; members: number;
-}
-
-export interface RosSession {
-  id: string; name: string; address: string; via: string; group: string;
-  when: string; radius: boolean; protected: boolean;
-}
-
-export interface RosSelf {
-  names: string[]; groups: string[]; resolved: boolean; source: string | null;
-}
-
-export interface RosUsersPayload {
-  ts: number; pollMs: number;
-  users: RosUser[]; groups: RosGroup[]; sessions: RosSession[];
-  self: RosSelf;
-  passwordPolicy: { minLength: number; minCategories: number };
-  policies: string[];
-  available: boolean; denied: boolean;
-}
-
-export interface RosUsersCaps { permitted: boolean; routerName: string }
+import type { RosUser, RosGroup, RosUsersPayload } from '../gen/payloads';
+import type { HandEvents } from '../events-hand';
 
 // A KEYLESS COLUMN IS NOT SORTABLE — see renderSortHeader. The action column is
 // the only one here that must never be.
@@ -93,7 +64,7 @@ export function initRosUsersPage(socket: Socket, isVisible: (page: string) => bo
   const sessTb: HTMLElement = sessTbEl;
 
   let data: RosUsersPayload | null = null;
-  let caps: RosUsersCaps = { permitted: false, routerName: '' };
+  let caps: HandEvents['rosusers:caps'] = { permitted: false, routerName: '' };
   let tab = 'users';
   // The id of the row with an action in flight. Cleared by the next payload or
   // by any answer from the server, so a failed action never leaves a button
@@ -526,7 +497,7 @@ export function initRosUsersPage(socket: Socket, isVisible: (page: string) => bo
     });
   });
 
-  socket.on('rosusers:ok', (d: { action?: string; name?: string }) => {
+  socket.on('rosusers:ok', (d) => {
     busy = '';
     el('ruUserFormWrap')?.classList.remove('open');
     el('ruGroupFormWrap')?.classList.remove('open');
@@ -542,7 +513,7 @@ export function initRosUsersPage(socket: Socket, isVisible: (page: string) => bo
     setStatus(((d && d.action && what[d.action]) || 'Done: ') + ((d && d.name) || ''));
   });
 
-  socket.on('rosusers:error', (d: { code?: string; message?: string; minLength?: number }) => {
+  socket.on('rosusers:error', (d) => {
     busy = '';
     const code = d && d.code;
     const msg: Record<string, string> = {
@@ -587,7 +558,7 @@ export function initRosUsersPage(socket: Socket, isVisible: (page: string) => bo
     if (isVisible('users')) render();
   });
 
-  socket.on('rosusers:update', (d: RosUsersPayload) => {
+  socket.on('rosusers:update', (d) => {
     if (!d) return;
     data = d;
     busy = '';
@@ -597,7 +568,7 @@ export function initRosUsersPage(socket: Socket, isVisible: (page: string) => bo
     if (isVisible('users')) render();
   });
 
-  socket.on('rosusers:caps', (d: RosUsersCaps) => {
+  socket.on('rosusers:caps', (d) => {
     if (!d) return;
     caps = d;
     if (isVisible('users')) render();

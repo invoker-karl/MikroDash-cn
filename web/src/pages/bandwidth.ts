@@ -20,8 +20,9 @@
 import { esc, el, fmtMbps, debounce } from '../dom';
 import {
   RIGHT_BUFFER_MS, anchorMs, axisWindow, bandwidthSeedPoints, needsFullRedraw,
-  pruneAndMax, smoothMax, type TrafficSample, type XYPoint,
+  pruneAndMax, smoothMax, type XYPoint,
 } from './dashboard-traffic-buffer';
+import type { BandwidthDevice, TrafficPoint } from '../gen/payloads';
 import { sharedClock, sharedPoints } from './dashboard-traffic';
 
 /** Only what this page touches on a Chart.js instance. */
@@ -33,18 +34,6 @@ interface BwChart {
 }
 type BwChartCtor = new (canvas: unknown, cfg: unknown) => BwChart;
 import type { Socket } from '../socket';
-
-export interface BandwidthDevice {
-  srcIp: string; dstIp: string;
-  rxMbps: number; txMbps: number; totalMbps: number;
-  proto: string; iface: string;
-  name: string; mac: string;
-  country: string; city: string;
-  org: string | null; cat: string | null;
-  isLan: boolean; isIpv6: boolean;
-}
-
-export interface BandwidthPayload { ts: number; devices: BandwidthDevice[]; pollMs: number }
 
 /** A regional-indicator flag from an ISO-3166 alpha-2 code. */
 export function iso2Flag(cc: string): string {
@@ -151,7 +140,7 @@ export function splitRate(mbps: unknown): { num: string; unit: string } {
  * `dashboard-traffic.ts` exports `sharedClock()` at all.
  */
 export function bwSyncState(
-  points: readonly TrafficSample[], nowMs: number,
+  points: readonly TrafficPoint[], nowMs: number,
   clock: { lastSampleTs: number; serverOffset: number; windowSecs: number },
   rightBufferMs: number,
 ): { rx: XYPoint[]; tx: XYPoint[]; yMax: number; xMin: number; xMax: number } {
@@ -392,7 +381,7 @@ export function initBandwidthPage(socket: Socket, isVisible: (page: string) => b
    * Rebuilt only when the set actually changed: rebuilding it on every payload
    * would close the dropdown under anyone using it.
    */
-  socket.on('ifstatus:update', (p: { interfaces?: Array<{ name: string; running: boolean; disabled: boolean; ips: string[] }> }) => {
+  socket.on('ifstatus:update', (p) => {
     if (!selIface) return;
     const ifaces = ((p && p.interfaces) || [])
       .filter((i) => i.running && !i.disabled && i.ips && i.ips.length)
@@ -477,7 +466,7 @@ export function initBandwidthPage(socket: Socket, isVisible: (page: string) => b
     set('bwLiveTxNum', tx.num); set('bwLiveTxUnit', tx.unit);
   }
 
-  socket.on('traffic:update', (sample: TrafficSample & { ifName?: string }) => {
+  socket.on('traffic:update', (sample) => {
     // The dashboard's handler updates the shared clock for EVERY sample
     // regardless of which page is open, which is what keeps this keepalive's
     // clock warm when the page is returned to. So this one may bail early.
@@ -497,7 +486,7 @@ export function initBandwidthPage(socket: Socket, isVisible: (page: string) => b
     // Scale advance and rendering are the keepalive's, not this handler's.
   });
 
-  socket.on('bandwidth:update', (p: BandwidthPayload) => {
+  socket.on('bandwidth:update', (p) => {
     data = (p && p.devices) || [];
     if (isVisible('bandwidth')) render();
   });

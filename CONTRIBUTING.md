@@ -57,6 +57,7 @@ Package tests use the standard library `testing` package only.
 These are deliberate constraints rather than style preferences:
 
 - **Fewer router channels.** Concurrent API channels, not data volume or CPU, are what strain small hardware, so "more efficient" means asking the router for less. Each menu is read once however many collectors want it, and every collector supports both stream and poll delivery, chosen per router.
+- **Every WebSocket event is declared with its payload type** (`hub.Declare`), and the browser's types are generated from those declarations by `cmd/tsgen`. A payload that is a Go map is typed in `web/src/events-hand.ts`, and `tsc` fails if that file and the declarations disagree about which events those are.
 - **Generated code is never edited by hand.** `web/src/gen/` comes from `cmd/tsgen`, `cmd/pagesgen` and `tools/*-ts.js`; change the source and regenerate. The recordings under `testdata/` pin what the app does today, so change them deliberately, never by retyping one.
 - **A check that cannot fail is worse than no check.** Anything that scans a set asserts it actually found something. An audit that silently measures zero reads exactly like one that passed.
 - **A gap is recorded, never hidden.** The ledgers in `internal/verify/` fail in both directions: an unrecorded gap fails, and so does a recorded one that has since closed.

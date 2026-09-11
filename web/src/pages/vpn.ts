@@ -12,27 +12,6 @@ import { esc, el, resRow, fmtMbps, fmtBytes } from '../dom';
 import type { Socket } from '../socket';
 import { mountAdds, mountRows } from '../resource';
 
-export interface Tunnel {
-  id: string; publicKey: string; type: string; name: string; state: string;
-  lastHandshake: string; keepalive: string; endpoint: string;
-  allowedIp: string; interface: string;
-  rx: number; tx: number; rxRate: number; txRate: number;
-}
-
-export interface PppTunnel {
-  type: string; name: string; service: string; address: string;
-  callerId: string; uptime: string; rx: number; tx: number;
-}
-
-export interface IpsecTunnel {
-  type: string; name: string; state: string; uptime: string;
-  side: string; enc: string; auth: string;
-}
-
-export interface VpnPayload {
-  ts: number; tunnels: Tunnel[]; ppp: PppTunnel[]; ipsec: IpsecTunnel[]; pollMs: number;
-}
-
 /**
  * A RouterOS last-handshake duration in seconds.
  *
@@ -84,7 +63,7 @@ function hsBadge(uptime: string, connected: boolean): string {
 }
 
 export function initVpnPage(socket: Socket, isVisible: (page: string) => boolean): void {
-  socket.on('vpn:update', (d: VpnPayload) => {
+  socket.on('vpn:update', (d) => {
     const all = d.tunnels || [];
     const wg = all.filter((t) => t.type === 'WireGuard');
     const connected = wg.filter((t) => t.state === 'active');

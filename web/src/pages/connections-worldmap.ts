@@ -16,6 +16,7 @@
 
 import { CC_NAMES, NUM_TO_ISO2, centroidOf, coordsToD, iso2Flag, makeArcD } from './connections-map';
 import { esc } from '../dom';
+import type { ConnCountryProto } from '../gen/payloads';
 
 const NS = 'http://www.w3.org/2000/svg';
 
@@ -155,7 +156,7 @@ export interface WorldMap {
 export interface MapTipInfo {
   count: number;
   city: string;
-  proto: Record<string, number>;
+  proto: Partial<ConnCountryProto>;
 }
 
 /**

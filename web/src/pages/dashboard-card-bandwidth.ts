@@ -26,20 +26,12 @@
 
 import { el } from '../dom';
 import { dcSplitRate } from './dashboard-cards-util';
-
-export interface BwRouter {
-  id?: string;
-  bwDownMbps?: number;
-  bwUpMbps?: number;
-}
-export interface TrafficSample {
-  rx_mbps?: number;
-  tx_mbps?: number;
-}
+import type { TrafficSample } from '../gen/payloads';
+import type { RouterRecord } from '../events-hand';
 
 // Mbps. The default stands until a router in the list says otherwise.
 let bwDown = 1000, bwUp = 1000;
-let routers: BwRouter[] = [];
+let routers: RouterRecord[] = [];
 let activeId = '';
 
 function syncCapacity(): void {
@@ -51,7 +43,7 @@ function syncCapacity(): void {
   }
 }
 
-export function setBwRouters(list: BwRouter[] | undefined): void {
+export function setBwRouters(list: RouterRecord[] | undefined): void {
   routers = list || [];
   syncCapacity();
 }

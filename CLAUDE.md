@@ -96,7 +96,7 @@ RouterOS binary API (TCP/TLS)
   internal/session/    one Session per router, owning the connection its collectors share. It also
                        holds routers nobody is watching, for alerting, history or a known status
                        (internal/session/needs.go)
-  internal/hub/        WebSocket rooms: who is listening to what
+  internal/hub/        WebSocket rooms, and the declared events every send goes through
   internal/alert/      the alert rules — pure: rows in, verdict out
   internal/guard/      the write guards — also pure (see "Write guards")
   internal/store/      /data: AES-256-GCM settings, scrypt users, routers.json
@@ -244,6 +244,25 @@ move together:
   holding every layout a user has saved. Renaming them orphans that data.
 - **The dashboard is served at `/home`** — the one page whose URL differs from its key, declared as
   `Path` on its entry.
+
+---
+
+## WebSocket events
+
+- **Every event is declared once, with its payload type:** `hub.Declare[T]("name")`, in
+  `internal/collect/events.go`, `internal/server/events.go`, or beside its sender in
+  `internal/session`. Every send goes through the declared event — `EvX.Send(hub, client, p)`,
+  `EvX.Broadcast(...)`, `EvX.Emit(relay, room, p)` — so the compiler checks each payload, and a
+  string cannot reach the wire any other way. See `internal/hub/event.go`.
+- **The browser's types are generated from those declarations** by `cmd/tsgen` into
+  `web/src/gen/payloads.ts`: an interface for every struct a payload reaches, and `Events`, which
+  types every `socket.on` handler by its event. A payload that is a Go map is typed by hand in
+  `web/src/events-hand.ts`, and tsc fails if that file misses a map event or types one that is not.
+- **Go never sends a null array.** Generated slices are `T[]`. `TestNoPayloadSendsANullArray`
+  (internal/collect) and `TestNoServerPayloadSendsANullArray` (internal/server) build every
+  payload from empty input and fail on any nil slice.
+- **No cast on a payload.** A handler that needs `as` is disagreeing with the Go side; fix the Go
+  or the page, not the type.
 
 ---
 

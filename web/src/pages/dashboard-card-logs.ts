@@ -1,19 +1,12 @@
 // The Dashboard's Logs card (dc-card-logs): the last fifty lines, tailed.
 //
-// ── ARRAY.ISARRAY FIRST, AND THAT ORDER IS THE WHOLE POINT ──────────────────
+// ── `logs:history` IS AN ARRAY, FROM EVERY SENDER ───────────────────────────
 //
-// `data.entries || data` looks like it accepts both shapes and cannot: on a bare
-// array `data.entries` is `Array.prototype.entries`, a truthy FUNCTION, so the
-// first operand always wins, the isArray guard then fails, and the handler
-// returns having rendered nothing.
-//
-// It matters because the two emit sites disagree — a bare array on connect and
-// `{ entries }` on card focus — so the connect replay was silently dropped and
-// the card stayed empty until a focus arrived.
-//
-// This port reproduced the defect deliberately and pinned it as ToDo #17. It was
-// fixed upstream the same day, the pinned case turned red, and this is the port
-// following. The Logs PAGE always had the correct idiom, twenty lines away.
+// Both senders — the collector, and the replay on a card's focus — go through
+// `EvLogsHistory`, declared `[]LogEntry`. The two once disagreed (a bare array
+// and `{ entries }`), and a `data.entries || data` guard dropped the bare array
+// because `Array.prototype.entries` is truthy. One declared type is what closes
+// that for good, so the handler takes the array and nothing else.
 //
 // ── THE TOPIC CLASS IS FIRST-MATCH-WINS ─────────────────────────────────────
 //
@@ -28,13 +21,7 @@
 
 import { el } from '../dom';
 import { dcEsc } from './dashboard-cards-util';
-
-export interface LogEntry {
-  time?: string;
-  topics?: string;
-  message?: string;
-  severity?: string;
-}
+import type { LogEntry } from '../gen/payloads';
 
 const DC_LOG_MAX = 50;
 let lines: LogEntry[] = [];
@@ -64,11 +51,7 @@ export function renderLogsCard(): void {
   node.scrollTop = node.scrollHeight;
 }
 
-export function onLogsHistory(data: { entries?: LogEntry[] } | LogEntry[] | undefined): void {
-  const entries = Array.isArray(data)
-    ? data
-    : (data && (data as { entries?: LogEntry[] }).entries ? (data as { entries?: LogEntry[] }).entries! : []);
-  if (!Array.isArray(entries)) return;
+export function onLogsHistory(entries: LogEntry[]): void {
   lines = entries.slice(-DC_LOG_MAX);
   renderLogsCard();
 }

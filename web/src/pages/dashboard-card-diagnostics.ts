@@ -40,34 +40,7 @@
 // nothing. `esc` is a string replace and needs no DOM.
 
 import { el, esc } from '../dom';
-
-export interface DiagMenu {
-  menu?: string;
-  streamed?: boolean;
-}
-export interface DiagnosticsPayload {
-  routerId?: string;
-  label?: string;
-  acquisition?: {
-    commandsPerMin?: number;
-    inFlight?: number;
-    cap?: number;
-    channels?: number;
-    menus?: number;
-    streamed?: number;
-    polled?: number;
-    reads?: DiagMenu[];
-    more?: number;
-  };
-  derivation?: { payloadsPerMin?: number };
-  views?: {
-    running?: number;
-    gated?: number;
-    dormant?: number;
-    rooms?: number;
-    holds?: string[];
-  };
-}
+import type { Diagnostics } from '../gen/payloads';
 
 /** A number, or an em dash when the server said nothing rather than zero. */
 function num(v: number | undefined): string {
@@ -93,7 +66,7 @@ function heading(text: string, sub: string): string {
     '</span><span class="diag-layer-sub">' + esc(sub) + '</span></div>';
 }
 
-export function renderDiagnosticsCard(data: DiagnosticsPayload): void {
+export function renderDiagnosticsCard(data: Diagnostics): void {
   const a = data.acquisition || {};
   const d = data.derivation || {};
   const v = data.views || {};

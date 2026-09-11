@@ -10,30 +10,7 @@ import { esc, el, resRow, debounce, renderSortHeader, sortMul, fmtMbps,
          type SortCol, type SortState } from '../dom';
 import type { Socket } from '../socket';
 import { mountAdds, mountRows } from '../resource';
-
-export interface VlanInterface {
-  id: string; name: string; parent: string; mtu: number | null;
-  running: boolean; disabled: boolean; comment: string;
-  rxMbps: number | null; txMbps: number | null;
-}
-
-export interface Vlan {
-  vlanId: number; interfaces: VlanInterface[];
-  tagged: string[]; untagged: string[]; bridges: string[];
-  clients: number; rxMbps: number | null; txMbps: number | null; name: string;
-}
-
-export interface BridgeVlanRow {
-  bridge: string; raw: string; ids: number[]; ranges: number[][]; truncated: boolean;
-  tagged: string[]; untagged: string[]; currentTagged: string[];
-  dynamic: boolean; disabled: boolean;
-}
-
-export interface VlansPayload {
-  ts: number; pollMs: number;
-  vlans: Vlan[]; bridgeVlans: BridgeVlanRow[]; ports: unknown[];
-  dynamicCount: number; ratesAvailable: boolean;
-}
+import type { Vlan, VlansPayload } from '../gen/payloads';
 
 const COLS: SortCol[] = [
   { key: 'vlanId', label: 'VLAN' },
@@ -215,7 +192,7 @@ export function initVlansPage(socket: Socket, isVisible: (page: string) => boole
     if (r) r.innerHTML = any ? fmtMbps(rx + tx) : '&mdash;';
   }
 
-  socket.on('vlans:update', (d: VlansPayload) => {
+  socket.on('vlans:update', (d) => {
     if (!d) return;
     data = d;
     pushHistory(d);

@@ -23,7 +23,7 @@
 import { el, esc } from '../dom';
 import type { Socket } from '../socket';
 
-interface UpdCaps { permitted: boolean; routerName: string }
+import type { HandEvents } from '../events-hand';
 // The producer's type, not a copy of it — see the note beside the declaration
 // in `dashboard-system.ts`. The cast below still cannot be checked (detail is
 // `any`), but the two modules can no longer drift to different shapes in silence.
@@ -137,7 +137,7 @@ export function notesAreForThisDialog(showing: string, replyVersion: unknown): b
 }
 
 export function initUpgrade(socket: Socket): void {
-  let caps: UpdCaps = { permitted: false, routerName: '' };
+  let caps: HandEvents['packages:caps'] = { permitted: false, routerName: '' };
   let upd: UpdInfo = { installed: '', latest: '', channel: '' };
 
   function draw(): void {
@@ -164,7 +164,7 @@ export function initUpgrade(socket: Socket): void {
     if (pending && v.pendingHidden !== null) pending.style.display = v.pendingHidden ? 'none' : '';
   }
 
-  socket.on('packages:caps', (d: UpdCaps) => {
+  socket.on('packages:caps', (d) => {
     caps = d || { permitted: false, routerName: '' };
     draw();
   });
@@ -193,10 +193,12 @@ export function initUpgrade(socket: Socket): void {
     box.scrollTop = 0;
   };
 
-  socket.on('packages:notes', (d: { version?: unknown; notes?: string } | undefined) => {
+  socket.on('packages:notes', (d) => {
     const reply = d || {};
     if (!notesAreForThisDialog(notesFor, reply.version)) return;
-    if (reply.notes) setNotes(reply.notes, false);
+    // Two shapes: `notes` on success, `error` on failure. Asked with `in`
+    // because the failure shape has no `notes` key at all.
+    if ('notes' in reply && reply.notes) setNotes(reply.notes, false);
     else setNotes('Release notes unavailable', true);
   });
 
@@ -236,7 +238,7 @@ export function initUpgrade(socket: Socket): void {
     }
   });
 
-  socket.on('packages:error', (d: { code?: string; routerName?: string }) => {
+  socket.on('packages:error', (d) => {
     const modal = el('updModal');
     // Only while THIS dialog is open: `packages:error` is shared with the
     // Packages page, and painting its refusals into a closed dialog would put a
@@ -251,7 +253,7 @@ export function initUpgrade(socket: Socket): void {
     apply('idle');
   });
 
-  socket.on('packages:ok', (d: { action?: string }) => {
+  socket.on('packages:ok', (d) => {
     if (!d || d.action !== 'upgrade') return;
     // DELIBERATELY NOT CLOSED. The command has been accepted and the router is
     // about to disappear; closing on success would throw away the only moment

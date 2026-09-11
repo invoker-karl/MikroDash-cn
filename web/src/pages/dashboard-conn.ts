@@ -31,23 +31,13 @@
 
 import { esc, el } from '../dom';
 import { svcBadge } from './connections-lists';
-
-export interface ConnPayload {
-  ts?: number;
-  total?: number;
-  protoCounts?: { tcp: number; udp: number; icmp: number; other: number };
-  topSources?: { ip: string; name: string; count: number }[];
-  topDestinations?: {
-    key: string; count: number; country?: string; city?: string;
-    org?: string; cat?: string;
-  }[];
-}
+import type { ConnsUpdate } from '../gen/payloads';
 
 const MAX_CONN_HIST = 60;
 const connHistory: { ts?: number; total?: number }[] = [];
 
 let srcFp = '', dstFp = '', protoFp = '';
-let pending: ConnPayload | null = null;
+let pending: ConnsUpdate | null = null;
 let rafId: number | null = null;
 
 /**
@@ -85,7 +75,7 @@ export function drawSparkline(history: { total?: number }[]): void {
   c.ctx.stroke();
 }
 
-export function renderProtoBars(pc: ConnPayload['protoCounts']): void {
+export function renderProtoBars(pc: ConnsUpdate['protoCounts']): void {
   const protoBars = el('protoBars');
   if (!protoBars || !pc) return;
   // `|| 1` binds to the whole sum, so a router with no connections at all
@@ -109,7 +99,7 @@ export function flushConnUpdate(): void {
   if (!data) return;
   pending = null;
 
-  const nextSrcFp = JSON.stringify((data.topSources as NonNullable<ConnPayload['topSources']>)
+  const nextSrcFp = JSON.stringify(data.topSources
     .map((x) => ({ ip: x.ip, count: x.count })));
   if (nextSrcFp !== srcFp) {
     srcFp = nextSrcFp;
@@ -127,7 +117,7 @@ export function flushConnUpdate(): void {
     }
   }
 
-  const nextDstFp = JSON.stringify((data.topDestinations as NonNullable<ConnPayload['topDestinations']>)
+  const nextDstFp = JSON.stringify(data.topDestinations
     .map((x) => ({ key: x.key, count: x.count, country: x.country })));
   if (nextDstFp !== dstFp) {
     dstFp = nextDstFp;
@@ -163,7 +153,7 @@ export function flushConnUpdate(): void {
 }
 
 /** The `conn:update` handler. The immediate half runs now; the lists defer. */
-export function noteConnUpdate(data: ConnPayload): void {
+export function noteConnUpdate(data: ConnsUpdate): void {
   const connTotal = el('connTotal');
   if (connTotal) connTotal.textContent = String(data.total);
   connHistory.push({ ts: data.ts, total: data.total });

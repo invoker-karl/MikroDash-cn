@@ -26,26 +26,23 @@
 // the live app does, and a port that used `=== null` would diverge on a case a
 // fixture will never contain.
 
-export interface TrafficSample {
-  ts: number;
-  rx_mbps: number;
-  tx_mbps: number;
-}
+import type { TrafficPoint } from '../gen/payloads';
+
 export interface XYPoint { x: number; y: number }
 
 /** 30 min at 1 Hz — matches the server's HISTORY_MINUTES default. */
 export const MAX_CLIENT_POINTS = 1800;
 
 /** Append a sample, holding the buffer at its cap. Mutates, as the original does. */
-export function pushSample(points: TrafficSample[], sample: TrafficSample): void {
+export function pushSample(points: TrafficPoint[], sample: TrafficPoint): void {
   points.push({ ts: sample.ts, rx_mbps: sample.rx_mbps, tx_mbps: sample.tx_mbps });
   if (points.length > MAX_CLIENT_POINTS) points.shift();
 }
 
 /** The buffer trimmed to what the visible window covers. */
 export function windowedPoints(
-  points: readonly TrafficSample[], nowMs: number, windowSecs: number, rightBufferMs: number,
-): TrafficSample[] {
+  points: readonly TrafficPoint[], nowMs: number, windowSecs: number, rightBufferMs: number,
+): TrafficPoint[] {
   const cutoff = nowMs - (windowSecs * 1000) - rightBufferMs;
   // A FORWARD FILTER, following the live app's fix.
   //
@@ -82,7 +79,7 @@ export function smoothOffset(prev: number, rawOffset: number): number {
  * redraw snaps the chart sideways.
  */
 export function anchorMs(
-  lastSampleTs: number, serverOffset: number, nowMs: number, pts: readonly TrafficSample[],
+  lastSampleTs: number, serverOffset: number, nowMs: number, pts: readonly TrafficPoint[],
 ): number {
   return lastSampleTs ? nowMs + serverOffset : (pts.length ? pts[pts.length - 1]!.ts : nowMs);
 }
@@ -140,8 +137,8 @@ export const RIGHT_BUFFER_MS = 1000;
  * would trace back to a shared helper.
  */
 export function bandwidthSeedPoints(
-  points: readonly TrafficSample[], nowMs: number, windowSecs: number, rightBufferMs: number,
-): TrafficSample[] {
+  points: readonly TrafficPoint[], nowMs: number, windowSecs: number, rightBufferMs: number,
+): TrafficPoint[] {
   const cutoff = nowMs - (windowSecs * 1000) - rightBufferMs - KEEPALIVE_SLACK_MS;
   // A FILTER, and it became one on 2026-08-25 when the live side fixed its
   // second copy.

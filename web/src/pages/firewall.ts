@@ -20,29 +20,17 @@
 
 import { esc, el, resRow, debounce, fmtBytes } from '../dom';
 import type { Socket } from '../socket';
-
-export interface FirewallRule {
-  id: string; chain: string; action: string; comment: string;
-  srcAddress: string; dstAddress: string; protocol: string; dstPort: string;
-  inInterface: string;
-  packets: number; bytes: number; deltaPackets: number;
-  disabled: boolean; dynamic: boolean;
-}
-
-export interface FirewallPayload {
-  ts: number;
-  filter: FirewallRule[]; nat: FirewallRule[]; mangle: FirewallRule[]; raw: FirewallRule[];
-  // ABSENT unless this session asked for IPv6. `omitempty` on the Go side drops
-  // them, so `undefined` here means "not collected" and is not the same as an
-  // empty table — the difference is what keeps dormancy correct server-side.
-  filter6?: FirewallRule[] | null; nat6?: FirewallRule[] | null;
-  mangle6?: FirewallRule[] | null; raw6?: FirewallRule[] | null;
-  // THREE STATES. true hides the family switch, false shows it, and
-  // undefined/null means the probe has not run yet and the page must change
-  // nothing — "not asked" must never look like "this router has no IPv6".
-  ipv6Disabled?: boolean | null;
-  activeTable: string; pollMs: number;
-}
+// FirewallPayload, as generated from the Go collector:
+//
+// `filter6`/`nat6`/`mangle6`/`raw6` are ABSENT unless this session asked for
+// IPv6. `omitempty` on the Go side drops them, so `undefined` here means "not
+// collected" and is not the same as an empty table — the difference is what
+// keeps dormancy correct server-side.
+//
+// `ipv6Disabled` has THREE STATES. true hides the family switch, false shows
+// it, and undefined/null means the probe has not run yet and the page must
+// change nothing — "not asked" must never look like "this router has no IPv6".
+import type { FirewallRule, FirewallPayload } from '../gen/payloads';
 
 type Fam = 'ip4' | 'ip6';
 
@@ -357,7 +345,7 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
 
   // ── Wiring ────────────────────────────────────────────────────────────────
 
-  socket.on('firewall:update', (d: FirewallPayload) => {
+  socket.on('firewall:update', (d) => {
     const wasEmpty = !data.filter;
     data = d;
     applyV6Presence(d);
@@ -381,14 +369,14 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
 
   // The page draws its own controls from `permitted`; every gate is re-checked
   // server-side against a fresh read regardless.
-  socket.on('res:schema', (d: { key?: string; permitted?: boolean }) => {
+  socket.on('res:schema', (d) => {
     if (!d || !d.key) return;
     writable[d.key] = !!d.permitted;
     // The arrows appear and disappear with the answer, so redraw once it lands.
     if (resKeyFor(fam, tab) === d.key) renderTab();
   });
 
-  socket.on('res:ok', (d: { resource?: string; action?: string; movedId?: string }) => {
+  socket.on('res:ok', (d) => {
     if (!d || resKeyFor(fam, tab) !== d.resource) return;
     if (d.action === 'move' || d.action === 'undo' || d.action === 'redo') {
       pulse = d.movedId || null;
@@ -399,7 +387,7 @@ export function initFirewallPage(socket: Socket, isVisible: (page: string) => bo
   // the write is refused there is no fresh payload coming to correct it, so the
   // table is redrawn from the last one — which still holds what the router
   // actually has.
-  socket.on('res:error', (d: { resource?: string }) => {
+  socket.on('res:error', (d) => {
     if (!d || resKeyFor(fam, tab) !== d.resource) return;
     renderTab();
   });

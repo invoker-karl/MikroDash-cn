@@ -14,7 +14,7 @@ import { el } from './dom';
 import { installFetchGuard, verifySessionAfterFailure } from './fetch-guard';
 import { overlayOnStatus, overlayOnSwitch, wireRouterDropdown } from './router-dropdown';
 import { initUpgrade } from './pages/upgrade';
-import { Socket } from './socket';
+import { Socket, type AllEvents } from './socket';
 import { initAppearance, wireAppearance } from './appearance';
 import { initNav, navAutoExpand } from './nav';
 import { initKeyboard } from './keyboard';
@@ -282,7 +282,7 @@ function wireBanners(socket: Socket): void {
   // This port's server emits ONE room-scoped `router:status` where the live one
   // emits `ros:status` for the session and a global `router:status` for the
   // Routers list. Room-scoped, it answers the first question — see banners.ts.
-  socket.on('router:status', (d: { connected?: boolean; reason?: string }) => {
+  socket.on('router:status', (d) => {
     setRosBanner(!!(d && d.connected), d && d.reason);
   });
 
@@ -418,7 +418,7 @@ async function main(): Promise<void> {
   // that arrives with the first settings:pages.
   initClock();
   // The install's page toggles, broadcast on connect and on every settings save.
-  socket.on('settings:pages', (pages) => applyPageVisibility(pages as Record<string, unknown>));
+  socket.on('settings:pages', (pages) => applyPageVisibility(pages));
   // The per-router collection config, sent on the router handshake.
   //
   // `applyCollectionConfig` marks a disabled collector's card `is-collector-off`
@@ -427,7 +427,7 @@ async function main(): Promise<void> {
   // collector the operator had turned off showed a stale card and read as broken.
   // The live listener is `public/app.js:3159`, which guards on `cfg.enabled` the
   // same way.
-  socket.on('collection:config', (cfg: { enabled?: Record<string, unknown> } | undefined) => {
+  socket.on('collection:config', (cfg) => {
     if (cfg && cfg.enabled) applyCollectionConfig(cfg.enabled);
   });
   // The DORMANT set, sent whenever the supervisor's verdict changes.
@@ -438,7 +438,7 @@ async function main(): Promise<void> {
   // until the server had a dormancy supervisor to emit this — see
   // `internal/dormancy`. The live listener is `public/app.js:3123`, which guards
   // on `Array.isArray(st.dormant)` the same way.
-  socket.on('collection:status', (st: { dormant?: unknown } | undefined) => {
+  socket.on('collection:status', (st) => {
     if (st) applyCollectionStatus(st.dormant);
   });
   // Another administrator adding or removing a site must not leave this tab
@@ -464,7 +464,7 @@ async function main(): Promise<void> {
   // live handler. An install with one router that has just been disabled has
   // nowhere to go, and switching to a disabled device would be worse than
   // staying put.
-  socket.on('router:disabled', (d: { routerId?: string }) => {
+  socket.on('router:disabled', (d) => {
     if (!d || !d.routerId) return;
     const next = routers.find((r) => !r.disabled && r.id !== d.routerId);
     if (next) switchRouter(socket, next.id);
@@ -519,7 +519,7 @@ async function main(): Promise<void> {
   // listener lives inside main(), and main.ts runs main() on import.
   let rejoinState: RejoinState = { lastId: '', lostRooms: false };
   socket.on('disconnect', () => { rejoinState = { ...rejoinState, lostRooms: true }; });
-  socket.on('router:active', (d: { activeId?: string } | undefined) => {
+  socket.on('router:active', (d) => {
     const { rejoin, next } = rejoinDecision((d && d.activeId) || '', rejoinState);
     rejoinState = next;
     if (!rejoin) return;
@@ -534,8 +534,15 @@ async function main(): Promise<void> {
   // that card's threshold, so a collector reporting a slower interval stops
   // being called stale for keeping to it.
   for (const event of [...new Set(STALE_CARDS.map((c) => c.event))]) {
-    socket.on(event, (d: { pollMs?: number } | undefined) => {
-      for (const cardId of cardsForEvent(event)) notePayload(cardId, d && d.pollMs);
+    // A NAME FROM A GENERATED TABLE, so tsc cannot check it at this line. The
+    // Go side does: TestWebSocketVocabulary fails on a table entry naming an
+    // event nothing sends. Any payload may carry `pollMs`, so it is read
+    // narrowly rather than by trusting one event's type for all of them.
+    socket.on(event as keyof AllEvents, (d: unknown) => {
+      const pollMs = (d as { pollMs?: unknown } | null)?.pollMs;
+      for (const cardId of cardsForEvent(event)) {
+        notePayload(cardId, typeof pollMs === 'number' ? pollMs : undefined);
+      }
     });
   }
   // Both of these leave the card's rooms, so nothing arrives while away and the
@@ -826,7 +833,7 @@ async function main(): Promise<void> {
     if (ovl) ovl.classList.toggle('open', overlay.open);
   }
 
-  socket.on('router:status', (d: { routerId?: string; connected?: boolean }) => {
+  socket.on('router:status', (d) => {
     if (!d || !d.routerId) return;
     routerStatus[d.routerId] = !!d.connected;
     // The Settings table's badge for THIS router, in place. Without it that

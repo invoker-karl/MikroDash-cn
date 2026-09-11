@@ -185,6 +185,14 @@ Nothing else states the audience: an `emit` takes the declaration, and demand
 reads the same one, so what a collector sends to and what keeps it running cannot
 disagree.
 
+**The event is declared too, with its payload type.** A collector emits through
+`EvX.Emit(relay, room, payload)`, where `EvX = hub.Declare[XPayload]("x:update")`
+in `internal/collect/events.go`. The compiler checks every payload against its
+event, and `cmd/tsgen` generates the browser's type for each event from the same
+declarations, so what a collector sends and what a page expects cannot disagree
+either. The payload never carries a null array: `TestNoPayloadSendsANullArray`
+builds every collector from empty input and from every capture.
+
 ### Demand
 
 `Session.Wants` in `internal/session/needs.go` holds the whole rule, and it is

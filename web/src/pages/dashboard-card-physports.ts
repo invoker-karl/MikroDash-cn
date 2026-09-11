@@ -26,18 +26,7 @@
 import { esc } from '../dom';
 import { dcEsc } from './dashboard-cards-util';
 import { portSvg } from './port-svg';
-
-export interface PhysIface {
-  name: string;
-  type: string;
-  running: boolean;
-  disabled: boolean;
-  ips?: string[];
-}
-
-export interface IfStatusPayload {
-  interfaces?: PhysIface[];
-}
+import type { IfStatusPayload } from '../gen/payloads';
 
 const PHYSICAL = ['ether', 'sfp', 'sfp-sfpplus'];
 

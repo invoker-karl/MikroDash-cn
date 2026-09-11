@@ -23,55 +23,8 @@
 
 import { esc, el, fmtBytes } from '../dom';
 import type { Socket } from '../socket';
-
-interface BkSettings {
-  enabled: boolean;
-  schedule: string;
-  time: string;
-  timezone: string;
-  keepCount: number;
-  keepDays: number;
-}
-
-interface BkSummary {
-  runs: number; stored: number; bytes: number;
-  lastAt: number; lastOutcome: string | null;
-}
-
-interface BkRow {
-  id: number;
-  takenAt: number;
-  outcome: string;
-  source: string;
-  actor: string | null;
-  stem: string | null;
-  pruned: boolean;
-  bytes: number;
-  osVersion: string | null;
-  model: string | null;
-  serial: string | null;
-  ms: number;
-  error: string | null;
-}
-
-interface BkState {
-  routerId: string;
-  label: string;
-  settings: BkSettings;
-  summary: BkSummary;
-  running: boolean;
-  permitted: boolean;
-  rows: BkRow[];
-}
-
-interface DiffLine { op: string; text: string; aLine?: number; bLine?: number }
-interface DiffHunk {
-  aStart: number; bStart: number; aCount: number; bCount: number; lines: DiffLine[];
-}
-interface DiffPayload {
-  baseline?: boolean; truncated?: boolean;
-  added?: number; removed?: number; hunks: DiffHunk[];
-}
+import type { StatePayload } from '../gen/payloads';
+import type { HandEvents } from '../events-hand';
 
 /** Every outcome the runner can record. An unknown one still renders. */
 const OUTCOME: Record<string, { label: string; cls: string }> = {
@@ -102,7 +55,7 @@ function fmtWhen(ts: number): string {
 export function initBackupsPage(socket: Socket, isVisible: (page: string) => boolean): void {
   if (!el('bkTable')) return;
 
-  let state: BkState | null = null;
+  let state: StatePayload | null = null;
   let busy = false;
   let pendingRestore: number | null = null;
 
@@ -120,13 +73,13 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
   };
 
   /** Drop ids that have left the table entirely — deleted, or a router switch. */
-  function prunePicked(st: BkState): void {
+  function prunePicked(st: StatePayload): void {
     const live = new Set((st.rows || []).map((r) => r.id));
     Array.from(picked).forEach((id) => { if (!live.has(id)) picked.delete(id); });
     restorable.clear(); // rebuilt as renderRows walks the rows
   }
 
-  function renderSummary(st: BkState): void {
+  function renderSummary(st: StatePayload): void {
     const set = (id: string, v: string): void => { const e = el(id); if (e) e.textContent = v; };
     set('bkSumLast', fmtWhen(st.summary?.lastAt || 0));
     set('bkSumStored', String(st.summary?.stored || 0));
@@ -145,7 +98,7 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
    * The hint names the clock, because "02:00" is meaningless until you know
    * whose 02:00. An empty timezone is the server's own.
    */
-  function syncTime(st: BkState | null): void {
+  function syncTime(st: StatePayload | null): void {
     const input = el<HTMLInputElement>('bkTime');
     const hint = el('bkTimeHint');
     if (!input || !hint) return;
@@ -157,7 +110,7 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
     hint.textContent = tz ? tz + ' time' : 'server time';
   }
 
-  function renderSettings(st: BkState): void {
+  function renderSettings(st: StatePayload): void {
     const enabled = el<HTMLInputElement>('bkEnabled');
     if (enabled) enabled.checked = !!st.settings.enabled;
     const sched = el<HTMLSelectElement>('bkSchedule');
@@ -199,7 +152,7 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
     }
   }
 
-  function renderRows(st: BkState): void {
+  function renderRows(st: StatePayload): void {
     const rows = st.rows || [];
     const badge = el('bkBadge');
     if (badge) badge.textContent = String(rows.length);
@@ -399,7 +352,7 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
     pendingRestore = id;
   }
 
-  function renderDiff(d: DiffPayload): void {
+  function renderDiff(d: HandEvents['backups:diff']): void {
     const title = el('bkDiffTitle');
     const summary = el('bkDiffSummary');
     const body = el('bkDiffBody');
@@ -436,7 +389,7 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
 
   // ── Wiring ────────────────────────────────────────────────────────────────
 
-  socket.on('backups:state', (st: BkState) => {
+  socket.on('backups:state', (st) => {
     state = st;
     busy = st.running || false;
     render();
@@ -465,7 +418,7 @@ export function initBackupsPage(socket: Socket, isVisible: (page: string) => boo
     }
   });
 
-  socket.on('backups:error', (e: { code?: string; message?: string; was?: string; now?: string }) => {
+  socket.on('backups:error', (e) => {
     busy = false;
     render();
     if (e?.code === 'version-mismatch' && pendingRestore !== null) {

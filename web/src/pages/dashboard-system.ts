@@ -32,6 +32,7 @@
 
 import { esc, el, fmtBytes, parseUptime } from '../dom';
 import { gauge } from './dashboard-gauge';
+import type { SystemPayload } from '../gen/payloads';
 
 /**
  * What the System card publishes on `mikrodash:updateavailable`.
@@ -51,24 +52,6 @@ import { gauge } from './dashboard-gauge';
  * compiler still cannot.
  */
 export interface UpdInfo { installed: string; latest: string; channel: string }
-
-export interface SystemPayload {
-  uptimeRaw?: unknown;
-  cpuLoad?: number;
-  memPct?: number;
-  hddPct?: number;
-  totalHdd?: number;
-  totalMem?: number;
-  boardName?: string;
-  version?: string;
-  cpuCount?: number;
-  cpuFreq?: number;
-  tempC?: number | null;
-  updateAvailable?: boolean;
-  latestVersion?: string;
-  updateStatus?: string;
-  updateChannel?: string;
-}
 
 let metaWritten = false;
 let pending: SystemPayload | null = null;
@@ -106,8 +89,8 @@ export function flushSysUpdate(): void {
 
   // Storage only when the router HAS storage. `totalHdd > 0` and not merely
   // truthy: a router reporting 0 draws two gauges, not three with an empty one.
-  let html = gauge('CPU', d.cpuLoad as number, 'cpu') + gauge('RAM', d.memPct as number, 'mem');
-  if ((d.totalHdd as number) > 0) html += gauge('Storage', d.hddPct as number, 'hdd');
+  let html = gauge('CPU', d.cpuLoad, 'cpu') + gauge('RAM', d.memPct, 'mem');
+  if (d.totalHdd > 0) html += gauge('Storage', d.hddPct, 'hdd');
   const gaugeRow = el('gaugeRow');
   if (gaugeRow) gaugeRow.innerHTML = html;
 

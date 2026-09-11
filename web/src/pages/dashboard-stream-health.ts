@@ -21,6 +21,8 @@
 // operator's own setting and it is the more useful thing to say.
 
 import { el } from '../dom';
+import type { WanStatus } from '../gen/payloads';
+import type { HandEvents } from '../events-hand';
 
 /** Collector key to the card it feeds. The warning element is that id + `Warn`. */
 const STREAM_WARN_CARDS: Record<string, string> = {
@@ -28,15 +30,10 @@ const STREAM_WARN_CARDS: Record<string, string> = {
   connections: 'connCard',
 };
 
-export interface StreamHealth {
-  collector?: string;
-  degraded?: boolean;
-  restarts?: number;
-}
-
-export function renderStreamHealth(h: StreamHealth | undefined): void {
-  if (!h || !STREAM_WARN_CARDS[h.collector as string]) return;
-  const cardId = STREAM_WARN_CARDS[h.collector as string]!;
+export function renderStreamHealth(h: HandEvents['stream:health'] | undefined): void {
+  if (!h) return;
+  const cardId = STREAM_WARN_CARDS[h.collector];
+  if (!cardId) return;
   const card = el(cardId);
   const warn = el(cardId + 'Warn');
   // BOTH must exist. A card without its warning element would take the tint
@@ -50,12 +47,6 @@ export function renderStreamHealth(h: StreamHealth | undefined): void {
     warn.textContent = '';
     card.classList.remove('is-degraded');
   }
-}
-
-export interface WanStatus {
-  ifName?: string;
-  disabled?: boolean;
-  running?: boolean;
 }
 
 export function renderWanStatus(s: WanStatus): void {

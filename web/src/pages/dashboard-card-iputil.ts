@@ -20,13 +20,9 @@
 
 import { el } from '../dom';
 import { dcDrawGauge } from './dashboard-cards-util';
+import type { LanPayload } from '../gen/payloads';
 
-export interface IpUtilPayload {
-  totalPoolSize?: number;
-  totalLeases?: number;
-}
-
-export function renderIpUtilCard(data: IpUtilPayload): void {
+export function renderIpUtilCard(data: LanPayload): void {
   const totalPool = data.totalPoolSize || 0;
   const totalUsed = data.totalLeases || 0;
   const pct = totalPool > 0 ? Math.round((totalUsed / totalPool) * 100) : 0;

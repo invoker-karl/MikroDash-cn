@@ -21,27 +21,26 @@
 
 import type { Socket } from '../socket';
 import { isRosDisconnected } from '../banners';
-import { renderTalkers, type TalkersPayload } from './dashboard-talkers';
-import { renderNetwatch, type NetwatchPayload } from './dashboard-netwatch';
-import { renderVpnCard, type VpnPayload } from './dashboard-vpn';
-import { noteSystemUpdate, flushPendingSystem, resetSysMeta, type SystemPayload } from './dashboard-system';
-import { noteConnUpdate, flushPendingConn, resetConnCaches, type ConnPayload } from './dashboard-conn';
-import { renderNetworks, type LanOverviewPayload } from './dashboard-networks';
-import { onPingUpdate, onPingHistory, resetPing, type PingPayload, type PingHistoryPayload } from './dashboard-ping';
-import { renderWirelessCards, type WirelessPayload } from './dashboard-card-wireless';
-import { renderIpUtilCard, type IpUtilPayload } from './dashboard-card-iputil';
-import { renderPhysPortsCard, type IfStatusPayload } from './dashboard-card-physports';
-import { renderRoutingCards, resetRoutingCards, type RoutingPayload } from './dashboard-card-routing';
-import { renderBandwidthCard, setBwRouters, setBwActiveRouter, resetBandwidthCard,
-  type BwRouter, type TrafficSample as BwSample } from './dashboard-card-bandwidth';
-import { renderFwActionsCard, type FirewallPayload } from './dashboard-card-fwactions';
-import { onLogsHistory, onLogsNew, resetLogsCard, type LogEntry } from './dashboard-card-logs';
-import { renderDiagnosticsCard, type DiagnosticsPayload } from './dashboard-card-diagnostics';
-import { renderConnListCards, type ConnCardsPayload } from './dashboard-card-connlists';
-import { createConnMap, type MapCountry } from './dashboard-card-map';
+import { renderTalkers } from './dashboard-talkers';
+import { renderNetwatch } from './dashboard-netwatch';
+import { renderVpnCard } from './dashboard-vpn';
+import { noteSystemUpdate, flushPendingSystem, resetSysMeta } from './dashboard-system';
+import { noteConnUpdate, flushPendingConn, resetConnCaches } from './dashboard-conn';
+import { renderNetworks } from './dashboard-networks';
+import { onPingUpdate, onPingHistory, resetPing } from './dashboard-ping';
+import { renderWirelessCards } from './dashboard-card-wireless';
+import { renderIpUtilCard } from './dashboard-card-iputil';
+import { renderPhysPortsCard } from './dashboard-card-physports';
+import { renderRoutingCards, resetRoutingCards } from './dashboard-card-routing';
+import { renderBandwidthCard, setBwRouters, setBwActiveRouter, resetBandwidthCard }
+  from './dashboard-card-bandwidth';
+import { renderFwActionsCard } from './dashboard-card-fwactions';
+import { onLogsHistory, onLogsNew, resetLogsCard } from './dashboard-card-logs';
+import { renderDiagnosticsCard } from './dashboard-card-diagnostics';
+import { renderConnListCards } from './dashboard-card-connlists';
+import { createConnMap } from './dashboard-card-map';
 import { renderConnFlowCard } from './dashboard-card-connflow';
-import { renderStreamHealth, renderWanStatus, type StreamHealth, type WanStatus }
-  from './dashboard-stream-health';
+import { renderStreamHealth, renderWanStatus } from './dashboard-stream-health';
 import { initTraffic, hideTrafficChart, resetTraffic, resetTrafficOnReconnect } from './dashboard-traffic';
 
 // The Connections Map, built once. `worldmap:ready` tells it when the world map
@@ -51,52 +50,52 @@ const connMap = createConnMap();
 export function initDashboard(socket: Socket): void {
   // ROUTER-WIDE, like the collector that sends it: these are the top bar's
   // gauges and the uptime chip, which a viewer sees on every page.
-  socket.on('system:update', (d) => noteSystemUpdate(d as SystemPayload));
+  socket.on('system:update', (d) => noteSystemUpdate(d));
 
-  socket.on('talkers:update', (d) => renderTalkers(d as TalkersPayload));
-  socket.on('netwatch:update', (d) => renderNetwatch(d as NetwatchPayload));
+  socket.on('talkers:update', (d) => renderTalkers(d));
+  socket.on('netwatch:update', (d) => renderNetwatch(d));
   // The VPN collector emits the same payload into the page room and the card
   // room, so this handler runs for a viewer on either.
-  socket.on('vpn:update', (d) => renderVpnCard(d as VpnPayload));
+  socket.on('vpn:update', (d) => renderVpnCard(d));
   socket.on('conn:update', (d) => {
-    noteConnUpdate(d as ConnPayload);
+    noteConnUpdate(d);
     // Three EXTRA cards on the same payload: Top Countries, Top Ports and the
     // Connections Map. The Flow sankey is a later slice.
-    renderConnListCards(d as ConnCardsPayload);
-    connMap.onConnUpdate((d as ConnCardsPayload).topCountries as MapCountry[] || []);
+    renderConnListCards(d);
+    connMap.onConnUpdate(d.topCountries || []);
     // The FOURTH card on this payload: the Connection Flow sankey, which reuses
     // the connections page's renderer against the card's own elements.
-    const cd = d as { topSources?: never; topDestinations?: never };
-    renderConnFlowCard(cd.topSources, cd.topDestinations);
+    renderConnFlowCard(d.topSources, d.topDestinations);
   });
   // A SECOND subscriber to this event: `pages/dhcp.ts` draws the subnet table
   // and the pool gauge from the same payload. The live app splits it the same
   // way, with a second handler further down its file.
   socket.on('lan:overview', (d) => {
-    renderNetworks(d as LanOverviewPayload);
+    renderNetworks(d);
     // A THIRD consumer of this payload, after pages/dhcp.ts and the Networks
     // card: the IP Utilisation extra card.
-    renderIpUtilCard(d as IpUtilPayload);
+    renderIpUtilCard(d);
   });
-  socket.on('ifstatus:update', (d) => renderPhysPortsCard(d as IfStatusPayload));
-  socket.on('ping:update', (d) => onPingUpdate(d as PingPayload));
-  socket.on('ping:history', (d) => onPingHistory(d as PingHistoryPayload));
+  socket.on('ifstatus:update', (d) => renderPhysPortsCard(d));
+  socket.on('ping:update', (d) => onPingUpdate(d));
+  socket.on('ping:history', (d) => onPingHistory(d));
   // Two EXTRA cards on one event: Signal Health and Band Split.
-  socket.on('wireless:update', (d) => renderWirelessCards(d as WirelessPayload));
+  socket.on('wireless:update', (d) => renderWirelessCards(d));
   // Two more EXTRA cards on one event: Routes and BGP Peers.
-  socket.on('routing:update', (d) => renderRoutingCards(d as RoutingPayload));
+  socket.on('routing:update', (d) => renderRoutingCards(d));
   // The Bandwidth card. A SECOND subscriber to traffic:update — the chart takes
   // only its selected interface, this card takes every sample, because the
   // collector already emits per-socket for the default one.
-  socket.on('traffic:update', (d) => renderBandwidthCard(d as BwSample));
-  socket.on('firewall:update', (d) => renderFwActionsCard(d as FirewallPayload));
-  socket.on('diagnostics:update', (d) => renderDiagnosticsCard(d as DiagnosticsPayload));
-  socket.on('stream:health', (d) => renderStreamHealth(d as StreamHealth));
-  socket.on('wan:status', (d) => renderWanStatus(d as WanStatus));
-  socket.on('logs:history', (d) => onLogsHistory(d as LogEntry[]));
-  socket.on('logs:new', (d) => onLogsNew(d as LogEntry));
-  socket.on('routers:update', (d) => setBwRouters(d as BwRouter[]));
-  socket.on('router:active', (d) => setBwActiveRouter((d as { activeId?: string } | undefined)?.activeId));
+  socket.on('traffic:update', (d) => renderBandwidthCard(d));
+  socket.on('firewall:update', (d) => renderFwActionsCard(d));
+  socket.on('diagnostics:update', (d) => renderDiagnosticsCard(d));
+  socket.on('stream:health', (d) => renderStreamHealth(d));
+  socket.on('wan:status', (d) => renderWanStatus(d));
+  socket.on('logs:history', (d) => onLogsHistory(d));
+  socket.on('logs:new', (d) => onLogsNew(d));
+  socket.on('routers:update', (d) => setBwRouters(d));
+  // `?.` kept: this handler has always tolerated a missing payload.
+  socket.on('router:active', (d) => setBwActiveRouter(d?.activeId));
   // ── The grid's room events, relayed to the socket ─────────────────────────
   //
   // `dashboard-grid-store.ts` and the editor DISPATCH `dashcard:room:focus` and

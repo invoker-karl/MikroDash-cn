@@ -8,22 +8,12 @@
 
 import { el, esc } from '../dom';
 import type { Socket } from '../socket';
+// An alert row is the Go struct internal/alert.Row, generated — the bell and
+// the server cannot disagree about its fields.
+import type { AlertRow } from '../gen/payloads';
 
 /** How many alerts the panel keeps. */
 export const MAX_ALERTS = 100;
-
-export interface Alert {
-  id: number;
-  alertType: string;
-  subject?: string | null;
-  detail?: string | null;
-  label?: string | null;
-  routerName?: string | null;
-  firedAt: number;
-  resolvedAt?: number | null;
-  acknowledgedAt?: number | null;
-  acknowledgedBy?: string | null;
-}
 
 /**
  * What counts as "the same thing" for the purposes of replacing an entry.
@@ -31,9 +21,9 @@ export interface Alert {
  * Type plus subject, so `link|ether1` and `link|ether2` are different alerts and
  * two successive `link|ether1` are one.
  */
-export const alertKey = (a: Alert): string => `${a.alertType}|${a.subject || ''}`;
+export const alertKey = (a: AlertRow): string => `${a.alertType}|${a.subject || ''}`;
 
-export const isOpen = (a: Alert): boolean => !a.resolvedAt;
+export const isOpen = (a: AlertRow): boolean => !a.resolvedAt;
 
 /**
  * THE DOT MEANS UNACKNOWLEDGED OPEN ALERTS, and both halves matter.
@@ -43,7 +33,7 @@ export const isOpen = (a: Alert): boolean => !a.resolvedAt;
  * have seen something, and a dot that stayed lit through that would train them
  * to ignore it.
  */
-export const needingAttention = (alerts: Alert[]): Alert[] =>
+export const needingAttention = (alerts: AlertRow[]): AlertRow[] =>
   alerts.filter((a) => isOpen(a) && !a.acknowledgedAt);
 
 /**
@@ -52,39 +42,22 @@ export const needingAttention = (alerts: Alert[]): Alert[] =>
  * The cap is applied AFTER the merge because the two feeds arrive separately —
  * trimming either alone could drop a newer alert while keeping an older one.
  */
-export function setAlerts(open: Alert[], recent: Alert[]): Alert[] {
+export function setAlerts(open: AlertRow[], recent: AlertRow[]): AlertRow[] {
   const all = [...(open || []), ...(recent || [])];
   all.sort((a, b) => (b.firedAt || 0) - (a.firedAt || 0));
   return all.slice(0, MAX_ALERTS);
 }
 
-/**
- * Add one alert, REPLACING any open entry for the same thing.
- *
- * Without that a flapping interface buries everything else in the panel: one
- * link bouncing every thirty seconds fills all hundred slots in under an hour,
- * and the alert the operator actually needs scrolls out of reach.
- *
- * Only the OPEN entry is replaced. A resolved one for the same key is history
- * and stays.
- */
-export function addAlert(alerts: Alert[], a: Alert): Alert[] {
-  if (!a) return alerts;
-  const k = alertKey(a);
-  const kept = alerts.filter((x) => !(alertKey(x) === k && isOpen(x)));
-  return [a, ...kept].slice(0, MAX_ALERTS);
-}
-
 /** Mark ids resolved. */
-export function resolveAlerts(alerts: Alert[], ids: number[], resolvedAt: number): Alert[] {
+export function resolveAlerts(alerts: AlertRow[], ids: number[], resolvedAt: number): AlertRow[] {
   const set = new Set(ids || []);
   return alerts.map((a) => (set.has(a.id) ? { ...a, resolvedAt } : a));
 }
 
 /** Mark ids acknowledged. */
 export function ackAlerts(
-  alerts: Alert[], ids: number[], at: number, by: string | null,
-): Alert[] {
+  alerts: AlertRow[], ids: number[], at: number, by: string | null,
+): AlertRow[] {
   const set = new Set(ids || []);
   return alerts.map((a) => (set.has(a.id) ? { ...a, acknowledgedAt: at, acknowledgedBy: by } : a));
 }
@@ -111,14 +84,14 @@ export function alertAge(ts: number, now: number): string {
  * operator said they had seen it. Filtering on `isOpen` instead would leave it
  * on screen and make the button appear to do nothing.
  */
-export function panelHTML(alerts: Alert[], now: number): string {
+export function panelHTML(alerts: AlertRow[], now: number): string {
   const shown = alerts.filter((a) => !a.acknowledgedAt);
   if (!shown.length) return '<div class="notif-empty">No alerts</div>';
 
   const open = shown.filter(isOpen);
   const done = shown.filter((a) => !isOpen(a));
 
-  const row = (a: Alert): string => {
+  const row = (a: AlertRow): string => {
     const cls = `notif-item${isOpen(a) ? ' is-open' : ' is-resolved'}`;
     // COERCED, not trusted. Every other interpolation here goes through esc(),
     // and the id lands in two ATTRIBUTES where escaping is not what saves you —
@@ -151,7 +124,7 @@ export function panelHTML(alerts: Alert[], now: number): string {
 }
 
 /** Whether the dot is shown. */
-export const dotDisplay = (alerts: Alert[]): string =>
+export const dotDisplay = (alerts: AlertRow[]): string =>
   (needingAttention(alerts).length ? 'block' : 'none');
 
 // ── wiring ──────────────────────────────────────────────────────────────────
@@ -163,7 +136,7 @@ export const dotDisplay = (alerts: Alert[]): string =>
  *   already hands the router dropdown.
  */
 export function initNotifications(socket: Socket, activeRouterId: () => string): void {
-  let alerts: Alert[] = [];
+  let alerts: AlertRow[] = [];
 
   const render = (): void => {
     const list = el('notifList');
@@ -282,35 +255,33 @@ export function initNotifications(socket: Socket, activeRouterId: () => string):
     });
   }
 
-  socket.on('alerts:open', (d: { open?: Alert[]; recent?: Alert[] }) => {
+  socket.on('alerts:open', (d) => {
     if (!d) return;
     alerts = setAlerts(d.open || [], d.recent || []);
     render();
   });
 
-  socket.on('alert:fired', (a: Alert) => {
-    if (!a) return;
-    alerts = addAlert(alerts, a);
-    render();
-  });
-
-  socket.on('alert:resolved', (d: { ids?: number[]; resolvedAt?: number }) => {
-    if (!d) return;
-    alerts = resolveAlerts(alerts, d.ids || [], d.resolvedAt || Date.now());
-    render();
-  });
-
-  socket.on('alert:acked', (a: Alert) => {
+  // NO `alert:fired` OR `alert:resolved` LISTENER. There used to be one of each,
+  // and nothing on the server has ever sent either: the bell renders the stored
+  // feed from `alerts:open`, and a rule firing reaches the operator through the
+  // notification channels. With every handler typed by the event Go declares,
+  // a listener for an event nobody declares does not compile, which is how
+  // these two were found. Pushing alerts live would be a feature, not a fix.
+  socket.on('alert:acked', (a) => {
     if (!a) return;
     alerts = ackAlerts(alerts, [a.id], a.acknowledgedAt || Date.now(), a.acknowledgedBy || null);
     render();
   });
 
-  socket.on('alerts:cleared-all', (d: { ids?: number[]; at?: number }) => {
+  socket.on('alerts:cleared-all', (d) => {
     if (!d) return;
     // BOTH, and in this order: resolving is what clears the Routers page count,
     // acknowledging is what empties the bell.
-    const at = d.at || Date.now();
+    //
+    // `clearedAt`, WHICH IS THE KEY THE SERVER SENDS. This read `d.at`, which it
+    // never has, so every cleared alert was stamped with this browser's clock
+    // instead of the server's. Found when the payload's type came from the Go.
+    const at = d.clearedAt || Date.now();
     alerts = resolveAlerts(alerts, d.ids || [], at);
     alerts = ackAlerts(alerts, d.ids || [], at, null);
     render();

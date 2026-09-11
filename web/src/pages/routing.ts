@@ -17,7 +17,7 @@
 import { esc, el, resRow } from '../dom';
 import { mountAdds, mountRows } from '../resource';
 import type { Socket } from '../socket';
-import type { RoutingPayload, Peer, Route, RouteCounts, PeerSummary } from './routing-types';
+import type { RoutingPayload, Peer, Route, RouteCounts, PeerSummary } from '../gen/payloads';
 
 // Chart.js is loaded by the shell from /vendor, so it is a global here rather
 // than an import. Typed loosely on purpose: the port does not own the library's
@@ -220,8 +220,8 @@ export function initRoutingPage(socket: Socket, isVisible: (page: string) => boo
   // ── summary ────────────────────────────────────────────────────────────────
 
   function updateSummary(d: RoutingPayload): void {
-    const rc = (d.routeCounts || {}) as Partial<RouteCounts>;
-    const sm = (d.summary || {}) as Partial<PeerSummary>;
+    const rc = d.routeCounts;
+    const sm = d.summary;
     const set = (id: string, v: number | undefined): void => {
       const e = el(id);
       if (e) e.textContent = v !== undefined ? String(v) : '—';
@@ -489,7 +489,7 @@ export function initRoutingPage(socket: Socket, isVisible: (page: string) => boo
     });
   }
 
-  socket.on('routing:update', (d: RoutingPayload) => {
+  socket.on('routing:update', (d) => {
     data = d;
     updateSummary(d);
     if (isVisible('routing')) renderActiveTab();

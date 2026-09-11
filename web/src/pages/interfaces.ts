@@ -24,21 +24,7 @@
 import { esc, el, fmtMbps, fmtBytes } from '../dom';
 import type { Socket } from '../socket';
 import { portSvg } from './port-svg';
-
-export interface Iface {
-  name: string; type: string; running: boolean; disabled: boolean;
-  comment: string; macAddr: string;
-  rxMbps: number; txMbps: number; ips: string[];
-  rxBytes: number | null; txBytes: number | null;
-  errors: number | null; drops: number | null; linkDowns: number | null;
-  lastLinkUp: string;
-  errorsDelta: number | null; dropsDelta: number | null; deltaWindowMs: number | null;
-}
-
-export interface IfStatusPayload { ts: number; routerId: string; interfaces: Iface[] }
-
-export interface IfName { name: string; running: boolean; disabled: boolean }
-export interface IfNamesPayload { ts: number; total: number; interfaces: IfName[] }
+import type { Interface } from '../gen/payloads';
 
 const IFACE_SPARK_LEN = 30;
 // The empty-address placeholder in a tile: U+00A0, a NON-BREAKING space. A
@@ -164,7 +150,7 @@ function iflLastUp(s: string): string {
   return '<span title="' + esc(s) + '">' + out + '</span>';
 }
 
-interface IflCol { str?: boolean; get: (i: Iface) => string | number | null }
+interface IflCol { str?: boolean; get: (i: Interface) => string | number | null }
 
 // Sortable columns. `str` marks the ones compared as text; everything else is
 // numeric, including Last Up, which sorts on parsed time rather than the string.
@@ -193,7 +179,7 @@ const IFL_COLS: Record<string, IflCol> = {
 // while nothing else needed it, and the Dashboard's Physical Ports card is what
 // showed that nesting had also left it undrivable by a gate. It closes over
 // nothing: `el`, `esc` and `portSvg` are all module-level.
-export function renderIfPorts(ifaces: Iface[]): void {
+export function renderIfPorts(ifaces: Interface[]): void {
   const panel = el('ifPortsPanel');
   if (!panel) return;
   const ethers = ifaces.filter((i) => i.type === 'ether');
@@ -224,7 +210,7 @@ export function initInterfacesPage(socket: Socket, isVisible: (page: string) => 
   let typeFilter = '';
   // Last payload, kept so switching view or type filter can re-render the list
   // immediately instead of waiting for the next poll.
-  let lastIfaces: Iface[] = [];
+  let lastIfaces: Interface[] = [];
   let view = 'sm';
   const peaks: Record<string, { rx: number; tx: number }> = {};
   // Per-interface ring buffer of combined rx+tx Mbps samples for the sparkline.
@@ -239,7 +225,7 @@ export function initInterfacesPage(socket: Socket, isVisible: (page: string) => 
 
   // ── The list view ─────────────────────────────────────────────────────────
 
-  function iflSortRows(rows: Iface[]): Iface[] {
+  function iflSortRows(rows: Interface[]): Interface[] {
     const col = IFL_COLS[sort.key];
     if (!col) return rows;
     const dir = sort.dir;
@@ -285,7 +271,7 @@ export function initInterfacesPage(socket: Socket, isVisible: (page: string) => 
     renderIfaceList(lastIfaces);
   }
 
-  function renderIfaceList(ifaces: Iface[]): void {
+  function renderIfaceList(ifaces: Interface[]): void {
     const tbody = el('ifaceListBody');
     if (!tbody) return;
     let rows = ifaces.filter((i) => !typeFilter || i.type === typeFilter);
@@ -355,7 +341,7 @@ export function initInterfacesPage(socket: Socket, isVisible: (page: string) => 
 
   // ── The Interface Types card ──────────────────────────────────────────────
 
-  function renderIfTypes(ifaces: Iface[]): void {
+  function renderIfTypes(ifaces: Interface[]): void {
     const panel = el('ifTypeGrid');
     if (!panel) return;
     // Count by type, preserving insertion order.
@@ -387,7 +373,7 @@ export function initInterfacesPage(socket: Socket, isVisible: (page: string) => 
 
   // ── The tile grid ─────────────────────────────────────────────────────────
 
-  function renderTiles(ifaces: Iface[]): void {
+  function renderTiles(ifaces: Interface[]): void {
     if (!ifaceGrid) return;
     const grid = ifaceGrid;
 
@@ -536,12 +522,12 @@ export function initInterfacesPage(socket: Socket, isVisible: (page: string) => 
 
   // ── Wiring ────────────────────────────────────────────────────────────────
 
-  socket.on('ifstatus:names', (data: IfNamesPayload) => {
+  socket.on('ifstatus:names', (data) => {
     const ifaces = (data && data.interfaces) || [];
     rebuildIfaceSelect(ifaces.filter((i) => i.running && !i.disabled).map((i) => i.name));
   });
 
-  socket.on('ifstatus:update', (data: IfStatusPayload) => {
+  socket.on('ifstatus:update', (data) => {
     const ifaces = (data && data.interfaces) || [];
     lastIfaces = ifaces;
     if (ifaceCount) {

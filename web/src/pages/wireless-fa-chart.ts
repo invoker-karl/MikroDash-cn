@@ -23,8 +23,9 @@
 import { el } from '../dom';
 import {
   spectrumConfig, spectrumData, spectrumBandGeometry, FA_BAND_LEGEND,
-  type FaRow, type LegendItem,
+  type LegendItem,
 } from './wireless-fa';
+import type { WifiscanRow } from '../gen/payloads';
 
 interface ChartArea { top: number; bottom: number }
 interface ChartCtx {
@@ -100,7 +101,7 @@ function bandPlugin(currentChannelMhz: () => number | null) {
  * registered last.
  */
 export function makeSpectrumChart(deps: {
-  rows: () => FaRow[];
+  rows: () => WifiscanRow[];
   currentChannelMhz: () => number | null;
   legendLabels: (chart: unknown) => LegendItem[];
   legendClick: (e: unknown, item: LegendItem, legend: unknown) => void;
@@ -128,7 +129,7 @@ export function makeSpectrumChart(deps: {
  * frame, and an animated transition between two unrelated spectra reads as the
  * chart lagging rather than as motion.
  */
-export function renderSpectrum(rows: FaRow[]): void {
+export function renderSpectrum(rows: WifiscanRow[]): void {
   if (!chart) return;
   const d = spectrumData(rows);
   const [signal, noise] = chart.data.datasets;

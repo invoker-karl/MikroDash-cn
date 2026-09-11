@@ -12,16 +12,7 @@
 // card does anything clever — it is a status, a name and an address.
 
 import { esc, el } from '../dom';
-
-export interface NetwatchHost {
-  status?: string;
-  name?: string;
-  host?: string;
-}
-
-export interface NetwatchPayload {
-  hosts?: NetwatchHost[];
-}
+import type { NetwatchPayload } from '../gen/payloads';
 
 export function renderNetwatch(data: NetwatchPayload): void {
   const tbody = el('netwatchTable');
