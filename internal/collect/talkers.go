@@ -83,6 +83,7 @@ type Talkers struct {
 	// unavailable latches. See the header.
 	unavailable bool
 	lastFp      string
+	lastEmit    time.Time
 	last        *TalkersPayload
 	loop        *pollLoop
 	now         func() time.Time
@@ -305,11 +306,23 @@ func BuildTalkers(rows []routeros.Reply, topN int) []TalkerDevice {
 	return devices
 }
 
+// talkersHeartbeat is how long an unchanged payload may be suppressed.
+//
+// There was none. A quiet router — nobody using bandwidth, or the same devices
+// at the same rates — sent one payload and then nothing, and the Dashboard's Top
+// Talkers card went stale 23 seconds later (its threshold is the poll plus the
+// 20-second grace) on a router answering perfectly well. Reported on CHR Test
+// and a hAP AC2; the busy router beside them never showed it, because its rates
+// changed every poll. Ten seconds, as connections and bandwidth use: well inside
+// the shortest threshold the card can have.
+const talkersHeartbeat = 10 * time.Second
+
 func (t *Talkers) commit(rows []routeros.Reply) {
 	devices := BuildTalkers(rows, t.topN)
+	now := t.now()
 
 	p := &TalkersPayload{
-		TS: t.now().UnixMilli(), Devices: devices,
+		TS: now.UnixMilli(), Devices: devices,
 		PollMs: t.reportedPollMs(), Available: true,
 	}
 	t.last = p
@@ -318,10 +331,11 @@ func (t *Talkers) commit(rows []routeros.Reply) {
 	// original's does — a device renamed in Kid Control does not by itself
 	// justify a repaint, and the next real change carries the new name with it.
 	fp := talkersFingerprint(devices)
-	if fp == t.lastFp {
+	if fp == t.lastFp && now.Sub(t.lastEmit) < talkersHeartbeat {
 		return
 	}
 	t.lastFp = fp
+	t.lastEmit = now
 	EvTalkersUpdate.Emit(t.emit, talkersRoom, *p)
 }
 
