@@ -563,17 +563,27 @@ trade. Build explicitly when you need a binary.
 **Risk appetite: this app is in ACTIVE DEVELOPMENT, not maintenance.** Bias toward
 making the change. The safety here is mechanical — `sh tools/verify.sh`, the ledgers
 that fail in both directions, mutation testing and live verification — and
-hesitation is not a net. A change that is wrong and caught is cheaper than one that
-is never attempted.
+hesitation is not a net: measured over one long session, stopping to reconsider
+prevented nothing the gates did not already catch. A change that is wrong and caught
+is cheaper than one that is never attempted.
 
-**`Collector-Architecture.md` carries the full appetite, the end state and the
-replacing-is-the-default rule, and it applies repo-wide.** It is gated, so unlike
-this section it cannot quietly go stale. Read it before a structural change.
+**The end state is simple, efficient and uniform** — one mechanism per job; fewer
+router channels, measured; every part answering the same questions the same way.
+Efficiency is the only one of the three a number can settle, and the other two are
+first-class reasons to change a design, not taste (see 3). **Check a step against
+that end state, not against the step before it.** When a plan's wording stops
+matching the code, the goal moved or the plan was wrong; either way it is raised,
+not quietly re-scoped.
 
 This line used to read "these guidelines bias toward caution over speed", and it
 was measured causing harm: over one long session it produced a rewrite that kept
 three empty maps for hypothetical future callers, kept two entry points where one
 would serve, and re-scoped a step rather than delivering it.
+
+**These rules live here and nowhere else.** From 2026-09-10 they were kept in
+`Collector-Architecture.md`, on the reasoning that it is gated — but its gate checks
+the collector table and the measured facts, never those paragraphs, and an
+architecture document is the wrong home for how to work. Moved back 2026-09-11.
 
 ## 1. Think Before Coding
 
@@ -588,7 +598,9 @@ Before implementing:
 **ASK ABOUT THE DESIGN, NOT ABOUT WHETHER TO PROCEED.** The shape of a mechanism, a contract or
 payload change, anything with more than one reasonable end-state, and any time a step's intent no
 longer matches the code — re-scoping a step is a design question, not a local decision. Permission
-to do work already agreed, or to move to the next step, is not.
+to do work already agreed, or to move to the next step, is not; nor is a change being large,
+touching many files, or removing something old — those are the job. **Always ask** before a push,
+a tag or a release; before anything that writes to a router; and before deleting operator data.
 
 ## 2. Simplicity First
 

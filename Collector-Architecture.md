@@ -3,96 +3,24 @@
 **What this is.** The current shape of MikroDash's collector layer, and why it is
 that shape. Not a plan and not a history: it describes what the code does today.
 
-**It is a living document, and it is gated.** `internal/verify/architecture_test.go`
-re-measures every number and every collector name below, and fails in both
-directions — a claim that has gone stale is a failure, and so is a collector that
-exists and is not described here. That gate is the only reason to trust this file;
-CLAUDE.md's most expensive recurring defect is a premise that expired with nothing
-failing, and a document nobody re-measures is exactly that defect in prose.
-
-**When you change the collector layer, change this file in the same commit.**
+**It is gated.** `internal/verify/architecture_test.go` re-measures the collector
+table and every number under "Measured facts", and fails in both directions: a
+claim that has gone stale fails, and so does a collector that exists and is not
+described here. A change to the collector layer changes this file in the same
+commit.
 
 ---
 
-## Working rules: risk appetite and the end state
+## Design goals
 
-**These apply repo-wide, not only to the collector layer.** They live here because
-this file is gated and the plan documents are disposable.
+The collector layer is built to be **simple, efficient and uniform**, and each goal
+is a concrete property of the design rather than an aspiration:
 
-### The end state this is built toward
-
-MikroDash's collector layer exists to be **simple, efficient and uniform**. Those
-are three goals, not one with two decorations:
-
-| goal | what it means here | what violating it looks like |
+| goal | the property | where it shows |
 |---|---|---|
-| **simple** | one mechanism per job | two entry points for one thing, kept because unifying them is work |
-| **efficient** | fewer router channels, measured | a second channel on a menu already open |
-| **uniform** | every collector answers the same questions the same way | a collector with a hand-written exception nobody else has |
-
-**Efficiency is the only one of the three that a number can settle.** Simplicity
-and uniformity are judged by whether the next person has one shape to learn or
-several, and they are **first-class reasons to change a design** — equal with
-efficiency, not subordinate to it.
-
-### Risk appetite
-
-This app is in **active development**, not maintenance. The safety is mechanical:
-`sh tools/verify.sh`, the ledgers that fail in both directions, mutation testing
-and live verification. Those are the net. **Hesitation is not a net** — measured
-over one long session, stopping to reconsider prevented nothing that the gates did
-not already catch, while the gates caught everything that mattered.
-
-So: **bias toward making the change.** A change that is wrong and caught is
-cheaper than one that is never attempted.
-
-### Replacing is the default
-
-**In a system being rebuilt, preserving is what needs the justification.**
-
-- **Do not keep a mechanism with no instances** because a future caller might want
-  it. Delete it; git history holds the reasoning. Three empty maps were kept this
-  way — `keepAliveFor`, `roomlessCollectors`, `notRetunable` — each with a comment
-  explaining why the empty container was worth having. `keepAliveFor` has entries
-  and stays; the other two were deleted in phase 6.1, and the gates that read them
-  now assert the property directly.
-- **Do not keep two forms of one thing** because unifying them is work. If a new
-  shape supersedes an old one, migrate the callers and delete the old one in the
-  same change.
-- **The Node app is not a reference.** "A departure from live" is not a category
-  that requires defending. It was the acceptance criterion for the port, and the
-  port ended at the v0.8.0 cutover.
-- **Understanding a quirk before changing it is a step, not a veto.** Find out
-  whether it is load-bearing, say which you concluded, and then act on the answer.
-
-What survives from the old rule: **deliberate changes are fine, silent ones are
-not.** A change that moves the rendered page, the payload contract or an
-interaction belongs in the commit message and in `Changes.md`, with the gate you
-re-aimed and why.
-
-### What to ask about, and what not to
-
-The distinction is *what*, never *how often*.
-
-**Ask about the design.** The shape of a mechanism; a contract or payload change;
-anything with more than one reasonable end-state; and — this is the one that was
-missed — **any time a step's intent no longer matches the code.** Re-scoping a
-step is a design question, not a local decision.
-
-**Do not ask whether to proceed.** Permission to do work already agreed, or to
-continue to the next step, is not a design question.
-
-**Do not ask merely because a change is large, touches many files, or removes
-something old.** Those are the job.
-
-**Still always ask** before `git push`, a tag or a release; before anything that
-writes to a router; and before deleting operator data.
-
-### Measuring drift
-
-A step is checked against **the end state**, not against the step before it. When
-a plan's wording stops matching the code, that is a signal the goal moved or the
-plan was wrong — either way it is raised, not quietly re-scoped.
+| **simple** | one mechanism per job | one demand rule (`Session.Wants`), one stream entry point (`JoinStream`), one place a collector starts (`ResumeCollector`) |
+| **efficient** | as few router channels as possible | one read per menu for every asker; a pushed stream in place of polling where the router supports it |
+| **uniform** | every collector is described the same way | how it acquires, how it derives, and who it is for, each declared in the same place and each checked by a gate |
 
 ## The shape, in one picture
 
@@ -161,6 +89,14 @@ reports nonsense — 0% packet loss for ever, dropped log lines — and nothing 
    `/ip/firewall/connection/print` this way.
 4. `internal/roslimit` caps commands in flight at 8 per router.
 
+**Most sharing happens one level up, between collectors rather than between
+subscriptions.** `arp` and `dhcpLeases` each own their menu, and their consumers
+read the derived index through a capability (see "The in-process edges" below)
+instead of subscribing themselves. So a menu usually has one subscriber, and a
+subscriber count understates how much is shared. The subscription-level share
+exists — `conns` and `bandwidth` on the connection table — but only while both are
+wanted at once; across seven pages on 2026-09-10 no menu had two.
+
 ### Streams: a second filler for the same entry
 
 A cache entry can be kept current by an open channel instead of a read —
@@ -228,10 +164,10 @@ func FoldX(prior State, row routeros.Reply, now int64) (Sample, State)
 `FoldPing`, `FoldLog` and `FoldTraffic` are the three folds — the three set B
 acquisitions. Everything else is a map.
 
-**The purity is load-bearing in one specific way that bit three times.** `append`
-into a slice with spare capacity writes *through* to the caller's backing array,
-and a ring that has been trimmed always has spare capacity. Every fold copies, and
-each says so where it does.
+**The purity is load-bearing in one specific way.** `append` into a slice with
+spare capacity writes *through* to the caller's backing array, and a ring that has
+been trimmed always has spare capacity. Every fold copies, and each says so where
+it does.
 
 **24 of 27 collectors have an extracted derivation.** The three without are
 exactly the set B streams, whose derivation is per-pushed-row and lives in the
@@ -245,12 +181,9 @@ fold. `internal/verify/derivations_test.go` is the ledger, and it fails both way
 
 A collector declares its **rooms** in `internal/collect/rooms.go` — one line per
 audience, `page-<key>` for a page and `dash-card-<name>` for a dashboard card.
-Nothing else states the audience: an `emit` takes the declaration.
-
-That declaration used to be written twice — once at the emit, once by hand in the
-server's blur logic — and the two disagreed **five times**, each one a dashboard
-card that silently stopped updating for anybody who had visited the owning page
-and left.
+Nothing else states the audience: an `emit` takes the declaration, and demand
+reads the same one, so what a collector sends to and what keeps it running cannot
+disagree.
 
 ### Demand
 
@@ -291,20 +224,14 @@ reason is a **hold** naming the collectors it needs:
 | `devices` | the Devices page reads a payload per router | `devicesFeeds` |
 | `warm` | the page must be able to say "up" instantly | **nothing** — a connection only |
 
-**A hold is inert unless something takes it.** `Reasons.Devices` and
-`devicesFeeds` existed from 4.3 and nothing ever called `Retain(id, "devices")`
-— declared and never filled, exactly like `topology.ARPIP`. It cost nothing while
-`ifStatus` ran from connect, and started costing when 4.2b gated `ifStatus` on
-demand: the Devices page's WAN RX/TX column was empty for every router.
-`internal/verify/holds_test.go` fails in both directions now — a reason read and
-never taken, and a reason taken and never read.
+**A hold is inert unless something takes it.** A reason with a feed list runs
+nothing until some caller `Retain`s it. `internal/verify/holds_test.go` fails in
+both directions: a reason read and never taken, and a reason taken and never read.
 
-**And the holds are asked WITHOUT the viewer term.** `Needs` returns true for
+**The holds are asked without the viewer term.** `Needs` returns true for
 everything while a viewer is present, because it answers "what is this session
-allowed to run". `Wants` therefore clears `Viewer` before asking it, so a hold
-still counts on the router somebody is looking at — and page gating still decides
-the rest. Getting that wrong for one commit suspended four of the six alert rules
-on whichever router was selected.
+allowed to run". `Wants` clears `Viewer` before asking it, so a hold still counts
+on the router somebody is looking at, and room occupancy decides the rest.
 
 ### Rooms a collector does not emit to
 
@@ -361,15 +288,8 @@ sends it to the socket every two seconds while the card is on screen.
 | Derivation | payloads/min | one counter in the session's single emit closure |
 | Views | collectors running of those demand can gate, occupied rooms, dormant, and the holds | `Session.Wants`, `hub.Occupants`, `Session.holds` |
 
-**Coalescing does not show up as a subscriber count, and the card learned that
-the hard way.** The section above was first written as "shared reads" — the menus
-several collectors want — on the assumption that the read cache's saving is
-visible there. Measured on the live fleet across seven pages on 2026-09-10: no
-menu ever has more than one subscriber. This app coalesces a level UP, at the
-collector rather than the subscription: `arp` and `dhcpLeases` own their menus and
-four consumers each read the derived index rather than subscribing themselves. So
-a subscriber count is structurally 1, and a section keyed on it could never have
-rendered. Listing the menus is what that section was actually reaching for.
+The card lists menus rather than subscriber counts because of where sharing
+happens: see "Most sharing happens one level up" under Layer 1.
 
 ---
 
@@ -387,12 +307,9 @@ Three, layered rather than competing:
 which knows nothing about dormancy cannot undo it. **`roslimit`** sits underneath
 all three, capping commands in flight per router.
 
-Two gates were retired. The **page-room switchboard** — a hand-written
-page→collector map — is replaced by demand. The **idle collector prune**
-(`applyReasons`) asked the hold half of the same question for a session with no
-viewer; it is now `applyDemand` asking `Wants`, so there is one rule rather than
-two that happened to agree. The session's idle grace remains: it closes the router
-*connection*, which is a different question.
+The session's idle grace is separate from all three: it closes the router
+*connection* when nothing holds the session, which is a different question from
+whether a collector runs.
 
 ---
 
@@ -432,9 +349,8 @@ the rooms it emits to, and `—` means router-wide or nothing.
 | `wireless` | `/interface/wifi/registration-table/print` | `BuildWirelessView` | `page-wifi-clients`, `dash-card-wireless` |
 
 **Two collectors have no `Start()`.** `packages` and `routing` are page-gated
-only: the session brings them up with `Resume()` and nothing else. That is not a
-quirk to tidy — it is what "page-gated" means in this design — but it did hide
-them from a gate for a while, so it is written down.
+only: the session brings them up with `Resume()` and nothing else. That is what
+"page-gated" means in this design, not an omission.
 
 **The in-process edges** — one collector reading another's output — are declared
 as capabilities, never as a pointer to the producer: `RateSource`, `LeaseSource`,

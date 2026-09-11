@@ -74,11 +74,12 @@ type AcqLayer struct {
 	// It first listed the menus with the most SUBSCRIBERS, on the assumption
 	// that several collectors routinely share one read. Measured on the live
 	// fleet across seven pages on 2026-09-10: no menu ever had more than one.
-	// The coalescing in this app happens a level up — one collector owns a menu
-	// and the others read its derived index, which is exactly what `arp` and
-	// `dhcpLeases` are for — so a subscriber count is structurally 1 and the
-	// section would never have rendered. Listing the menus is the true version
-	// of what that section was reaching for.
+	// Most coalescing in this app happens a level up — one collector owns a
+	// menu and the others read its derived index, which is what `arp` and
+	// `dhcpLeases` are for. The one subscription-level share, `conns` and
+	// `bandwidth` on the connection table, needs both wanted at once, so the
+	// section would almost never have rendered. Listing the menus is the true
+	// version of what it was reaching for.
 	Reads []MenuLoad `json:"reads"`
 	// More is how many menus the list left out. Zero means it is complete.
 	More int `json:"more"`
