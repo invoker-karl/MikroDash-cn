@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"mikrodash/internal/hub"
 	"strings"
 	"testing"
 
@@ -31,7 +32,7 @@ func lease(ip, mac, status string) routeros.Reply {
 }
 
 func newTestLeases(f *fakeLeaseReader) *DHCPLeases {
-	return NewDHCPLeases(f, func(string, string, any) {}, 0)
+	return NewDHCPLeases(f, hub.Relay{}, 0)
 }
 
 // TestAFullReadREPLACESTheTable is the one with a confirmed field failure behind

@@ -84,7 +84,7 @@ func (s *Server) settingsSave(w http.ResponseWriter, r *http.Request) {
 			writeJSONErr(w, http.StatusInternalServerError, "could not save the settings")
 			return
 		}
-		s.hub.BroadcastAll("settings:pages", store.PageSettings(store.Defaults()))
+		EvSettingsPages.BroadcastAll(s.hub, store.PageSettings(store.Defaults()))
 		writeJSON(w, map[string]any{"ok": true, "requiresRestart": false})
 		return
 	}
@@ -131,7 +131,7 @@ func (s *Server) settingsSave(w http.ResponseWriter, r *http.Request) {
 		s.sessions.ApplyPollRetunes(updates, next)
 	}
 
-	s.hub.BroadcastAll("settings:pages", store.PageSettings(next))
+	EvSettingsPages.BroadcastAll(s.hub, store.PageSettings(next))
 	writeJSON(w, map[string]any{"ok": true, "requiresRestart": false})
 }
 

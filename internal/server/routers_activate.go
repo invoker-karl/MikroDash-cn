@@ -136,7 +136,7 @@ func (s *Server) routerActivate(w http.ResponseWriter, r *http.Request) {
 	// and `syncPool` applies a changed flag to live sessions, so an activation
 	// no longer decides who records.
 	s.broadcastRouterList()
-	s.hub.Broadcast("router-"+id, "router:active", map[string]any{"activeId": id})
+	EvRouterActive.Broadcast(s.hub, "router-"+id, map[string]any{"activeId": id})
 }
 
 // moveFollowers re-rooms the connections sitting on `from` onto `to`.

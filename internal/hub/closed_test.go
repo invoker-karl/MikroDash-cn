@@ -28,9 +28,9 @@ func TestDeliverAfterRemoveDoesNotPanic(t *testing.T) {
 
 	// Every fan-out path, because they all reach `deliver` with a `*Client` a
 	// caller was already holding.
-	h.Send(c, "system:update", map[string]any{"cpu": 1})
-	h.Broadcast("room", "system:update", map[string]any{"cpu": 1})
-	h.BroadcastAll("system:update", map[string]any{"cpu": 1})
+	h.send(c, "system:update", map[string]any{"cpu": 1})
+	h.broadcast("room", "system:update", map[string]any{"cpu": 1})
+	h.broadcastAll("system:update", map[string]any{"cpu": 1})
 }
 
 // TestRemoveRacingDeliverDoesNotPanic is the shape that actually happened: a
@@ -47,7 +47,7 @@ func TestRemoveRacingDeliverDoesNotPanic(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 50; j++ {
-				h.Broadcast("room", "tick", j)
+				h.broadcast("room", "tick", j)
 			}
 		}()
 		go func() {
@@ -67,8 +67,8 @@ func TestAFrameAfterRemoveIsNotCountedAsDropped(t *testing.T) {
 	h.Add(c)
 	h.Remove(c)
 
-	h.Send(c, "one", 1)
-	h.Send(c, "two", 2)
+	h.send(c, "one", 1)
+	h.send(c, "two", 2)
 	if got := c.Dropped(); got != 0 {
 		t.Errorf("Dropped = %d after removal; a disconnected browser is not a slow one", got)
 	}
@@ -84,7 +84,7 @@ func TestASlowClientStillCountsDrops(t *testing.T) {
 
 	// One fills the buffer, the rest have nowhere to go. Nothing drains it.
 	for i := 0; i < 5; i++ {
-		h.Broadcast("room", "tick", i)
+		h.broadcast("room", "tick", i)
 	}
 	if got := c.Dropped(); got == 0 {
 		t.Error("a client that never drains reported no dropped frames")

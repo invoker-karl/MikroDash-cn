@@ -424,7 +424,7 @@ func (s *Server) userDelete(w http.ResponseWriter, r *http.Request, sess *Sessio
 		}
 	}
 
-	s.hub.BroadcastAll("perms:changed", map[string]any{})
+	EvPermsChanged.BroadcastAll(s.hub, map[string]any{})
 	writeJSON(w, map[string]any{"ok": true})
 }
 

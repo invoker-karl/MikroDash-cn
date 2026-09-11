@@ -1,6 +1,7 @@
 package session
 
 import (
+	"mikrodash/internal/hub"
 	"testing"
 
 	"mikrodash/internal/collect"
@@ -8,7 +9,8 @@ import (
 	"mikrodash/internal/store"
 )
 
-func noEmit(string, string, any) {}
+// noEmit sends nowhere: a zero Relay drops every event.
+var noEmit = hub.Relay{}
 
 // TestApplyPollRetunesReachesTheCollectors.
 func TestApplyPollRetunesReachesTheCollectors(t *testing.T) {

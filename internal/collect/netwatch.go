@@ -206,7 +206,7 @@ func (n *Netwatch) apply(rows []routeros.Reply, err error) {
 	n.last = payload
 	n.mu.Unlock()
 
-	n.emit(netwatchRooms.Join(), "netwatch:update", payload)
+	EvNetwatchUpdate.Emit(n.emit, netwatchRooms.Join(), *payload)
 }
 
 func (n *Netwatch) Last() *NetwatchPayload {

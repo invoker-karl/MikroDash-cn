@@ -258,7 +258,7 @@ func (cn *conn) revalidator(ctx context.Context) {
 			cn.srv.auth.Forget(cn.cookie)
 			live, err := cn.srv.auth.Validate(cn.cookie)
 			if err != nil {
-				cn.srv.hub.Send(cn.c, "session:expired", map[string]any{})
+				EvSessionExpired.Send(cn.srv.hub, cn.c, map[string]any{})
 				// Give the frame a moment to leave before the socket goes.
 				time.Sleep(200 * time.Millisecond)
 				_ = cn.ws.Close(websocket.StatusPolicyViolation, "session expired")
@@ -268,7 +268,7 @@ func (cn *conn) revalidator(ctx context.Context) {
 			if cn.routerID != "" && !live.CanReadRouter(cn.routerID) {
 				// `releaseRouter` leaves every room this connection is in.
 				cn.releaseRouter()
-				cn.srv.hub.Send(cn.c, "access:revoked", map[string]any{})
+				EvAccessRevoked.Send(cn.srv.hub, cn.c, map[string]any{})
 			}
 		}
 	}
@@ -507,7 +507,7 @@ func (cn *conn) selectRouter(id string) {
 	}
 	if !cn.sess.CanReadRouter(id) {
 		log.Printf("[ws] %s: router:select %s REFUSED — no router:read grant", cn.c.ID, id)
-		cn.srv.hub.Send(cn.c, "access:none", map[string]any{})
+		EvAccessNone.Send(cn.srv.hub, cn.c, map[string]any{})
 		return
 	}
 	log.Printf("[ws] %s: router:select %s", cn.c.ID, id)
@@ -518,7 +518,7 @@ func (cn *conn) selectRouter(id string) {
 	rs, err := cn.srv.sessions.Acquire(id)
 	if err != nil {
 		log.Printf("[ws] %s: router:select %s FAILED to acquire: %v", cn.c.ID, id, err)
-		cn.srv.hub.Send(cn.c, "router:status", map[string]any{
+		session.EvRouterStatus.Send(cn.srv.hub, cn.c, map[string]any{
 			"routerId": id, "connected": false, "reason": err.Error()})
 		return
 	}
@@ -587,8 +587,8 @@ func (cn *conn) selectRouter(id string) {
 	cn.routerID = id
 	cn.rsession = rs
 	cn.srv.hub.Join(cn.c, "router-"+id)
-	cn.srv.hub.Send(cn.c, "router:active", map[string]any{"activeId": id})
-	cn.srv.hub.Send(cn.c, "router:status", map[string]any{
+	EvRouterActive.Send(cn.srv.hub, cn.c, map[string]any{"activeId": id})
+	session.EvRouterStatus.Send(cn.srv.hub, cn.c, map[string]any{
 		"routerId": id, "connected": rs.Connected(), "reason": rs.LastError()})
 	cn.sendPooledStatus()
 	// The card subscriptions the grid sent before a router existed — see
@@ -608,7 +608,7 @@ func (cn *conn) selectRouter(id string) {
 	// rather than `is-collector-off` — broken rather than off. Its consumer,
 	// `applyCollectionConfig` in web/src/stale.ts, was written and gated and
 	// called by nothing. Found 2026-08-28 by tools/live-socket-diff.js.
-	cn.srv.hub.Send(cn.c, "collection:config", collection.Payload(id, rs.Collection()))
+	EvCollectionConfig.Send(cn.srv.hub, cn.c, collection.Payload(id, rs.Collection()))
 	// AND THE DORMANT SET, which the live app sends on the same handshake
 	// (`index.js:4209`, the line after its `collection:config`) and for the
 	// reason its comment gives: "a card for a disabled collector must be marked
@@ -620,7 +620,7 @@ func (cn *conn) selectRouter(id string) {
 	// The live-socket-diff tool, which showed the live app sending this event
 	// and the port not — on a router where nothing was dormant, so the emit was
 	// the whole difference.
-	cn.srv.hub.Send(cn.c, "collection:status", map[string]any{
+	session.EvCollectionStatus.Send(cn.srv.hub, cn.c, map[string]any{
 		"routerId": id, "dormant": rs.DormantCollectors()})
 
 	// ── THE ROUTER-WIDE CHROME, REPLAYED ────────────────────────────────────
@@ -640,16 +640,16 @@ func (cn *conn) selectRouter(id string) {
 	// A collector that has produced nothing yet sends nothing: `nil` here would
 	// be a payload claiming the router has no interfaces.
 	if last := rs.IfStatus().Last(); last != nil {
-		cn.srv.hub.Send(cn.c, "ifstatus:names", collect.NamesOf(last))
+		collect.EvIfstatusNames.Send(cn.srv.hub, cn.c, *collect.NamesOf(last))
 	}
 	if last := rs.System().Last(); last != nil {
-		cn.srv.hub.Send(cn.c, "system:update", last)
+		collect.EvSystemUpdate.Send(cn.srv.hub, cn.c, *last)
 	}
 	if last := rs.Traffic().LastWan(); last != nil {
-		cn.srv.hub.Send(cn.c, "wan:status", last)
+		collect.EvWanStatus.Send(cn.srv.hub, cn.c, *last)
 	}
 	if last := rs.DHCPNetworks().Last(); last != nil {
-		cn.srv.hub.Send(cn.c, "lan:wan", map[string]any{"ts": last.TS, "wanIp": last.WanIP})
+		collect.EvLanWan.Send(cn.srv.hub, cn.c, map[string]any{"ts": last.TS, "wanIp": last.WanIP})
 	}
 	// ── SUBSCRIBE TO THE DEFAULT INTERFACE, BEFORE ANY PICKER TOUCHES IT ──
 	//
@@ -676,7 +676,7 @@ func (cn *conn) selectRouter(id string) {
 	// cached schema on this and re-asks, because `permitted` is per-router;
 	// announcing it before the switch completed would answer for the router we
 	// are leaving.
-	cn.srv.hub.Send(cn.c, "router:switched", map[string]any{"activeId": id})
+	EvRouterSwitched.Send(cn.srv.hub, cn.c, map[string]any{"activeId": id})
 }
 
 // sendPageSettings tells this browser which pages it may draw and which
@@ -723,7 +723,7 @@ func (cn *conn) sendPageSettings() {
 		log.Printf("[settings] page settings: %v", err)
 		return
 	}
-	cn.srv.hub.Send(cn.c, "settings:pages", store.PageSettings(cfg))
+	EvSettingsPages.Send(cn.srv.hub, cn.c, store.PageSettings(cfg))
 }
 
 // sendOpenAlerts is the notification bell's INITIAL state.
@@ -774,7 +774,7 @@ func (cn *conn) sendOpenAlerts(routerID string) {
 	// ONE NAME MAP for up to 250 rows, built once. Per-row it would be 250 reads
 	// of routers.json to answer a question with one answer.
 	names := cn.srv.allRouterNames()
-	cn.srv.hub.Send(cn.c, "alerts:open", map[string]any{
+	EvAlertsOpen.Send(cn.srv.hub, cn.c, map[string]any{
 		"routerId": routerID,
 		"open":     alert.MakeRows(open, names),
 		"recent":   alert.MakeRows(recent, names),
@@ -900,14 +900,14 @@ func (cn *conn) resumePage(page string) {
 		// this page — and the payload replayed here is the last one from before
 		// that suspension.
 		if last := cn.rsession.Netwatch().Last(); last != nil {
-			cn.srv.hub.Send(cn.c, "netwatch:update", last)
+			collect.EvNetwatchUpdate.Send(cn.srv.hub, cn.c, *last)
 		}
 		if last := cn.rsession.Talkers().Last(); last != nil {
-			cn.srv.hub.Send(cn.c, "talkers:update", last)
+			collect.EvTalkersUpdate.Send(cn.srv.hub, cn.c, *last)
 		}
 		if p := cn.rsession.Ping(); p != nil {
 			if last := p.Last(); last != nil {
-				cn.srv.hub.Send(cn.c, "ping:update", last)
+				collect.EvPingUpdate.Send(cn.srv.hub, cn.c, *last)
 			}
 		}
 		// ── ROUTES AND BGP PEERS ────────────────────────────────────────────
@@ -921,7 +921,7 @@ func (cn *conn) resumePage(page string) {
 		// The replay is still needed, and for the same reason: without it both
 		// cards show em dashes until the next tick, which is up to 60s.
 		if last := cn.rsession.Routing().Last(); last != nil {
-			cn.srv.hub.Send(cn.c, "routing:update", last)
+			collect.EvRoutingUpdate.Send(cn.srv.hub, cn.c, *last)
 		}
 		if p := cn.rsession.Ping(); p != nil {
 			hist := p.History()
@@ -937,75 +937,75 @@ func (cn *conn) resumePage(page string) {
 					out["minRtt"] = last.MinRTT
 					out["maxRtt"] = last.MaxRTT
 				}
-				cn.srv.hub.Send(cn.c, "ping:history", out)
+				EvPingHistory.Send(cn.srv.hub, cn.c, out)
 			}
 		}
 	case "dns":
 		if last := cn.rsession.DNS().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "dns:update", replay)
+			collect.EvDnsUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "bridges":
 		if last := cn.rsession.Bridges().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "bridges:update", replay)
+			collect.EvBridgesUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "vlans":
 		if last := cn.rsession.Vlans().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "vlans:update", replay)
+			collect.EvVlansUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "wan":
 		if last := cn.rsession.Wan().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "wan:update", replay)
+			collect.EvWanUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "packages":
 		if last := cn.rsession.Packages().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "packages:update", replay)
+			collect.EvPackagesUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "routing":
 		if last := cn.rsession.Routing().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "routing:update", replay)
+			collect.EvRoutingUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "ppp":
 		if last := cn.rsession.PPP().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "ppp:update", replay)
+			collect.EvPppUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "vpn":
 		if last := cn.rsession.VPN().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "vpn:update", replay)
+			collect.EvVpnUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "users":
 		// The caps go FIRST. The page draws its buttons from `permitted`, and a
 		// payload arriving before them renders a read-only table that then has to
 		// be redrawn — visible as a flicker on every visit.
-		cn.srv.hub.Send(cn.c, "rosusers:caps", map[string]any{
+		EvRosusersCaps.Send(cn.srv.hub, cn.c, map[string]any{
 			"permitted":  cn.canPage("users", "write"),
 			"routerName": cn.rsession.Label,
 		})
 		if last := cn.rsession.RosUsers().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "rosusers:update", replay)
+			collect.EvRosusersUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "capsman":
 		if last := cn.rsession.Capsman().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "capsman:update", replay)
+			collect.EvCapsmanUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	// interfaceStatus is the RATE SOURCE for five other collectors, so a bridges
 	// viewer who never opens this page would otherwise see every throughput
@@ -1017,7 +1017,7 @@ func (cn *conn) resumePage(page string) {
 		if last := cn.rsession.IfStatus().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "ifstatus:update", replay)
+			collect.EvIfstatusUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	// The backlog, as one frame. Not a Resume: this collector holds a push
 	// channel open for the life of the connection rather than polling, so there
@@ -1031,7 +1031,7 @@ func (cn *conn) resumePage(page string) {
 		if last := cn.rsession.Topology().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "topology:update", replay)
+			collect.EvTopologyUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	// Page-gated. It USED to own the connection-table read that bandwidth also
 	// consumed, which is why opening either page started it; both subscribe to
@@ -1041,7 +1041,16 @@ func (cn *conn) resumePage(page string) {
 		if last := cn.rsession.Conns().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "conn:update", replay)
+			// THE LIVE WIRE FORM, not the whole struct. This replay used to send
+			// the full ConnsPayload under conn:update while the collector sent
+			// the light one, so the event had two shapes and no single type could
+			// describe it. The heavy indexes go in their own two events, exactly
+			// as the collector sends them.
+			collect.EvConnUpdate.Send(cn.srv.hub, cn.c, collect.LightOf(replay))
+			if replay.CountryDests != nil || replay.SourceDests != nil {
+				collect.EvConnCountryData.Send(cn.srv.hub, cn.c, collect.CountryData(&replay))
+				collect.EvConnSourceData.Send(cn.srv.hub, cn.c, collect.SourceData(&replay))
+			}
 		}
 	// Page-gated, and the gate matters more here than on most: this collector
 	// reads a table that can hold thousands of rows, and nothing else needs it.
@@ -1049,23 +1058,23 @@ func (cn *conn) resumePage(page string) {
 		if last := cn.rsession.Bandwidth().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "bandwidth:update", replay)
+			collect.EvBandwidthUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "wifi-clients":
 		if last := cn.rsession.Wireless().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "wireless:update", replay)
+			collect.EvWirelessUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "logs":
 		if last := cn.rsession.Logs().Last(); last != nil {
-			cn.srv.hub.Send(cn.c, "logs:history", last)
+			collect.EvLogsHistory.Send(cn.srv.hub, cn.c, last)
 		}
 	case "wifi-networks":
 		if last := cn.rsession.Wifi().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "wifi:update", replay)
+			collect.EvWifiUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "firewall":
 		// BEFORE the replay, so the first payload the page receives already
@@ -1078,20 +1087,20 @@ func (cn *conn) resumePage(page string) {
 		if last := cn.rsession.Firewall().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "firewall:update", replay)
+			collect.EvFirewallUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "queues":
 		// Caps first, for the reason Router Users gives: the page draws its
 		// buttons from `permitted`, and a payload arriving before them renders a
 		// read-only table that then has to be redrawn.
-		cn.srv.hub.Send(cn.c, "queues:caps", map[string]any{
+		EvQueuesCaps.Send(cn.srv.hub, cn.c, map[string]any{
 			"permitted":  cn.canPage("queues", "write"),
 			"routerName": cn.rsession.Label,
 		})
 		if last := cn.rsession.Queues().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "queues:update", replay)
+			collect.EvQueuesUpdate.Send(cn.srv.hub, cn.c, replay)
 		}
 	case "dhcp":
 		// TWO collectors and two events, and the ORDER matters: lan:overview
@@ -1124,14 +1133,14 @@ func (cn *conn) resumePage(page string) {
 		if last := cn.rsession.DHCPNetworks().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "lan:overview", replay)
+			collect.EvLanOverview.Send(cn.srv.hub, cn.c, replay)
 		} else if cn.rsession.CollectorEnabled("dhcpNetworks") {
 			cn.rsession.DHCPNetworks().RefreshNow()
 		}
 		if last := cn.rsession.DHCPLeases().Last(); last != nil {
 			replay := *last
 			replay.TS = time.Now().UnixMilli()
-			cn.srv.hub.Send(cn.c, "leases:list", replay)
+			collect.EvLeasesList.Send(cn.srv.hub, cn.c, replay)
 		} else if cn.rsession.CollectorEnabled("dhcpLeases") {
 			cn.rsession.DHCPLeases().RefreshNow()
 		}
@@ -1232,7 +1241,7 @@ func (cn *conn) trafficSelectDefault(ifName string) {
 	// returns whatever history has accumulated — which for the default
 	// interface is usually not empty, because it streams from the connection
 	// rather than from the first viewer.
-	cn.srv.hub.Send(cn.c, "traffic:history", cn.rsession.Traffic().Watch(ifName))
+	collect.EvTrafficHistory.Send(cn.srv.hub, cn.c, cn.rsession.Traffic().Watch(ifName))
 }
 
 func (cn *conn) trafficSelect(name string) {
@@ -1264,7 +1273,7 @@ func (cn *conn) trafficSelect(name string) {
 	cn.srv.hub.Join(cn.c, session.RoomFor(cn.routerID, collect.TrafficSub(ifName)))
 	// The history goes to THIS viewer only, and immediately: a chart that waited
 	// for the next sample would draw a single point on a five-minute axis.
-	cn.srv.hub.Send(cn.c, "traffic:history", tr.Watch(ifName))
+	collect.EvTrafficHistory.Send(cn.srv.hub, cn.c, tr.Watch(ifName))
 }
 
 // dropTraffic detaches this viewer from whatever it was watching. Called when
@@ -1414,7 +1423,7 @@ func (cn *conn) sendPooledStatus() {
 		if visible != nil && !visible[id] {
 			continue
 		}
-		cn.srv.hub.Send(cn.c, "router:status", map[string]any{
+		session.EvRouterStatus.Send(cn.srv.hub, cn.c, map[string]any{
 			"routerId": id, "connected": up})
 	}
 }

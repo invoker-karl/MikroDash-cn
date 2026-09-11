@@ -57,7 +57,7 @@ func (cn *conn) pkgErr(code string, extra map[string]any) {
 	for k, v := range extra {
 		m[k] = v
 	}
-	cn.srv.hub.Send(cn.c, "packages:error", m)
+	EvPackagesError.Send(cn.srv.hub, cn.c, m)
 }
 
 // pkgReady resolves the collector, or reports why it cannot.
@@ -108,7 +108,7 @@ func (cn *conn) packagesCaps() {
 		cn.pkgErr("denied", nil)
 		return
 	}
-	cn.srv.hub.Send(cn.c, "packages:caps", map[string]any{
+	EvPackagesCaps.Send(cn.srv.hub, cn.c, map[string]any{
 		"permitted":  cn.canPage("packages", "write"),
 		"routerName": cn.rsession.Label,
 	})
@@ -187,7 +187,7 @@ func (cn *conn) packagesSchedule(raw json.RawMessage) {
 	if cn.rsession.CollectorEnabled("packages") {
 		coll.RefreshNow()
 	}
-	cn.srv.hub.Send(cn.c, "packages:ok", map[string]any{"action": req.Action, "name": req.Name})
+	EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": req.Action, "name": req.Name})
 }
 
 // packagesCheck asks the router to contact MikroTik's update servers.
@@ -219,7 +219,7 @@ func (cn *conn) packagesCheck() {
 	if cn.rsession.CollectorEnabled("packages") {
 		coll.RefreshNow()
 	}
-	cn.srv.hub.Send(cn.c, "packages:ok", map[string]any{"action": "check"})
+	EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "check"})
 }
 
 // packagesApply applies every scheduled change, which REBOOTS the router.
@@ -287,8 +287,7 @@ func (cn *conn) packagesUpgrade(raw json.RawMessage) {
 
 		log.Printf("[packages] upgrade on %s — %s to %s, router will reboot",
 			name, orQuestion(installed), latest)
-		cn.srv.hub.Send(cn.c, "packages:applying",
-			map[string]any{"routerName": name, "count": 1, "upgrade": true})
+		EvPackagesApplying.Send(cn.srv.hub, cn.c, map[string]any{"routerName": name, "count": 1, "upgrade": true})
 
 		cn.recorder().Record(audit.Event{
 			Action: "package.upgrade", TargetType: "router",
@@ -304,8 +303,7 @@ func (cn *conn) packagesUpgrade(raw json.RawMessage) {
 		if _, werr := cn.rsession.Exec(routeros.Cmd{Path: "/system/package/update/install"}); werr != nil {
 			return werr
 		}
-		cn.srv.hub.Send(cn.c, "packages:ok",
-			map[string]any{"action": "upgrade", "routerName": name, "latest": latest})
+		EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "upgrade", "routerName": name, "latest": latest})
 		return nil
 	})
 	if err != nil {
@@ -313,8 +311,7 @@ func (cn *conn) packagesUpgrade(raw json.RawMessage) {
 		// router is rebooting as it answers. Reporting it as an error would tell
 		// the operator the upgrade failed when it is in fact under way.
 		if code := rosWriteFail(err); code == "failed" {
-			cn.srv.hub.Send(cn.c, "packages:ok",
-				map[string]any{"action": "upgrade", "routerName": name, "rebooting": true})
+			EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "upgrade", "routerName": name, "rebooting": true})
 		} else {
 			cn.pkgErr(code, map[string]any{"message": safe.Message(err.Error())})
 		}
@@ -375,8 +372,7 @@ func (cn *conn) packagesApply(raw json.RawMessage) {
 		names = append(names, p.Name+":"+verb)
 	}
 
-	cn.srv.hub.Send(cn.c, "packages:applying",
-		map[string]any{"routerName": name, "count": len(pending)})
+	EvPackagesApplying.Send(cn.srv.hub, cn.c, map[string]any{"routerName": name, "count": len(pending)})
 
 	// RECORDED BEFORE THE CALL, and that ordering is the point. The router
 	// reboots as it answers, so the connection is expected to drop while the
@@ -402,11 +398,10 @@ func (cn *conn) packagesApply(raw json.RawMessage) {
 			cn.pkgErr(code, map[string]any{"message": safe.Message(err.Error())})
 			return
 		}
-		cn.srv.hub.Send(cn.c, "packages:ok",
-			map[string]any{"action": "apply", "routerName": name, "rebooting": true})
+		EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "apply", "routerName": name, "rebooting": true})
 		return
 	}
-	cn.srv.hub.Send(cn.c, "packages:ok", map[string]any{"action": "apply", "routerName": name})
+	EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "apply", "routerName": name})
 }
 
 // packagesNotes answers the Update dialog's request for a RouterOS changelog.
@@ -438,7 +433,7 @@ func (cn *conn) packagesNotes(raw json.RawMessage) {
 	version := strings.TrimSpace(req.Version)
 
 	no := func(why string) {
-		cn.srv.hub.Send(cn.c, "packages:notes", map[string]any{
+		EvPackagesNotes.Send(cn.srv.hub, cn.c, map[string]any{
 			"version": version, "error": why})
 	}
 	if cn.routerID == "" || cn.rsession == nil {
@@ -456,6 +451,6 @@ func (cn *conn) packagesNotes(raw json.RawMessage) {
 		no(safe.Message(err.Error()))
 		return
 	}
-	cn.srv.hub.Send(cn.c, "packages:notes", map[string]any{
+	EvPackagesNotes.Send(cn.srv.hub, cn.c, map[string]any{
 		"version": version, "notes": notes})
 }

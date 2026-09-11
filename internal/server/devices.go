@@ -415,7 +415,7 @@ func stripWanIP(r map[string]any) map[string]any {
 // whole fleet's addresses because somebody else's edit triggered the send.
 func (s *Server) broadcastRouterList() {
 	for _, cn := range s.connections() {
-		s.hub.Send(cn.c, "routers:update", s.routerListForSocket(cn.sess))
+		EvRoutersUpdate.Send(s.hub, cn.c, s.routerListForSocket(cn.sess))
 	}
 }
 
@@ -882,6 +882,5 @@ func (s *Server) scheduleDevicesRelease() {
 // both resolved for one principal. Broadcasting one viewer's rows would show
 // another viewer routers they may not read.
 func (cn *conn) sendRoutersStats() {
-	cn.srv.hub.Send(cn.c, "routers:stats",
-		routers.BuildStats(cn.srv.buildStatsSources(cn.sess)))
+	EvRoutersStats.Send(cn.srv.hub, cn.c, routers.BuildStats(cn.srv.buildStatsSources(cn.sess)))
 }

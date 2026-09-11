@@ -249,7 +249,7 @@ func (t *Talkers) markUnavailable() {
 		PollMs: t.reportedPollMs(), Available: false,
 	}
 	t.last = p
-	t.emit(talkersRoom, "talkers:update", p)
+	EvTalkersUpdate.Emit(t.emit, talkersRoom, *p)
 }
 
 // talkersRoom keeps its name; the VALUE comes from rooms.go.
@@ -322,7 +322,7 @@ func (t *Talkers) commit(rows []routeros.Reply) {
 		return
 	}
 	t.lastFp = fp
-	t.emit(talkersRoom, "talkers:update", p)
+	EvTalkersUpdate.Emit(t.emit, talkersRoom, *p)
 }
 
 func talkersFingerprint(devices []TalkerDevice) string {

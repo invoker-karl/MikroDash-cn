@@ -121,7 +121,7 @@ type ConnsPayload struct {
 // because the nils above and the removal below have to agree.
 var connsHeavyKeys = [...]string{"countryDests", "countryPorts", "sourceDests", "sourcePorts"}
 
-// connsLight marshals a ConnsPayload with the four heavy indexes ABSENT.
+// ConnsLight marshals a ConnsPayload with the four heavy indexes ABSENT.
 //
 // ── WHY A MARSHALLER AND NOT `omitempty` ────────────────────────────────────
 //
@@ -137,9 +137,9 @@ var connsHeavyKeys = [...]string{"countryDests", "countryPorts", "sourceDests", 
 // It round-trips through a map rather than listing the fields it keeps, so a
 // field added to ConnsPayload later is carried without anyone remembering to
 // add it here — which a hand-written literal could not do.
-type connsLight struct{ p *ConnsPayload }
+type ConnsLight struct{ p *ConnsPayload }
 
-func (l connsLight) MarshalJSON() ([]byte, error) {
+func (l ConnsLight) MarshalJSON() ([]byte, error) {
 	b, err := json.Marshal(l.p)
 	if err != nil {
 		return nil, err
@@ -152,6 +152,30 @@ func (l connsLight) MarshalJSON() ([]byte, error) {
 		delete(m, k)
 	}
 	return json.Marshal(m)
+}
+
+// LightOf is the conn:update form of a payload: the four heavy indexes absent.
+//
+// The live emit and the page-open replay in internal/server both send through
+// this, so `conn:update` has ONE wire form. The replay used to send the whole
+// ConnsPayload, which gave the event two shapes and forced the browser's type
+// to describe neither exactly.
+func LightOf(p ConnsPayload) ConnsLight {
+	p.CountryDests, p.CountryPorts = nil, nil
+	p.SourceDests, p.SourcePorts = nil, nil
+	return ConnsLight{&p}
+}
+
+// CountryData is the conn:country-data payload: the per-country indexes
+// conn:update leaves out.
+func CountryData(p *ConnsPayload) map[string]any {
+	return map[string]any{"ts": p.TS, "countryDests": p.CountryDests, "countryPorts": p.CountryPorts}
+}
+
+// SourceData is the conn:source-data payload: the per-source indexes
+// conn:update leaves out.
+func SourceData(p *ConnsPayload) map[string]any {
+	return map[string]any{"ts": p.TS, "sourceDests": p.SourceDests, "sourcePorts": p.SourcePorts}
 }
 
 // GeoLookup answers where an address is. Nil means no database, which is the
@@ -812,21 +836,18 @@ func (c *Connections) apply(rows []routeros.Reply, err error) {
 		// The GLOBAL emit omits the four heavy indexes: only the Connections
 		// page renders them, and they are most of the payload's weight.
 		//
-		// OMITS, not nils — see connsLight. Setting the fields to nil and
+		// OMITS, not nils — see ConnsLight. Setting the fields to nil and
 		// marshalling the struct sends `"countryDests": null` where the live
 		// payload has NO KEY AT ALL, because `delete` removes a key and a nil Go
 		// map marshals as null. That was the port's only conn:update key set
 		// where the live app has two, which is exactly what
 		// tools/live-socket-diff.js reported on 2026-08-28.
-		light := *payload
-		light.CountryDests, light.CountryPorts = nil, nil
-		light.SourceDests, light.SourcePorts = nil, nil
-		c.emit(connsRooms.Join(), "conn:update", connsLight{&light})
+		EvConnUpdate.Emit(c.emit, connsRooms.Join(), LightOf(*payload))
 	}
 	if detailChanged {
 		// ── THE PAGE ONLY, WHICH IS WHERE THE LEDGER ALWAYS HAD THEM ────────
 		//
-		// These two carry the four heavy indexes `connsLight` strips from the
+		// These two carry the four heavy indexes `ConnsLight` strips from the
 		// broadcast above precisely BECAUSE they are heavy, so who receives them
 		// is worth being exact about.
 		//
@@ -838,7 +859,7 @@ func (c *Connections) apply(rows []routeros.Reply, err error) {
 		//
 		//	the card draws from `topSources` and `topDestinations`, which
 		//	  `BuildConns` fills in unconditionally -- they are outside the
-		//	  `in.Detailed` branch -- and which `connsLight` does not strip
+		//	  `in.Detailed` branch -- and which `ConnsLight` does not strip
 		//	NOTHING LISTENS. The only subscribers to either event are in
 		//	  `web/src/pages/connections.ts`; no dashboard module has a handler
 		//	measured 2026-09-08: a browser session that went straight to the
@@ -855,12 +876,8 @@ func (c *Connections) apply(rows []routeros.Reply, err error) {
 		// The Node app sends both at `page-connections` alone. This is now the
 		// same, and matching it here is agreement about who needs the data rather
 		// than fidelity for its own sake.
-		c.emit(connsDetailRooms.Join(), "conn:country-data", map[string]any{
-			"ts": payload.TS, "countryDests": payload.CountryDests, "countryPorts": payload.CountryPorts,
-		})
-		c.emit(connsDetailRooms.Join(), "conn:source-data", map[string]any{
-			"ts": payload.TS, "sourceDests": payload.SourceDests, "sourcePorts": payload.SourcePorts,
-		})
+		EvConnCountryData.Emit(c.emit, connsDetailRooms.Join(), CountryData(payload))
+		EvConnSourceData.Emit(c.emit, connsDetailRooms.Join(), SourceData(payload))
 	}
 }
 

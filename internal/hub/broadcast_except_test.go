@@ -41,7 +41,7 @@ func TestBroadcastExceptSkipsTheActorAndNobodyElse(t *testing.T) {
 		h.Join(c, "router-r1-page-backups")
 	}
 
-	h.BroadcastExcept("router-r1-page-backups", actor, "backups:ran",
+	h.broadcastExcept("router-r1-page-backups", actor, "backups:ran",
 		map[string]any{"routerId": "r1"})
 
 	if got := drain(actor); len(got) != 0 {
@@ -67,7 +67,7 @@ func TestBroadcastExceptIgnoresAClientInAnotherRoom(t *testing.T) {
 	h.Join(here, "router-r1-page-backups")
 	h.Join(elsewhere, "router-r2-page-backups")
 
-	h.BroadcastExcept("router-r1-page-backups", nil, "backups:ran", map[string]any{"routerId": "r1"})
+	h.broadcastExcept("router-r1-page-backups", nil, "backups:ran", map[string]any{"routerId": "r1"})
 
 	if got := drain(elsewhere); len(got) != 0 {
 		t.Errorf("a client on another router received %v", got)
@@ -86,12 +86,12 @@ func TestBroadcastExceptWithNoOneElseSendsNothing(t *testing.T) {
 	h.Add(alone)
 	h.Join(alone, "router-r1-page-backups")
 
-	h.BroadcastExcept("router-r1-page-backups", alone, "backups:ran", map[string]any{"routerId": "r1"})
+	h.broadcastExcept("router-r1-page-backups", alone, "backups:ran", map[string]any{"routerId": "r1"})
 	if got := drain(alone); len(got) != 0 {
 		t.Errorf("the only client received %v", got)
 	}
 	// And an empty room is not an error.
-	h.BroadcastExcept("router-r9-page-backups", nil, "backups:ran", map[string]any{})
+	h.broadcastExcept("router-r9-page-backups", nil, "backups:ran", map[string]any{})
 }
 
 // TestBroadcastExceptCarriesNoPayloadBeyondTheRouterId is the security half
@@ -106,7 +106,7 @@ func TestBroadcastExceptIsANudgeNotThePayload(t *testing.T) {
 	h.Join(actor, "router-r1-page-backups")
 	h.Join(viewer, "router-r1-page-backups")
 
-	h.BroadcastExcept("router-r1-page-backups", actor, "backups:ran",
+	h.broadcastExcept("router-r1-page-backups", actor, "backups:ran",
 		map[string]any{"routerId": "r1"})
 
 	got := drain(viewer)

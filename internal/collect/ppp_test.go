@@ -3,6 +3,7 @@ package collect
 import (
 	"encoding/json"
 	"math"
+	"mikrodash/internal/hub"
 	"os"
 	"path/filepath"
 	"testing"
@@ -211,7 +212,7 @@ func TestAnUnchangingRouterStillEmitsAHeartbeat(t *testing.T) {
 		"/interface/pppoe-server/server/print": {},
 	}}
 	emits := 0
-	p := NewPPP(rd, func(room, event string, payload any) { emits++ }, 5000)
+	p := NewPPP(rd, hub.NewRelay(func(room string, _ hub.Named, payload any) { emits++ }), 5000)
 
 	p.Tick()
 	if emits != 1 {

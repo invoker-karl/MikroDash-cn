@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"mikrodash/internal/hub"
 	"testing"
 
 	"mikrodash/internal/routeros"
@@ -40,7 +41,7 @@ func TestTheScanCatalogueIsKeptOnTheModernStack(t *testing.T) {
 		},
 	}}
 
-	c := NewWireless(r, func(string, string, any) {}, nil, 30000)
+	c := NewWireless(r, hub.Relay{}, nil, 30000)
 	c.Tick()
 
 	cat, clients := c.ScanCatalogue()
@@ -95,7 +96,7 @@ func TestTheLegacyStackKeepsNoScanCatalogue(t *testing.T) {
 		},
 	}}
 
-	c := NewWireless(r, func(string, string, any) {}, nil, 30000)
+	c := NewWireless(r, hub.Relay{}, nil, 30000)
 	c.Tick()
 
 	cat, _ := c.ScanCatalogue()
@@ -116,7 +117,7 @@ func TestTheCatalogueIsCopiedOut(t *testing.T) {
 			{"mac-address": "AA:01", "interface": "wifi1", "ssid": "Home", "signal": "-52"},
 		},
 	}}
-	c := NewWireless(r, func(string, string, any) {}, nil, 30000)
+	c := NewWireless(r, hub.Relay{}, nil, 30000)
 	c.Tick()
 
 	cat, clients := c.ScanCatalogue()

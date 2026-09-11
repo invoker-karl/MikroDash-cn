@@ -18,6 +18,7 @@ package collect
 
 import (
 	"encoding/json"
+	"mikrodash/internal/hub"
 	"os"
 	"path/filepath"
 	"testing"
@@ -106,7 +107,7 @@ func TestSystemIdentityReportingMatchesTheLiveDedupe(t *testing.T) {
 	for _, c := range corpus.Cases {
 		t.Run(c.Why, func(t *testing.T) {
 			stub := &identityStub{}
-			sys := NewSystem(stub, func(string, string, any) {}, 1000)
+			sys := NewSystem(stub, hub.Relay{}, 1000)
 			sys.staticRead = true // see the stub's header
 
 			var got []Identity
@@ -169,7 +170,7 @@ func TestIdentityIsReportedEvenWhenTheGaugesAreStill(t *testing.T) {
 	ser := "HDX0ABCDEF1"
 	stub := &identityStub{version: "7.24 (stable)", board: "RB5009UG"}
 	emits := 0
-	sys := NewSystem(stub, func(string, string, any) { emits++ }, 1000)
+	sys := NewSystem(stub, hub.NewRelay(func(_ string, _ hub.Named, _ any) { emits++ }), 1000)
 	sys.staticRead = true // see identityStub's header
 	var got []Identity
 	sys.SetOnIdentity(func(id Identity) { got = append(got, id) })

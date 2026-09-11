@@ -50,7 +50,7 @@ func (cn *conn) bkErr(code string, extra map[string]any) {
 	for k, v := range extra {
 		body[k] = v
 	}
-	cn.srv.hub.Send(cn.c, "backups:error", body)
+	EvBackupsError.Send(cn.srv.hub, cn.c, body)
 }
 
 // bkMayRead and bkMayWrite are the two gates. Kept as separate one-liners rather
@@ -95,7 +95,7 @@ func (cn *conn) backupsList() {
 	}
 
 	rec := cn.backupRecordFor(cn.routerID)
-	cn.srv.hub.Send(cn.c, "backups:state", backups.StatePayload{
+	EvBackupsState.Send(cn.srv.hub, cn.c, backups.StatePayload{
 		RouterID: cn.routerID,
 		Label:    cn.rsession.Label,
 		Settings: backups.SettingsFrom(rec.block, rec.keepCount, rec.keepDays, cn.srv.displayTimezone()),
@@ -323,7 +323,7 @@ func (cn *conn) backupsRun() {
 	// EMITTED BEFORE THE CLAIM, as the original emits it before calling runFor.
 	// So a click that turns out to be a duplicate still gets its `running` echo
 	// and the button state follows the same path either way.
-	cn.srv.hub.Send(cn.c, "backups:running", map[string]any{"routerId": cn.routerID})
+	EvBackupsRunning.Send(cn.srv.hub, cn.c, map[string]any{"routerId": cn.routerID})
 
 	// A backup already in flight for this router is SKIPPED, not queued behind
 	// the first: the second click wanted a restore point taken now, and the one
@@ -529,8 +529,7 @@ func (cn *conn) backupsDelete(raw json.RawMessage) {
 	//
 	// Without this, a second operator with the page open keeps seeing restore
 	// points that no longer exist, and finds out by clicking one.
-	cn.srv.hub.BroadcastExcept("router-"+cn.routerID+"-page-backups", cn.c,
-		"backups:ran", map[string]any{"routerId": cn.routerID})
+	EvBackupsRan.BroadcastExcept(cn.srv.hub, "router-"+cn.routerID+"-page-backups", cn.c, map[string]any{"routerId": cn.routerID})
 }
 
 // backupsDiff answers `backups:diff` for one stored pair.
@@ -626,7 +625,7 @@ func (cn *conn) backupsDiff(raw json.RawMessage) {
 	if older != nil {
 		against = older.ID
 	}
-	cn.srv.hub.Send(cn.c, "backups:diff", map[string]any{
+	EvBackupsDiff.Send(cn.srv.hub, cn.c, map[string]any{
 		"id": newer.ID, "against": against, "baseline": older == nil,
 		"added": result.Added, "removed": result.Removed,
 		"truncated": result.Truncated, "hunks": result.Hunks,

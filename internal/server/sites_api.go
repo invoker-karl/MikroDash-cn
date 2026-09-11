@@ -85,7 +85,7 @@ func (s *Server) broadcastSites() {
 		log.Printf("[sites] list for broadcast: %v", err)
 		return
 	}
-	s.hub.BroadcastAll("sites:update", list)
+	EvSitesUpdate.BroadcastAll(s.hub, list)
 }
 
 // sitesList is `GET /api/sites`.
@@ -271,7 +271,7 @@ func (s *Server) siteDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Detaching devices changes who can reach them, so every cached
 	// authorization view is stale.
-	s.hub.BroadcastAll("perms:changed", map[string]any{})
+	EvPermsChanged.BroadcastAll(s.hub, map[string]any{})
 	s.broadcastSites()
 	if detached > 0 {
 		s.broadcastRouterList()
@@ -375,7 +375,7 @@ func (s *Server) siteRoutersSet(w http.ResponseWriter, r *http.Request) {
 		// event carries no payload and every client's handler refetches, so a
 		// second one is a duplicate refetch per connection and nothing else.
 		// Filed upstream rather than reproduced.
-		s.hub.BroadcastAll("perms:changed", map[string]any{})
+		EvPermsChanged.BroadcastAll(s.hub, map[string]any{})
 		s.broadcastRouterList()
 		s.syncPool()
 		s.syncFleetHolds()

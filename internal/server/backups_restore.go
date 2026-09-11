@@ -162,8 +162,7 @@ func (cn *conn) restoreLocked(req restoreReq) {
 		return
 	}
 
-	cn.srv.hub.Send(cn.c, "backups:restoring",
-		map[string]any{"routerId": cn.routerID, "id": row.ID})
+	EvBackupsRestoring.Send(cn.srv.hub, cn.c, map[string]any{"routerId": cn.routerID, "id": row.ID})
 
 	url := base + backupRawURL(row.ID, token)
 	if _, err := cn.rsession.Exec(routeros.Cmd{
@@ -195,8 +194,7 @@ func (cn *conn) restoreLocked(req restoreReq) {
 		Timeout: restoreLoadTimeout,
 	})
 
-	cn.srv.hub.Send(cn.c, "backups:restored",
-		map[string]any{"routerId": cn.routerID, "id": row.ID})
+	EvBackupsRestored.Send(cn.srv.hub, cn.c, map[string]any{"routerId": cn.routerID, "id": row.ID})
 }
 
 // ── EVERY COMMAND ON THIS PATH IS BOUNDED, AND THE LOAD MOST OF ALL ─────────

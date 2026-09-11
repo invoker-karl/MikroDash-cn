@@ -528,9 +528,9 @@ func (s *IfStatus) Tick() {
 	// are chrome on every page — so it must not be withheld from a viewer who
 	// has opened none of those three, and it must not disclose anything a denied
 	// page would have shown.
-	s.emit(ifStatusRooms.Join(), "ifstatus:update", payload)
+	EvIfstatusUpdate.Emit(s.emit, ifStatusRooms.Join(), *payload)
 
-	s.emit("", "ifstatus:names", NamesOf(payload))
+	EvIfstatusNames.Emit(s.emit, "", *NamesOf(payload))
 }
 
 // refreshMeta re-reads the three metadata menus and rebuilds the interface list

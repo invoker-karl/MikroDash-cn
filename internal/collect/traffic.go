@@ -614,7 +614,7 @@ func (t *Traffic) watchdogTick() {
 // stream that stays degraded does not push a frame to every browser every five
 // seconds.
 func (t *Traffic) emitHealth(degraded bool, restarts int) {
-	t.emit("", "stream:health", map[string]any{
+	EvStreamHealth.Emit(t.emit, "", map[string]any{
 		"collector": "traffic",
 		"degraded":  degraded,
 		"restarts":  restarts,
@@ -684,10 +684,10 @@ func (t *Traffic) onPacket(row routeros.Reply) {
 	// One room per interface, so a viewer receives only the interface they
 	// selected — the per-socket subscription list on the Node side, expressed as
 	// rooms because that is what this hub already does well.
-	t.emit(TrafficSub(sample.IfName), "traffic:update", &sample)
+	EvTrafficUpdate.Emit(t.emit, TrafficSub(sample.IfName), sample)
 	if isWan && wan != nil {
 		// ROUTER-WIDE: the WAN badge is chrome on every page.
-		t.emit("", "wan:status", wan)
+		EvWanStatus.Emit(t.emit, "", *wan)
 	}
 }
 

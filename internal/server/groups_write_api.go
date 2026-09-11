@@ -252,5 +252,5 @@ func (s *Server) groupDelete(w http.ResponseWriter, r *http.Request, sess *Sessi
 // function anyway, because the pairing is what has to survive: a future cache
 // gains its invalidation here rather than at fourteen call sites.
 func (s *Server) bumpPermissions() {
-	s.hub.BroadcastAll("perms:changed", map[string]any{})
+	EvPermsChanged.BroadcastAll(s.hub, map[string]any{})
 }

@@ -40,7 +40,7 @@ func (cn *conn) wanErr(code string, extra map[string]any) {
 	for k, v := range extra {
 		m[k] = v
 	}
-	cn.srv.hub.Send(cn.c, "wan:error", m)
+	EvWanError.Send(cn.srv.hub, cn.c, m)
 }
 
 func (cn *conn) wanMayWrite() bool { return cn.canPage("wan", "write") }
@@ -54,7 +54,7 @@ func (cn *conn) wanCaps() {
 		cn.wanErr("denied", nil)
 		return
 	}
-	cn.srv.hub.Send(cn.c, "wan:caps", map[string]any{
+	EvWanCaps.Send(cn.srv.hub, cn.c, map[string]any{
 		"permitted":  cn.wanMayWrite(),
 		"routerName": cn.rsession.Label,
 	})
@@ -232,8 +232,7 @@ func (cn *conn) wanLeaseAction(verb string, raw json.RawMessage) {
 		if cn.rsession.CollectorEnabled("wan") {
 			cn.rsession.Wan().RefreshNow()
 		}
-		cn.srv.hub.Send(cn.c, "wan:ok",
-			map[string]any{"action": verb, "name": target["interface"]})
+		EvWanOk.Send(cn.srv.hub, cn.c, map[string]any{"action": verb, "name": target["interface"]})
 		return nil
 	})
 	if err != nil {

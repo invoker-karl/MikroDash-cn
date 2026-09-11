@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"mikrodash/internal/hub"
 	"testing"
 
 	"mikrodash/internal/routeros"
@@ -39,7 +40,7 @@ func TestTopologyDropsLocalBridgeHosts(t *testing.T) {
 		// any RouterOS build that stops reporting the field.
 		{"mac-address": "02:00:00:00:00:03", "on-interface": "ether3", "bridge": "bridge", "vid": "20"},
 	}}
-	c := NewTopology(r, func(string, string, any) {}, nil, "r1", "lab", 30000)
+	c := NewTopology(r, hub.Relay{}, nil, "r1", "lab", 30000)
 
 	hosts, vlans := c.readHosts()
 

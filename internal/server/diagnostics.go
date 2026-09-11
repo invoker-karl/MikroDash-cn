@@ -88,5 +88,5 @@ func (cn *conn) sendDiagnostics() {
 	if rs == nil || cn.routerID == "" {
 		return
 	}
-	cn.srv.hub.Send(cn.c, "diagnostics:update", rs.Diagnostics(time.Now().UnixMilli()))
+	EvDiagnosticsUpdate.Send(cn.srv.hub, cn.c, rs.Diagnostics(time.Now().UnixMilli()))
 }

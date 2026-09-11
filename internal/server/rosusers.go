@@ -61,7 +61,7 @@ func (cn *conn) ruErr(code string, extra map[string]any) {
 	for k, v := range extra {
 		m[k] = v
 	}
-	cn.srv.hub.Send(cn.c, "rosusers:error", m)
+	EvRosusersError.Send(cn.srv.hub, cn.c, m)
 }
 
 // ruReady is the precondition the six handlers share: a router, a session, and
@@ -304,7 +304,7 @@ func (cn *conn) ruUserSave(raw json.RawMessage) {
 		if editing {
 			outcome = "update"
 		}
-		cn.srv.hub.Send(cn.c, "rosusers:ok", map[string]any{"action": outcome, "name": name})
+		EvRosusersOk.Send(cn.srv.hub, cn.c, map[string]any{"action": outcome, "name": name})
 		return nil
 	})
 	if err != nil {
@@ -408,7 +408,7 @@ func (cn *conn) ruGroupSave(raw json.RawMessage) {
 		if editing {
 			outcome = "group-update"
 		}
-		cn.srv.hub.Send(cn.c, "rosusers:ok", map[string]any{"action": outcome, "name": name})
+		EvRosusersOk.Send(cn.srv.hub, cn.c, map[string]any{"action": outcome, "name": name})
 		return nil
 	})
 	if err != nil {
@@ -485,8 +485,7 @@ func (cn *conn) ruRemove(raw json.RawMessage, spec removeSpec) {
 		if cn.rsession.CollectorEnabled("rosusers") {
 			cn.rsession.RosUsers().RefreshNow()
 		}
-		cn.srv.hub.Send(cn.c, "rosusers:ok",
-			map[string]any{"action": spec.okAction, "name": target["name"]})
+		EvRosusersOk.Send(cn.srv.hub, cn.c, map[string]any{"action": spec.okAction, "name": target["name"]})
 		return nil
 	})
 	if err != nil {

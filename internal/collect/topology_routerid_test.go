@@ -25,6 +25,7 @@ package collect
 // attribute to a router is worse than the divergence it already represents.
 
 import (
+	"mikrodash/internal/hub"
 	"mikrodash/internal/routeros"
 	"testing"
 )
@@ -44,16 +45,18 @@ func (deniedErr) Error() string { return "not enough permissions (9)" }
 
 func TestBothTopologyPayloadsCarryTheRouterID(t *testing.T) {
 	var got []*TopologyPayload
-	emit := func(room, event string, payload any) {
+	emit := hub.NewRelay(func(room string, ev hub.Named, payload any) {
+		event := ev.Name()
 		if event != "topology:update" {
 			return
 		}
-		p, ok := payload.(*TopologyPayload)
+		// A VALUE: topology:update is declared to carry TopologyPayload.
+		p, ok := payload.(TopologyPayload)
 		if !ok {
 			t.Fatalf("topology:update carried %T", payload)
 		}
-		got = append(got, p)
-	}
+		got = append(got, &p)
+	})
 
 	c := NewTopology(deniedReader{}, emit, nil, "r-under-test", "lbl", 30000)
 	c.Tick()

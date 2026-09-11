@@ -417,7 +417,7 @@ func (p *Ping) pollOnce() {
 	if err != nil {
 		if pingDenied.MatchString(err.Error()) {
 			log.Printf("[ping] test policy not granted — ping disabled. Add \"test\" to this API user's group to enable it.")
-			p.emit(pingRooms.Join(), "ping:update", p.noteDenied(time.Now().UnixMilli()))
+			EvPingUpdate.Emit(p.emit, pingRooms.Join(), *p.noteDenied(time.Now().UnixMilli()))
 		}
 		return
 	}
@@ -430,7 +430,7 @@ func (p *Ping) pollOnce() {
 			continue
 		}
 		if payload := p.ProcessRow(row, time.Now().UnixMilli()); payload != nil {
-			p.emit(pingRooms.Join(), "ping:update", payload)
+			EvPingUpdate.Emit(p.emit, pingRooms.Join(), *payload)
 		}
 	}
 }
@@ -464,13 +464,13 @@ func (p *Ping) startStream() {
 			return
 		}
 		if payload := p.ProcessRow(row, time.Now().UnixMilli()); payload != nil {
-			p.emit(pingRooms.Join(), "ping:update", payload)
+			EvPingUpdate.Emit(p.emit, pingRooms.Join(), *payload)
 		}
 	})
 	if err != nil {
 		if pingDenied.MatchString(err.Error()) {
 			log.Printf("[ping] test policy not granted — ping disabled. Add \"test\" to this API user's group to enable it.")
-			p.emit(pingRooms.Join(), "ping:update", p.noteDenied(time.Now().UnixMilli()))
+			EvPingUpdate.Emit(p.emit, pingRooms.Join(), *p.noteDenied(time.Now().UnixMilli()))
 			return
 		}
 		log.Printf("[ping] stream error (target=%s): %v", p.target, err)

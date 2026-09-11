@@ -1,6 +1,9 @@
 package collect
 
-import "testing"
+import (
+	"mikrodash/internal/hub"
+	"testing"
+)
 
 // ── PHASE 4.1: A CONSUMER DRIVEN BY A STUB ─────────────────────────────────
 //
@@ -23,7 +26,7 @@ func TestAConsumerTakesItsEdgeFromAStub(t *testing.T) {
 		{IP: "10.0.0.5", Name: "kitchen-pi", MAC: "02:00:00:00:00:01"},
 	}}}
 
-	w := NewWireless(fakeReader{}, func(string, string, any) {}, leases, 30000)
+	w := NewWireless(fakeReader{}, hub.Relay{}, leases, 30000)
 	if w == nil {
 		t.Fatal("NewWireless returned nil")
 	}
@@ -46,13 +49,13 @@ func TestAConsumerTakesItsEdgeFromAStub(t *testing.T) {
 // call dereferences a nil receiver in a consumer that has a nil check right
 // there and looks correct.
 func TestAnAbsentEdgeIsNil(t *testing.T) {
-	w := NewWireless(fakeReader{}, func(string, string, any) {}, nil, 30000)
+	w := NewWireless(fakeReader{}, hub.Relay{}, nil, 30000)
 	if w.leases != nil {
 		t.Error("a literal nil did not arrive as a nil interface; every nil guard in " +
 			"this consumer would be false and the first call would panic")
 	}
 
-	c := NewConnections(fakeReader{}, func(string, string, any) {}, nil, nil, 3000)
+	c := NewConnections(fakeReader{}, hub.Relay{}, nil, nil, 3000)
 	if c.leases != nil || c.nets != nil {
 		t.Error("connections' absent edges are not nil")
 	}

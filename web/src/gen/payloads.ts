@@ -1153,7 +1153,7 @@ export interface WirelessPayload {
 
 // The `conn:update` payload, which is NOT ConnsPayload.
 //
-// internal/collect/connections.go marshals it through `connsLight`, which deletes
+// internal/collect/connections.go marshals it through `ConnsLight`, which deletes
 // 4 keys (countryDests, countryPorts, sourceDests, sourcePorts). The page room gets the full ConnsPayload; the dashboard card
 // room gets this. Both are real, and a consumer of one must not be typed as the
 // other -- the keys are ABSENT here, not null.

@@ -58,11 +58,16 @@ var eventsUnserved = map[string]string{
 }
 
 var (
-	// An emit call: Send / Broadcast / emit, with the event name within the
-	// first few arguments (the room usually comes first).
-	goEmit = regexp.MustCompile(`(?s)\b\w*(?:Send|Broadcast|[Ee]mit)\w*\(\s*(?:(?:[^,()]|\([^()]*\))*,\s*){0,3}"([a-z][a-zA-Z0-9]*:[a-zA-Z0-9:_-]+)"`)
-	tsOn   = regexp.MustCompile(`socket\.on\(\s*'([^']+)'`)
-	genEv  = regexp.MustCompile(`"event": "([^"]+)"`)
+	// An event the Go side sends is an event it DECLARES. Every send takes a
+	// hub.Event — a string cannot reach the wire any other way — so the
+	// declarations are the complete list, and each names its event once where
+	// the call sites might name it many times. See internal/hub/event.go.
+	//
+	// This used to match `Send(c, "x:y", …)` call sites by regex. They carry no
+	// string any more, which is the point of the change that removed them.
+	goDeclare = regexp.MustCompile(`hub\.Declare\[.+?\]\("([a-z][a-zA-Z0-9]*:[a-zA-Z0-9:_-]+)"\)`)
+	tsOn      = regexp.MustCompile(`socket\.on\(\s*'([^']+)'`)
+	genEv     = regexp.MustCompile(`"event": "([^"]+)"`)
 )
 
 func TestWebSocketVocabulary(t *testing.T) {
@@ -71,8 +76,10 @@ func TestWebSocketVocabulary(t *testing.T) {
 	goSrc := joined(readFiles(t, root, "internal/", func(r string) bool { return hasExt(r, ".go") && !isTestSource(r) }))
 	tsSrc := joined(readFiles(t, root, "web/src/", func(r string) bool { return hasExt(r, ".ts") && !isTestSource(r) }))
 
+	// COMMENTS STRIPPED: internal/hub/event.go documents the form with an
+	// example declaration, and a declaration in prose sends nothing.
 	emits := map[string]bool{}
-	for _, m := range goEmit.FindAllStringSubmatch(goSrc, -1) {
+	for _, m := range goDeclare.FindAllStringSubmatch(stripGoComments(goSrc), -1) {
 		emits[m[1]] = true
 	}
 	subs := map[string]bool{}

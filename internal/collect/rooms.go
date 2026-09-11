@@ -206,7 +206,7 @@ func RoomsOf(key string) Rooms {
 //
 // ── `dhcpLeases` IS THE OTHER ONE, AND IT HAS NO AUDIENCE AT ALL ───────────
 //
-// It emits ROUTER-WIDE — `d.emit("", "leases:list", …)` — because the live app
+// It emits ROUTER-WIDE — `EvLeasesList.Emit(d.emit, "", …)` — because the live app
 // does, and because two consumers live outside the DHCP page: the Connections
 // page names a device by its IP from the lease table, and four collectors read
 // the leases in process. A router-wide emit is not a room, so `RoomsOf` returns

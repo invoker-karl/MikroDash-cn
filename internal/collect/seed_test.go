@@ -1,6 +1,9 @@
 package collect
 
-import "testing"
+import (
+	"mikrodash/internal/hub"
+	"testing"
+)
 
 // Phase 5.1's rule, in both directions.
 //
@@ -13,7 +16,7 @@ import "testing"
 // than the blank it was meant to fix.
 
 func TestTrafficSeedFillsAnEmptyRing(t *testing.T) {
-	tr := NewTraffic(nil, func(string, string, any) {}, "ether1", 5)
+	tr := NewTraffic(nil, hub.Relay{}, "ether1", 5)
 	tr.Seed("ether1", []TrafficPoint{{TS: 1, RxMbps: 1}, {TS: 2, RxMbps: 2}})
 
 	got := tr.History("ether1")
@@ -23,7 +26,7 @@ func TestTrafficSeedFillsAnEmptyRing(t *testing.T) {
 }
 
 func TestTrafficSeedNeverOverwritesLiveData(t *testing.T) {
-	tr := NewTraffic(nil, func(string, string, any) {}, "ether1", 5)
+	tr := NewTraffic(nil, hub.Relay{}, "ether1", 5)
 	tr.Seed("ether1", []TrafficPoint{{TS: 100, RxMbps: 9}})
 	// A second seed, as a duplicated or late handover would deliver.
 	tr.Seed("ether1", []TrafficPoint{{TS: 1, RxMbps: 1}, {TS: 2, RxMbps: 2}})
@@ -39,7 +42,7 @@ func TestTrafficSeedNeverOverwritesLiveData(t *testing.T) {
 // sized differently — the pool builds Traffic with a fixed 5 — so a seed must be
 // trimmed to THIS collector's window rather than trusted.
 func TestTrafficSeedIsBoundedByTheWindow(t *testing.T) {
-	tr := NewTraffic(nil, func(string, string, any) {}, "ether1", 1)
+	tr := NewTraffic(nil, hub.Relay{}, "ether1", 1)
 	var many []TrafficPoint
 	for i := 0; i < 500; i++ {
 		many = append(many, TrafficPoint{TS: int64(i)})
@@ -59,7 +62,7 @@ func TestTrafficSeedIsBoundedByTheWindow(t *testing.T) {
 }
 
 func TestPingSeedFillsAndNeverOverwrites(t *testing.T) {
-	p := NewPing(nil, func(string, string, any) {}, 5000, "1.1.1.1")
+	p := NewPing(nil, hub.Relay{}, 5000, "1.1.1.1")
 	p.Seed([]PingPoint{{TS: 1}, {TS: 2}})
 	if got := p.History(); len(got.History) != 2 {
 		t.Fatalf("seed did not reach the history: %+v", got.History)
@@ -73,13 +76,13 @@ func TestPingSeedFillsAndNeverOverwrites(t *testing.T) {
 // TestSeedIgnoresNothing — the handover calls these unconditionally, and a
 // router the pool was not holding hands over an empty slice.
 func TestSeedIgnoresNothing(t *testing.T) {
-	tr := NewTraffic(nil, func(string, string, any) {}, "ether1", 5)
+	tr := NewTraffic(nil, hub.Relay{}, "ether1", 5)
 	tr.Seed("ether1", nil)
 	tr.Seed("", []TrafficPoint{{TS: 1}})
 	if got := tr.History("ether1"); len(got.Points) != 0 {
 		t.Errorf("an empty seed produced %d points", len(got.Points))
 	}
-	p := NewPing(nil, func(string, string, any) {}, 5000, "1.1.1.1")
+	p := NewPing(nil, hub.Relay{}, 5000, "1.1.1.1")
 	p.Seed(nil)
 	if got := p.History(); len(got.History) != 0 {
 		t.Errorf("an empty ping seed produced %d points", len(got.History))

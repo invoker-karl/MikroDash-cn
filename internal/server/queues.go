@@ -74,7 +74,7 @@ func (cn *conn) qErr(code string, extra map[string]any) {
 	for k, v := range extra {
 		m[k] = v
 	}
-	cn.srv.hub.Send(cn.c, "queues:error", m)
+	EvQueuesError.Send(cn.srv.hub, cn.c, m)
 }
 
 func (cn *conn) qMayWrite() bool { return cn.canPage("queues", "write") }
@@ -88,7 +88,7 @@ func (cn *conn) qCaps() {
 		cn.qErr("denied", nil)
 		return
 	}
-	cn.srv.hub.Send(cn.c, "queues:caps", map[string]any{
+	EvQueuesCaps.Send(cn.srv.hub, cn.c, map[string]any{
 		"permitted":  cn.qMayWrite(),
 		"routerName": cn.rsession.Label,
 	})
@@ -344,8 +344,7 @@ func (cn *conn) qSave(raw json.RawMessage) {
 		if editing {
 			outcome = "update"
 		}
-		cn.srv.hub.Send(cn.c, "queues:ok",
-			map[string]any{"action": outcome, "name": name, "menu": menu})
+		EvQueuesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": outcome, "name": name, "menu": menu})
 		return nil
 	})
 	if err != nil {
@@ -414,8 +413,7 @@ func (cn *conn) qRemove(raw json.RawMessage) {
 		if cn.rsession.CollectorEnabled("queues") {
 			cn.rsession.Queues().RefreshNow()
 		}
-		cn.srv.hub.Send(cn.c, "queues:ok",
-			map[string]any{"action": "delete", "name": target["name"], "menu": menu})
+		EvQueuesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "delete", "name": target["name"], "menu": menu})
 		return nil
 	})
 	if err != nil {
@@ -506,8 +504,7 @@ func (cn *conn) qToggle(raw json.RawMessage) {
 		if wasDisabled {
 			outcome = "enable"
 		}
-		cn.srv.hub.Send(cn.c, "queues:ok",
-			map[string]any{"action": outcome, "name": target["name"], "menu": menu})
+		EvQueuesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": outcome, "name": target["name"], "menu": menu})
 		return nil
 	})
 	if err != nil {
@@ -565,8 +562,7 @@ func (cn *conn) qResetCounters(raw json.RawMessage) {
 		if cn.rsession.CollectorEnabled("queues") {
 			cn.rsession.Queues().RefreshNow()
 		}
-		cn.srv.hub.Send(cn.c, "queues:ok",
-			map[string]any{"action": "reset", "name": target["name"], "menu": menu})
+		EvQueuesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "reset", "name": target["name"], "menu": menu})
 		return nil
 	})
 	if err != nil {
@@ -632,8 +628,7 @@ func (cn *conn) qMove(raw json.RawMessage) {
 			destIdx = idx - 1
 		}
 		if destIdx < 0 || (idx == len(rows)-1 && req.Direction == "down") {
-			cn.srv.hub.Send(cn.c, "queues:ok",
-				map[string]any{"action": "move", "name": target["name"], "menu": "simple"})
+			EvQueuesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "move", "name": target["name"], "menu": "simple"})
 			return nil
 		}
 		args := []string{"=.id=" + req.ID}
@@ -659,8 +654,7 @@ func (cn *conn) qMove(raw json.RawMessage) {
 		if cn.rsession.CollectorEnabled("queues") {
 			cn.rsession.Queues().RefreshNow()
 		}
-		cn.srv.hub.Send(cn.c, "queues:ok",
-			map[string]any{"action": "move", "name": target["name"], "menu": "simple"})
+		EvQueuesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "move", "name": target["name"], "menu": "simple"})
 		return nil
 	})
 	if err != nil {

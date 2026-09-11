@@ -588,7 +588,7 @@ func (w *Wireless) renameFromPTR() {
 	w.mu.Unlock()
 
 	// OUTSIDE the lock, like every other emit in this file.
-	w.emit(wirelessRooms.Join(), "wireless:update", &next)
+	EvWirelessUpdate.Emit(w.emit, wirelessRooms.Join(), next)
 }
 
 func (w *Wireless) leaseName(mac string) string {
@@ -717,7 +717,7 @@ func (w *Wireless) Tick() {
 		w.alignSubscription(mode)
 	}
 
-	w.emit(wirelessRooms.Join(), "wireless:update", payload)
+	EvWirelessUpdate.Emit(w.emit, wirelessRooms.Join(), *payload)
 }
 
 func modeOrNone(mode string) string {

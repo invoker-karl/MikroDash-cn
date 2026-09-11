@@ -387,7 +387,7 @@ func (d *DHCPLeases) apply(rows []routeros.Reply, err error) {
 	//
 	// Measured 2026-08-29 by comparing the two dashboards nine seconds after
 	// sign-in, after the operator reported cards with no data.
-	d.emit("", "leases:list", payload)
+	EvLeasesList.Emit(d.emit, "", *payload)
 }
 
 // Last is the payload a page focus replays.

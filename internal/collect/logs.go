@@ -196,7 +196,7 @@ func (l *Logs) LoadInitial() {
 	}
 	out := l.snapshot()
 	l.mu.Unlock()
-	l.emit(logRooms, "logs:history", out)
+	EvLogsHistory.Emit(l.emit, logRooms, out)
 }
 
 // Listen opens the push channel. A Reader that cannot stream gets the backlog
@@ -224,7 +224,7 @@ func (l *Logs) Listen() {
 		// ONE ENTRY PER FRAME, not the whole history. A busy router writes
 		// several lines a second and the page appends; re-sending the buffer
 		// each time would be the same data over and over.
-		l.emit(logRooms, "logs:new", e)
+		EvLogsNew.Emit(l.emit, logRooms, e)
 	})
 	if err != nil {
 		return

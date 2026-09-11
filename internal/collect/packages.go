@@ -512,7 +512,7 @@ func (p *Packages) applyRows(rows []routeros.Reply, _ error) {
 		return
 	}
 	p.lastFp = fp
-	p.emit(packagesRooms.Join(), "packages:update", payload)
+	EvPackagesUpdate.Emit(p.emit, packagesRooms.Join(), *payload)
 }
 
 func packagesFingerprint(pkgs []Package, f Firmware, u Update) string {

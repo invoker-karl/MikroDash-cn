@@ -1595,7 +1595,7 @@ func (t *Topology) apply(rows []routeros.Reply, err error) {
 			}
 			t.last = denied
 			t.mu.Unlock()
-			t.emit(topologyRooms.Join(), "topology:update", denied)
+			EvTopologyUpdate.Emit(t.emit, topologyRooms.Join(), *denied)
 		}
 		return
 	}
@@ -1646,7 +1646,7 @@ func (t *Topology) apply(rows []routeros.Reply, err error) {
 	t.mu.Lock()
 	t.last = payload
 	t.mu.Unlock()
-	t.emit(topologyRooms.Join(), "topology:update", payload)
+	EvTopologyUpdate.Emit(t.emit, topologyRooms.Join(), *payload)
 }
 
 // republish rebuilds the graph from the LAST READ and emits it, without asking
@@ -1701,7 +1701,7 @@ func (t *Topology) republish() {
 	t.mu.Lock()
 	t.last = payload
 	t.mu.Unlock()
-	t.emit(topologyRooms.Join(), "topology:update", payload)
+	EvTopologyUpdate.Emit(t.emit, topologyRooms.Join(), *payload)
 }
 
 // readHosts is the bridge MAC table.

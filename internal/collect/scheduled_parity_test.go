@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"mikrodash/internal/hub"
 	"os"
 	"sort"
 	"strings"
@@ -54,27 +55,27 @@ func TestScheduledPathReadsEverythingThePolledPathDoes(t *testing.T) {
 		build func(Reader, *roscache.Cache) (start, suspend, resume func(), deliver func())
 	}{
 		{"capsman", "/interface/wifi/registration-table/print", func(r Reader, c *roscache.Cache) (func(), func(), func(), func()) {
-			x := NewCapsman(r, func(string, string, any) {}, 10000)
+			x := NewCapsman(r, hub.Relay{}, 10000)
 			x.UseCache(c)
 			return x.Start, x.Suspend, x.Resume, func() { x.apply(nil, nil) }
 		}},
 		{"bridges", "/interface/bridge/host/print", func(r Reader, c *roscache.Cache) (func(), func(), func(), func()) {
-			x := NewBridges(r, func(string, string, any) {}, nil, 5000)
+			x := NewBridges(r, hub.Relay{}, nil, 5000)
 			x.UseCache(c)
 			return x.Start, x.Suspend, x.Resume, func() { x.apply(nil, nil) }
 		}},
 		{"dns", "/ip/dns/print", func(r Reader, c *roscache.Cache) (func(), func(), func(), func()) {
-			x := NewDNS(r, func(string, string, any) {}, 10000)
+			x := NewDNS(r, hub.Relay{}, 10000)
 			x.UseCache(c)
 			return x.Start, x.Suspend, x.Resume, func() { x.apply(nil, nil) }
 		}},
 		{"wan", "/interface/detect-internet/state/print", func(r Reader, c *roscache.Cache) (func(), func(), func(), func()) {
-			x := NewWan(r, func(string, string, any) {}, nil, 10000)
+			x := NewWan(r, hub.Relay{}, nil, 10000)
 			x.UseCache(c)
 			return x.Start, x.Suspend, x.Resume, func() { x.apply(nil, nil) }
 		}},
 		{"rosusers", "/user/print", func(r Reader, c *roscache.Cache) (func(), func(), func(), func()) {
-			x := NewRosUsers(r, func(string, string, any) {}, nil, 60000)
+			x := NewRosUsers(r, hub.Relay{}, nil, 60000)
 			x.UseCache(c)
 			return x.Start, x.Suspend, x.Resume, func() { x.apply(nil, nil) }
 		}},
@@ -212,7 +213,7 @@ func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
 		{
 			name: "ifStatus", subscribed: ifStatusIfCmd.Path,
 			loopSide: func(r Reader, c *roscache.Cache) {
-				x := NewIfStatus(r, func(string, string, any) {}, "r1", 1000)
+				x := NewIfStatus(r, hub.Relay{}, "r1", 1000)
 				x.UseCache(c)
 				// PRIMED FIRST, and the priming is part of the behaviour: with no
 				// metadata there is nothing to attach a rate to, so Tick correctly
@@ -225,7 +226,7 @@ func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
 				x.Tick()
 			},
 			subSide: func(r Reader, c *roscache.Cache) {
-				x := NewIfStatus(r, func(string, string, any) {}, "r1", 1000)
+				x := NewIfStatus(r, hub.Relay{}, "r1", 1000)
 				x.UseCache(c)
 				x.applyMeta([]routeros.Reply{{"name": "ether1"}}, nil)
 			},
@@ -233,7 +234,7 @@ func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
 		{
 			name: "vlans", subscribed: vlanCmd.Path, readsNothing: true,
 			loopSide: func(r Reader, c *roscache.Cache) {
-				x := NewVlans(r, func(string, string, any) {}, nil, nil, 5000)
+				x := NewVlans(r, hub.Relay{}, nil, nil, 5000)
 				x.UseCache(c)
 				// The residual half, exactly as the loop calls it. It must read
 				// NOTHING: its whole job is re-rolling rates `ifStatus` already
@@ -241,7 +242,7 @@ func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
 				x.rebuild()
 			},
 			subSide: func(r Reader, c *roscache.Cache) {
-				x := NewVlans(r, func(string, string, any) {}, nil, nil, 5000)
+				x := NewVlans(r, hub.Relay{}, nil, nil, 5000)
 				x.UseCache(c)
 				x.applyConfig([]routeros.Reply{{"name": "vlan10", "vlan-id": "10"}}, nil)
 			},
@@ -249,12 +250,12 @@ func TestResidualLoopsDoNotReadSubscribedMenus(t *testing.T) {
 		{
 			name: "vpn", subscribed: vpnPppCmd.Path,
 			loopSide: func(r Reader, c *roscache.Cache) {
-				x := NewVPN(r, func(string, string, any) {}, 10000)
+				x := NewVPN(r, hub.Relay{}, 10000)
 				x.UseCache(c)
 				x.RefreshNow()
 			},
 			subSide: func(r Reader, c *roscache.Cache) {
-				x := NewVPN(r, func(string, string, any) {}, 10000)
+				x := NewVPN(r, hub.Relay{}, 10000)
 				x.UseCache(c)
 				x.apply([]routeros.Reply{{"name": "peer1"}}, nil)
 			},

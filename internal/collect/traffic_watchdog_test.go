@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"mikrodash/internal/hub"
 	"sync"
 	"testing"
 	"time"
@@ -89,14 +90,15 @@ func wdTraffic(t *testing.T) (*wdReader, *Traffic, *[]map[string]any) {
 	r := &wdReader{conn: true}
 	var mu sync.Mutex
 	health := []map[string]any{}
-	emit := func(_, event string, payload any) {
+	emit := hub.NewRelay(func(_ string, ev hub.Named, payload any) {
+		event := ev.Name()
 		if event != "stream:health" {
 			return
 		}
 		mu.Lock()
 		health = append(health, payload.(map[string]any))
 		mu.Unlock()
-	}
+	})
 	tr := NewTraffic(r, emit, "ether1", 1)
 	// THE CHANNEL LIVES IN THE CACHE NOW. A `traffic` without one holds no
 	// channel at all — deliberately, so the raw path cannot survive as a

@@ -141,7 +141,7 @@ func (s *Server) routerCreate(w http.ResponseWriter, r *http.Request) {
 		Action: "router.create", TargetType: "router", TargetID: rec.ID,
 		TargetName: firstNonEmpty(rec.Label, rec.Host), RouterID: rec.ID,
 	})
-	s.hub.BroadcastAll("perms:changed", map[string]any{})
+	EvPermsChanged.BroadcastAll(s.hub, map[string]any{})
 	s.broadcastRouterList()
 	s.syncPool()
 	s.syncFleetHolds()
@@ -335,7 +335,7 @@ func (s *Server) routerUpdate(w http.ResponseWriter, r *http.Request) {
 		if s.sessions != nil {
 			s.sessions.CloseNow(id)
 		}
-		s.hub.Broadcast("router-"+id, "router:disabled", map[string]any{"routerId": id})
+		EvRouterDisabled.Broadcast(s.hub, "router-"+id, map[string]any{"routerId": id})
 	}
 
 	// A MEMBERSHIP CHANGE ALTERS WHO CAN REACH THIS ROUTER, so every cached
@@ -346,7 +346,7 @@ func (s *Server) routerUpdate(w http.ResponseWriter, r *http.Request) {
 	// port rather than an omission: `internal/rbac` HOLDS NO CACHE, deliberately,
 	// because the live app makes these mutations and this process would never see
 	// them. Nothing server-side needs invalidating; the browsers do.
-	s.hub.BroadcastAll("perms:changed", map[string]any{})
+	EvPermsChanged.BroadcastAll(s.hub, map[string]any{})
 	// PER SOCKET, because each list is filtered for its own principal. See
 	// `broadcastRouterList` — `BroadcastAll` here would hand a restricted viewer
 	// the whole fleet because somebody else made an edit.
@@ -448,7 +448,7 @@ func (s *Server) routerDelete(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[routers] schedules for %s: %v", id, err)
 		}
 	}
-	s.hub.BroadcastAll("perms:changed", map[string]any{})
+	EvPermsChanged.BroadcastAll(s.hub, map[string]any{})
 
 	// `CloseNow` for the same reason as the disable path above: a deleted router
 	// must stop being polled now, not when a grace meant for page refreshes
@@ -492,7 +492,7 @@ func (s *Server) routerDelete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) promoteAfterRemoval(removedID string) {
 	all, _ := s.store.Routers()
 	if len(all) == 0 {
-		s.hub.BroadcastAll("setup:required", map[string]any{})
+		EvSetupRequired.BroadcastAll(s.hub, map[string]any{})
 		// REDUNDANT HERE, AND KEPT — recorded rather than counted as a kill.
 		// `broadcastRouterList` runs at the end of the request and sends every
 		// connection its own list, which with no routers left is also empty. So
@@ -503,7 +503,7 @@ func (s *Server) promoteAfterRemoval(removedID string) {
 		// session, while `broadcastRouterList` builds a list PER PRINCIPAL. They
 		// coincide only because an empty fleet filters to the same empty list for
 		// everybody — which is a fact about this branch, not about the two calls.
-		s.hub.BroadcastAll("routers:update", []map[string]any{})
+		EvRoutersUpdate.BroadcastAll(s.hub, []map[string]any{})
 		return
 	}
 
@@ -515,7 +515,7 @@ func (s *Server) promoteAfterRemoval(removedID string) {
 	// via `moveFollowers`, which takes both ids precisely because the two callers
 	// select different connections — see its header.
 	s.moveFollowers(removedID, next)
-	s.hub.Broadcast("router-"+next, "router:active", map[string]any{"activeId": next})
+	EvRouterActive.Broadcast(s.hub, "router-"+next, map[string]any{"activeId": next})
 }
 
 // setActiveRouter records the promotion in the settings file.

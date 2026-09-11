@@ -394,7 +394,7 @@ func (w *Wifi) emitPayload() {
 	w.mu.Unlock()
 
 	if changed {
-		w.emit(wifiRooms.Join(), "wifi:update", payload)
+		EvWifiUpdate.Emit(w.emit, wifiRooms.Join(), *payload)
 	}
 }
 

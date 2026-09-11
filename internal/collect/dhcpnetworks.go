@@ -332,7 +332,7 @@ func (d *DHCPNetworks) apply(netRows []routeros.Reply, err error) {
 	// union — socket.io's `.to(a).to(b)` behaves the same way, and looping
 	// Broadcast would send that viewer the frame twice." This was two calls,
 	// so a viewer in both rooms received it twice.
-	d.emit(dhcpNetworksRooms.Join(), "lan:overview", payload)
+	EvLanOverview.Emit(d.emit, dhcpNetworksRooms.Join(), *payload)
 	// AND `lan:wan` ROUTER-WIDE, carrying just the WAN address.
 	//
 	// The empty room IS the router-wide convention — it broadcasts to
@@ -349,7 +349,7 @@ func (d *DHCPNetworks) apply(netRows []routeros.Reply, err error) {
 	// exists: `window._wanGeoDetect` is called and defined nowhere in the live
 	// repo, and `wanIpDisplay` is in that repo's own KNOWN orphan set. The port
 	// reproduces the one that works. See ToDo.md #23.
-	d.emit("", "lan:wan", map[string]any{"ts": payload.TS, "wanIp": payload.WanIP})
+	EvLanWan.Emit(d.emit, "", map[string]any{"ts": payload.TS, "wanIp": payload.WanIP})
 }
 
 // LanCidrs is what other collectors ask for when they need to know which subnets

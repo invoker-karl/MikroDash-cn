@@ -10,6 +10,7 @@ package collect
 // how the port was told to follow. They now pin the fixed behaviour.
 
 import (
+	"mikrodash/internal/hub"
 	"reflect"
 	"testing"
 
@@ -51,7 +52,7 @@ func baseSettings() routeros.Reply {
 func TestDNSFingerprintCoversComment(t *testing.T) {
 	r := &scriptedReader{settings: baseSettings(), static: []routeros.Reply{baseRow()}}
 	var emits []string
-	d := NewDNS(r, func(room, event string, payload any) { emits = append(emits, event) }, 10000)
+	d := NewDNS(r, hub.NewRelay(func(room string, ev hub.Named, payload any) { event := ev.Name(); emits = append(emits, event) }), 10000)
 
 	d.Tick()
 	if len(emits) != 1 {
@@ -77,7 +78,7 @@ func TestDNSFingerprintCoversComment(t *testing.T) {
 func TestDNSFingerprintCatchesAddress(t *testing.T) {
 	r := &scriptedReader{settings: baseSettings(), static: []routeros.Reply{baseRow()}}
 	var emits []string
-	d := NewDNS(r, func(room, event string, payload any) { emits = append(emits, event) }, 10000)
+	d := NewDNS(r, hub.NewRelay(func(room string, ev hub.Named, payload any) { event := ev.Name(); emits = append(emits, event) }), 10000)
 
 	d.Tick()
 	row := baseRow()
@@ -96,7 +97,7 @@ func TestDNSFingerprintCatchesAddress(t *testing.T) {
 // default interval — which reads as a failed save.
 func TestRefreshNowRereadsTheStaticTable(t *testing.T) {
 	r := &scriptedReader{settings: baseSettings(), static: []routeros.Reply{baseRow()}}
-	d := NewDNS(r, func(string, string, any) {}, 10000)
+	d := NewDNS(r, hub.Relay{}, 10000)
 	d.Tick()
 
 	row := baseRow()

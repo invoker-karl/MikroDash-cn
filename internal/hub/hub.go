@@ -224,8 +224,8 @@ func (h *Hub) Occupants(room string) int {
 	return len(h.rooms[room])
 }
 
-// Broadcast sends one event to everybody in a room.
-func (h *Hub) Broadcast(room, event string, payload any) {
+// broadcast sends one event to everybody in a room.
+func (h *Hub) broadcast(room, event string, payload any) {
 	h.mu.RLock()
 	members := make([]*Client, 0, len(h.rooms[room]))
 	for c := range h.rooms[room] {
@@ -245,7 +245,7 @@ func (h *Hub) Broadcast(room, event string, payload any) {
 	}
 }
 
-// BroadcastAll sends one event to EVERY connected client, in no room at all.
+// broadcastAll sends one event to EVERY connected client, in no room at all.
 //
 // This is socket.io's `io.emit`, and it has exactly two callers in the live app,
 // both in `POST /api/settings`: which pages a browser may draw is a fleet-wide
@@ -256,7 +256,7 @@ func (h *Hub) Broadcast(room, event string, payload any) {
 // is addressed to a room, because almost every payload is about one router and
 // broadcasting it fleet-wide would tell a viewer about hardware they may not be
 // permitted to see. Reach for `Broadcast` unless the fact really is global.
-func (h *Hub) BroadcastAll(event string, payload any) {
+func (h *Hub) broadcastAll(event string, payload any) {
 	h.mu.RLock()
 	members := make([]*Client, 0, len(h.clients))
 	for c := range h.clients {
@@ -276,7 +276,7 @@ func (h *Hub) BroadcastAll(event string, payload any) {
 	}
 }
 
-// BroadcastExcept sends one event to everybody in a room APART FROM one client.
+// broadcastExcept sends one event to everybody in a room APART FROM one client.
 //
 // It exists for a specific shape: an action whose result is per-viewer. The
 // Backups page's payload carries `permitted`, computed for the socket that asked
@@ -284,7 +284,7 @@ func (h *Hub) BroadcastAll(event string, payload any) {
 // Instead the actor gets their own payload and everybody else is NUDGED to
 // re-request theirs, which is what socket.io's `socket.to(room).emit()` does and
 // what the live app relies on.
-func (h *Hub) BroadcastExcept(room string, except *Client, event string, payload any) {
+func (h *Hub) broadcastExcept(room string, except *Client, event string, payload any) {
 	h.mu.RLock()
 	members := make([]*Client, 0, len(h.rooms[room]))
 	for c := range h.rooms[room] {
@@ -306,7 +306,7 @@ func (h *Hub) BroadcastExcept(room string, except *Client, event string, payload
 	}
 }
 
-// BroadcastRooms sends one event to the UNION of several rooms, once per
+// broadcastRooms sends one event to the UNION of several rooms, once per
 // client.
 //
 // It exists because socket.io's `io.to(a).to(b).emit()` delivers a single copy
@@ -314,7 +314,7 @@ func (h *Hub) BroadcastExcept(room string, except *Client, event string, payload
 // payload goes to three rooms at once, and a viewer with the Interfaces page
 // open inside the dashboard is in two of them. Looping Broadcast would send
 // that client the same frame twice.
-func (h *Hub) BroadcastRooms(rooms []string, event string, payload any) {
+func (h *Hub) broadcastRooms(rooms []string, event string, payload any) {
 	h.mu.RLock()
 	seen := map[*Client]bool{}
 	members := make([]*Client, 0)
@@ -340,9 +340,9 @@ func (h *Hub) BroadcastRooms(rooms []string, event string, payload any) {
 	}
 }
 
-// Send delivers one event to one client — the reply to something it asked for,
+// send delivers one event to one client — the reply to something it asked for,
 // and the replay of a last payload when it opens a page.
-func (h *Hub) Send(c *Client, event string, payload any) {
+func (h *Hub) send(c *Client, event string, payload any) {
 	b, err := json.Marshal(Envelope{Event: event, Data: payload})
 	if err != nil {
 		log.Printf("[hub] cannot marshal %s: %v", event, err)

@@ -33,7 +33,7 @@
 //  2. `omitempty` -- must become an OPTIONAL property, or every consumer is
 //     told a key is always there when it is not.
 //  3. `conn:update` and the `ws.go` replay of the same struct DO NOT HAVE THE
-//     SAME KEYS. `connsLight` marshals ConnsPayload through a map and deletes
+//     SAME KEYS. `ConnsLight` marshals ConnsPayload through a map and deletes
 //     four heavy indexes. No reflection can see that, so it is modelled here
 //     as a second interface, with the deleted keys read out of the Go source
 //     rather than retyped -- see heavyKeys().
@@ -560,7 +560,7 @@ func (g *gen) tsType(qual string, e ast.Expr) (string, error) {
 			return "", err
 		}
 		// A nil slice marshals to null too, and several of these fields are
-		// left nil on purpose -- connsLight's four indexes among them.
+		// left nil on purpose -- ConnsLight's four indexes among them.
 		return inner + "[] | null", nil
 	case *ast.MapType:
 		k, err := g.tsType(qual, t.Key)
@@ -628,7 +628,7 @@ func (g *gen) tsNamed(qual, name string) (string, error) {
 
 // ── The one payload whose wire form is not its struct form ──────────────────
 //
-// `conn:update` is ConnsPayload marshalled through `connsLight`, which round-
+// `conn:update` is ConnsPayload marshalled through `ConnsLight`, which round-
 // trips it through a map and DELETES four keys. The struct is unchanged, so
 // nothing about the Go type says this happened -- a generator that only reads
 // the struct would tell every consumer of `conn:update` that four heavy indexes
@@ -666,7 +666,7 @@ func (g *gen) renderConnsLight() (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, `// The `+"`conn:update`"+` payload, which is NOT ConnsPayload.
 //
-// internal/collect/connections.go marshals it through `+"`connsLight`"+`, which deletes
+// internal/collect/connections.go marshals it through `+"`ConnsLight`"+`, which deletes
 // %d keys (%s). The page room gets the full ConnsPayload; the dashboard card
 // room gets this. Both are real, and a consumer of one must not be typed as the
 // other -- the keys are ABSENT here, not null.

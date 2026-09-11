@@ -10,6 +10,7 @@ package collect
 
 import (
 	"encoding/json"
+	"mikrodash/internal/hub"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -229,7 +230,7 @@ func (s *stubReader) Connected() bool {
 // bug nobody would report because the number on screen looks right.
 func TestSetPollMsRetimesARunningCollector(t *testing.T) {
 	r := &stubReader{ticks: make(chan struct{}, 8)}
-	s := NewSystem(r, func(string, string, any) {}, 60000)
+	s := NewSystem(r, hub.Relay{}, 60000)
 	s.loop.start()
 	t.Cleanup(s.loop.stop)
 
@@ -260,7 +261,7 @@ func TestSetPollMsRetimesARunningCollector(t *testing.T) {
 // only the timer would leave the page showing the old period while polling at
 // the new one.
 func TestSetPollMsChangesWhatThePayloadReports(t *testing.T) {
-	s := NewSystem(nil, func(string, string, any) {}, 5000)
+	s := NewSystem(nil, hub.Relay{}, 5000)
 	if got := s.pollMs.ms(); got != 5000 {
 		t.Fatalf("constructed with %d, want 5000", got)
 	}

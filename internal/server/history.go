@@ -60,7 +60,7 @@ func (cn *conn) histEmit(key string) {
 	if n := len(h.redo); n > 0 {
 		redoLabel = h.redo[n-1].Label
 	}
-	cn.srv.hub.Send(cn.c, "res:history", map[string]any{
+	EvResHistory.Send(cn.srv.hub, cn.c, map[string]any{
 		"resource": key,
 		"canUndo":  len(h.undo) > 0, "canRedo": len(h.redo) > 0,
 		"undoLabel": undoLabel, "redoLabel": redoLabel,
@@ -248,7 +248,7 @@ func (cn *conn) histRun(dir string, raw json.RawMessage) {
 	if gate := ackGate(verdict, req.Ack); gate != nil {
 		gate["resource"] = res.Key
 		gate["name"] = entry.Label
-		cn.srv.hub.Send(cn.c, "res:error", gate)
+		EvResError.Send(cn.srv.hub, cn.c, gate)
 		return
 	}
 
@@ -308,6 +308,6 @@ func (cn *conn) histRun(dir string, raw json.RawMessage) {
 	if newID != "" {
 		movedID = newID
 	}
-	cn.srv.hub.Send(cn.c, "res:ok", map[string]any{
+	EvResOk.Send(cn.srv.hub, cn.c, map[string]any{
 		"resource": res.Key, "action": dir, "name": entry.Identity, "movedId": movedID})
 }

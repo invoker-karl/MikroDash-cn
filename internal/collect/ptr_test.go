@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"errors"
+	"mikrodash/internal/hub"
 	"strings"
 	"sync"
 	"testing"
@@ -222,7 +223,7 @@ func TestWirelessNamesAClientFromReverseDNS(t *testing.T) {
 	}}
 	f := newFakePTR(map[string][]string{"10.0.0.9": {"printer.lan."}})
 	ptr := ptrWith(f)
-	c := NewWireless(ros, func(string, string, any) {}, nil, 30000).
+	c := NewWireless(ros, hub.Relay{}, nil, 30000).
 		WithARP(stubARP{byMAC: map[string]string{"AA:BB:CC:DD:EE:FF": "10.0.0.9"}}).
 		WithPTR(ptr)
 

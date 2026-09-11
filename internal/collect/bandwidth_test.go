@@ -11,6 +11,7 @@ package collect
 // router I/O at all: there is nothing to capture. See the generator's header.
 
 import (
+	"mikrodash/internal/hub"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -265,8 +266,8 @@ func TestBothConnectionConsumersShareOneRead(t *testing.T) {
 	rec := &menuRecorder{}
 	cache := roscache.New(rec)
 
-	conns := NewConnections(rec, func(string, string, any) {}, nil, nil, 3000)
-	bw := NewBandwidth(rec, func(string, string, any) {}, nil, nil, nil, 3000)
+	conns := NewConnections(rec, hub.Relay{}, nil, nil, 3000)
+	bw := NewBandwidth(rec, hub.Relay{}, nil, nil, nil, 3000)
 	conns.UseCache(cache)
 	bw.UseCache(cache)
 

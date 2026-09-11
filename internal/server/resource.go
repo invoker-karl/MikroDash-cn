@@ -78,7 +78,7 @@ func (cn *conn) resErr(res, code, name string, extra map[string]any) {
 	for k, v := range extra {
 		m[k] = v
 	}
-	cn.srv.hub.Send(cn.c, "res:error", m)
+	EvResError.Send(cn.srv.hub, cn.c, m)
 }
 
 // resolve turns a browser request into a resource this connection may write,
@@ -123,7 +123,7 @@ func (cn *conn) resolve(raw json.RawMessage, auditDenied bool) (*resource.Resour
 		// Never silent. A dropped request looks exactly like a Save button that
 		// does nothing, which is the worst way for this to fail.
 		log.Printf("[res] cannot parse a request: %v", err)
-		cn.srv.hub.Send(cn.c, "res:error", map[string]any{"code": "bad-request"})
+		EvResError.Send(cn.srv.hub, cn.c, map[string]any{"code": "bad-request"})
 		return nil, nil
 	}
 	res := resource.ByKey(req.Resource)
@@ -264,7 +264,7 @@ func (cn *conn) resSave(raw json.RawMessage) {
 		if gate := ackGate(verdict, req.Ack); gate != nil {
 			gate["resource"] = res.Key
 			gate["name"] = name
-			cn.srv.hub.Send(cn.c, "res:error", gate)
+			EvResError.Send(cn.srv.hub, cn.c, gate)
 			return nil
 		}
 
@@ -339,7 +339,7 @@ func (cn *conn) resSave(raw json.RawMessage) {
 		})
 
 		cn.refreshFor(res)
-		cn.srv.hub.Send(cn.c, "res:ok", map[string]any{
+		EvResOk.Send(cn.srv.hub, cn.c, map[string]any{
 			"resource": res.Key, "action": action, "name": name})
 		return nil
 	})
@@ -427,7 +427,7 @@ func (cn *conn) resRemove(raw json.RawMessage) {
 		if gate := ackGate(verdict, req.Ack); gate != nil {
 			gate["resource"] = res.Key
 			gate["name"] = name
-			cn.srv.hub.Send(cn.c, "res:error", gate)
+			EvResError.Send(cn.srv.hub, cn.c, gate)
 			return nil
 		}
 		if _, err := cn.rsession.Exec(routeros.Cmd{
@@ -452,7 +452,7 @@ func (cn *conn) resRemove(raw json.RawMessage) {
 		})
 
 		cn.refreshFor(res)
-		cn.srv.hub.Send(cn.c, "res:ok", map[string]any{
+		EvResOk.Send(cn.srv.hub, cn.c, map[string]any{
 			"resource": res.Key, "action": "delete", "name": name})
 		return nil
 	})
@@ -520,7 +520,7 @@ func writeFailCode(err error) string {
 func (cn *conn) resSchema(raw json.RawMessage) {
 	var req resRequest
 	if json.Unmarshal(raw, &req) != nil {
-		cn.srv.hub.Send(cn.c, "res:error", map[string]any{"code": "bad-request"})
+		EvResError.Send(cn.srv.hub, cn.c, map[string]any{"code": "bad-request"})
 		return
 	}
 	res := resource.ByKey(req.Resource)
@@ -551,7 +551,7 @@ func (cn *conn) resSchema(raw json.RawMessage) {
 	out["permitted"] = !unsupported && cn.canPage(res.Page, "write")
 	out["unsupported"] = unsupported
 	out["ordered"] = res.Ordered
-	cn.srv.hub.Send(cn.c, "res:schema", out)
+	EvResSchema.Send(cn.srv.hub, cn.c, out)
 	// So the undo and redo buttons start out grey rather than absent.
 	cn.histEmit(res.Key)
 }
@@ -615,7 +615,7 @@ func (cn *conn) resAction(raw json.RawMessage) {
 		if gate := ackGate(verdict, req.Ack); gate != nil {
 			gate["resource"] = res.Key
 			gate["name"] = name
-			cn.srv.hub.Send(cn.c, "res:error", gate)
+			EvResError.Send(cn.srv.hub, cn.c, gate)
 			return nil
 		}
 
@@ -635,7 +635,7 @@ func (cn *conn) resAction(raw json.RawMessage) {
 		})
 
 		cn.refreshFor(res)
-		cn.srv.hub.Send(cn.c, "res:ok", map[string]any{
+		EvResOk.Send(cn.srv.hub, cn.c, map[string]any{
 			"resource": res.Key, "action": def.Key, "name": name})
 		return nil
 	})
@@ -664,7 +664,7 @@ func (cn *conn) resNew(raw json.RawMessage) {
 	if res == nil {
 		return
 	}
-	cn.srv.hub.Send(cn.c, "res:new", map[string]any{
+	EvResNew.Send(cn.srv.hub, cn.c, map[string]any{
 		"resource": res.Key,
 		"options":  cn.resOptions(res),
 	})
@@ -698,7 +698,7 @@ func (cn *conn) resPreview(raw json.RawMessage) {
 		cn.resErr(res.Key, "invalid", "", map[string]any{"errors": errs})
 		return
 	}
-	cn.srv.hub.Send(cn.c, "res:preview", map[string]any{
+	EvResPreview.Send(cn.srv.hub, cn.c, map[string]any{
 		"resource": res.Key,
 		"command":  res.PreviewCommand(validated, req.ID),
 	})
@@ -723,7 +723,7 @@ func (cn *conn) resRow(raw json.RawMessage) {
 		cn.resErr(res.Key, "stale-row", "", nil)
 		return
 	}
-	cn.srv.hub.Send(cn.c, "res:row", map[string]any{
+	EvResRow.Send(cn.srv.hub, cn.c, map[string]any{
 		"resource": res.Key,
 		"id":       req.ID,
 		"identity": res.IdentityOf(row),
@@ -1158,7 +1158,7 @@ func (cn *conn) resMove(raw json.RawMessage) {
 		if gate := ackGate(verdict, req.Ack); gate != nil {
 			gate["resource"] = res.Key
 			gate["name"] = name
-			cn.srv.hub.Send(cn.c, "res:error", gate)
+			EvResError.Send(cn.srv.hub, cn.c, gate)
 			return nil
 		}
 
@@ -1214,7 +1214,7 @@ func (cn *conn) resMove(raw json.RawMessage) {
 		cn.refreshFor(res)
 		// `movedId` is what the page pulses, so the eye can find the row that
 		// just changed places in a table of thirty near-identical ones.
-		cn.srv.hub.Send(cn.c, "res:ok", map[string]any{
+		EvResOk.Send(cn.srv.hub, cn.c, map[string]any{
 			"resource": res.Key, "action": "move", "name": name, "movedId": req.ID})
 		return nil
 	})

@@ -588,7 +588,7 @@ func (v *Vlans) emitLocked() {
 		return
 	}
 	v.lastFp = string(fp)
-	v.emit(vlansRooms.Join(), "vlans:update", &built)
+	EvVlansUpdate.Emit(v.emit, vlansRooms.Join(), built)
 }
 
 // Last is the most recent payload, replayed on page:focus.

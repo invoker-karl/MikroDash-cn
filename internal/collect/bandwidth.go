@@ -615,7 +615,7 @@ func (b *Bandwidth) build(rows []routeros.Reply, now int64) {
 	b.mu.Unlock()
 
 	if changed {
-		b.emit(bandwidthRooms.Join(), "bandwidth:update", payload)
+		EvBandwidthUpdate.Emit(b.emit, bandwidthRooms.Join(), *payload)
 	}
 }
 

@@ -11,6 +11,7 @@ package collect
 
 import (
 	"encoding/json"
+	"mikrodash/internal/hub"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,7 +181,7 @@ func (r *updRetryReader) settle() {
 // function always worked; nothing invoked it.
 func TestATransientUpdateAnswerIsRetried(t *testing.T) {
 	r := &updRetryReader{}
-	s := NewSystem(r, func(string, string, any) {}, 2000)
+	s := NewSystem(r, hub.Relay{}, 2000)
 
 	// A resource read first, because the payload is built there and the update
 	// fields ride along on it.

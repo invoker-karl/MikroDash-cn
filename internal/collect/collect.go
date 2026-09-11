@@ -11,6 +11,7 @@ package collect
 // "not reported". Both cases are reproduced here on purpose.
 
 import (
+	"mikrodash/internal/hub"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,7 +33,7 @@ type Reader interface {
 // Emit delivers a payload to a room. Rooms are named as the Node collectors
 // name them — "page-dns" — and the caller scopes them to a router, exactly as
 // buildRouterIo does in src/index.js.
-type Emit func(room, event string, payload any)
+type Emit = hub.Relay
 
 // clampPoll mirrors clampPoll in src/collectors/util.js: a non-numeric input
 // falls back to def, and the result is bounded by lo and hi.

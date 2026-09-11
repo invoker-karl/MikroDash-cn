@@ -113,7 +113,7 @@ func (s *Server) alertAck(w http.ResponseWriter, r *http.Request) {
 	payload := alert.MakeRow(*row, s.routerNames(row.RouterID))
 	// EVERY browser on that router, so two people looking at the same alert do
 	// not each have to acknowledge it.
-	s.hub.Broadcast("router-"+row.RouterID, "alert:acked", payload)
+	EvAlertAcked.Broadcast(s.hub, "router-"+row.RouterID, payload)
 	writeJSON(w, map[string]any{"ok": true, "alert": payload})
 }
 
@@ -179,7 +179,7 @@ func (s *Server) alertClearAll(w http.ResponseWriter, r *http.Request) {
 		if who != "" {
 			byWho = &who
 		}
-		s.hub.Broadcast("router-"+body.RouterID, "alerts:cleared-all", map[string]any{
+		EvAlertsClearedAll.Broadcast(s.hub, "router-"+body.RouterID, map[string]any{
 			"routerId": body.RouterID, "ids": ids,
 			"clearedAt": nowMillis(), "clearedBy": byWho,
 		})

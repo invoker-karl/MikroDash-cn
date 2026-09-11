@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"mikrodash/internal/hub"
 	"sync"
 	"testing"
 
@@ -192,7 +193,7 @@ func logRows(msgs ...string) []routeros.Reply {
 // is pinned rather than left to the methods looking plausible.
 func TestLogsSuspendGivesUpTheChannel(t *testing.T) {
 	d := &logDoer{rows: logRows("one", "two", "three")}
-	l := NewLogs(d, func(string, string, any) {})
+	l := NewLogs(d, hub.Relay{})
 	l.Start()
 
 	if _, opens, _ := d.counts(); opens != 1 {
@@ -220,7 +221,7 @@ func TestLogsSuspendGivesUpTheChannel(t *testing.T) {
 // and a second channel each time if `Listen` were not itself guarded.
 func TestLogsResumeIsIdempotent(t *testing.T) {
 	d := &logDoer{rows: logRows("one", "two")}
-	l := NewLogs(d, func(string, string, any) {})
+	l := NewLogs(d, hub.Relay{})
 	l.Start()
 	prints, opens, _ := d.counts()
 
@@ -246,7 +247,7 @@ func TestLogsResumeIsIdempotent(t *testing.T) {
 // page renders it as continuous.
 func TestLogsResumeReloadsWithoutDuplicating(t *testing.T) {
 	d := &logDoer{rows: logRows("one", "two", "three")}
-	l := NewLogs(d, func(string, string, any) {})
+	l := NewLogs(d, hub.Relay{})
 	l.Start()
 	if got := len(l.Last()); got != 3 {
 		t.Fatalf("the backlog holds %d line(s) after Start, want 3", got)

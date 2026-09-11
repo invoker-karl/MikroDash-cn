@@ -533,7 +533,7 @@ func (s *System) applyResource(rows []routeros.Reply, err error) {
 		// ROUTER-WIDE, not a page room: these are the top bar's gauges, the
 		// uptime chip and the RouterOS version row. A viewer sees them on every
 		// page, so gating them on a page focus would blank the chrome.
-		s.emit("", "system:update", payload)
+		EvSystemUpdate.Emit(s.emit, "", *payload)
 	}
 }
 
@@ -756,7 +756,7 @@ func (s *System) applyUpdate(row routeros.Reply) {
 	s.lastFp = ""
 	s.mu.Unlock()
 
-	s.emit("", "system:update", &updated)
+	EvSystemUpdate.Emit(s.emit, "", updated)
 }
 
 func cloneReply(r routeros.Reply) routeros.Reply {

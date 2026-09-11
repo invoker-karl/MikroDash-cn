@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"mikrodash/internal/hub"
 	"strings"
 	"testing"
 
@@ -190,7 +191,7 @@ func TestNormalisePeerState(t *testing.T) {
 // ── buildPeers ───────────────────────────────────────────────────────────────
 
 func routingWithSessions(sessions []routeros.Reply, cfg map[string]routeros.Reply) *Routing {
-	r := NewRouting(nil, func(string, string, any) {}, 10000)
+	r := NewRouting(nil, hub.Relay{}, 10000)
 	for _, s := range sessions {
 		k := peerKey(s)
 		r.sessions[k] = s
@@ -319,7 +320,7 @@ func TestStateIsPrunedForVanishedPeers(t *testing.T) {
 // TestOnlyStaticAndDynamicRoutesReachThePage: a connected route is a property of
 // an interface and belongs on the Interfaces page. The COUNTS still see it.
 func TestOnlyStaticAndDynamicRoutesReachThePage(t *testing.T) {
-	r := NewRouting(nil, func(string, string, any) {}, 10000)
+	r := NewRouting(nil, hub.Relay{}, 10000)
 	r.routes = map[string]Route{
 		"a": mapRoute(routeros.Reply{".id": "*1", ".flags": "AC"}, "ipv4"),
 		"b": mapRoute(routeros.Reply{".id": "*2", ".flags": "AS", "gateway": "198.51.100.1"}, "ipv4"),
@@ -338,7 +339,7 @@ func TestOnlyStaticAndDynamicRoutesReachThePage(t *testing.T) {
 }
 
 func TestSummaryCountsPeerStates(t *testing.T) {
-	r := NewRouting(nil, func(string, string, any) {}, 10000)
+	r := NewRouting(nil, hub.Relay{}, 10000)
 	r.emitPayload([]Peer{
 		{Key: "a", State: "established"},
 		{Key: "b", State: "idle"},
@@ -352,7 +353,7 @@ func TestSummaryCountsPeerStates(t *testing.T) {
 // TestEmptyPayloadMarshalsAsArrays: peers and routes must be [] and never null,
 // because the page iterates them.
 func TestEmptyPayloadMarshalsAsArrays(t *testing.T) {
-	r := NewRouting(nil, func(string, string, any) {}, 10000)
+	r := NewRouting(nil, hub.Relay{}, 10000)
 	r.emitPayload([]Peer{})
 	p := r.Last()
 	if p.Peers == nil || p.Routes == nil {
@@ -378,7 +379,7 @@ func TestBGPOnlySkipsTheRouteTablesAndKeepsThePeers(t *testing.T) {
 		t.Run(tc.why, func(t *testing.T) {
 			var paths []string
 			ros := &recordingReader{onDo: func(c routeros.Cmd) { paths = append(paths, c.Path) }}
-			r := NewRouting(ros, func(string, string, any) {}, 1000)
+			r := NewRouting(ros, hub.Relay{}, 1000)
 			if tc.bgpOnly {
 				r.BGPOnly()
 			}

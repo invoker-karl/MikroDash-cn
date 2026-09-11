@@ -642,7 +642,7 @@ func (c *Capsman) applyRest(reg []routeros.Reply) {
 	c.mu.Unlock()
 
 	if changed {
-		c.emit(capsmanRooms.Join(), "capsman:update", &built)
+		EvCapsmanUpdate.Emit(c.emit, capsmanRooms.Join(), built)
 	}
 }
 

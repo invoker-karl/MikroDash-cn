@@ -20,6 +20,7 @@ package collect
 import (
 	"encoding/json"
 	"fmt"
+	"mikrodash/internal/hub"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -461,7 +462,7 @@ func TestGoldenPayloads(t *testing.T) {
 			var f fixture
 			readJSON(t, filepath.Join(testdata, "fixtures", g.router, g.collector+".json"), &f)
 
-			got := build(newReplayReader(f), func(room, event string, payload any) {})
+			got := build(newReplayReader(f), hub.NewRelay(func(room string, _ hub.Named, payload any) {}))
 			if got == nil || reflect.ValueOf(got).IsNil() {
 				t.Fatal("the collector produced no payload")
 			}

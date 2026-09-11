@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"log"
+	"mikrodash/internal/hub"
 	"time"
 
 	"mikrodash/internal/collect"
@@ -194,7 +195,7 @@ func (s *Session) donePriming() {
 // need one, and is the mistake this note exists to prevent.
 func (s *Session) primeSystem(within time.Duration) bool {
 	c := collect.NewSystem(primeReader{reader{s}, within},
-		func(string, string, any) {}, s.eff.Poll["system"])
+		hub.Relay{}, s.eff.Poll["system"])
 	// ONE COMMAND, which is the whole claim this makes. A fresh collector has a
 	// zero `healthAt`, so its first Tick would ask `/system/health/print` before
 	// the gauges -- a second roslimit-gated command per router for `TempC`,

@@ -2,6 +2,7 @@ package collect
 
 import (
 	"errors"
+	"mikrodash/internal/hub"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,7 +62,7 @@ func (r *splitReader) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
 // poll the rates read runs on every tick and the other three do not.
 func TestIfStatusSplitsTheMetadataReads(t *testing.T) {
 	r := &splitReader{byMenu: map[string]int{}}
-	c := NewIfStatus(r, func(string, string, any) {}, "r1", 1000)
+	c := NewIfStatus(r, hub.Relay{}, "r1", 1000)
 
 	want := c.metaTicks()
 	if want < 2 {
@@ -90,7 +91,7 @@ func TestIfStatusSplitsTheMetadataReads(t *testing.T) {
 // carrying its addresses, MAC and counters, and carries the NEW rate.
 func TestIfStatusPublishesFullRowsBetweenMetadataReads(t *testing.T) {
 	r := &splitReader{byMenu: map[string]int{}}
-	c := NewIfStatus(r, func(string, string, any) {}, "r1", 1000)
+	c := NewIfStatus(r, hub.Relay{}, "r1", 1000)
 
 	c.Tick() // reads everything
 	first := c.Last()
@@ -117,7 +118,7 @@ func TestIfStatusPublishesFullRowsBetweenMetadataReads(t *testing.T) {
 // reading it came from — an interface would show its last known speed for ever.
 func TestIfStatusRatesNeverWriteBackIntoTheHeldMetadata(t *testing.T) {
 	r := &splitReader{byMenu: map[string]int{}}
-	c := NewIfStatus(r, func(string, string, any) {}, "r1", 1000)
+	c := NewIfStatus(r, hub.Relay{}, "r1", 1000)
 	c.Tick()
 
 	c.mu.Lock()
@@ -135,7 +136,7 @@ func TestIfStatusRatesNeverWriteBackIntoTheHeldMetadata(t *testing.T) {
 // is no longer exercising the code it was recorded against.
 func TestIfStatusSlowPollReadsEveryMenuEveryTick(t *testing.T) {
 	r := &splitReader{byMenu: map[string]int{}}
-	c := NewIfStatus(r, func(string, string, any) {}, "r1", 30000)
+	c := NewIfStatus(r, hub.Relay{}, "r1", 30000)
 	if n := c.metaTicks(); n != 1 {
 		t.Fatalf("a 30s poll must not split; metaTicks = %d", n)
 	}
@@ -156,7 +157,7 @@ func TestIfStatusSlowPollReadsEveryMenuEveryTick(t *testing.T) {
 // and resuming must not publish an hour-old interface list beside a live rate.
 func TestIfStatusSuspendArmsTheNextMetadataRead(t *testing.T) {
 	r := &splitReader{byMenu: map[string]int{}}
-	c := NewIfStatus(r, func(string, string, any) {}, "r1", 1000)
+	c := NewIfStatus(r, hub.Relay{}, "r1", 1000)
 	c.Tick()
 	before := r.byMenu["/interface/print"]
 
@@ -188,7 +189,7 @@ func (r *routeSplitReader) Do(cmd routeros.Cmd) ([]routeros.Reply, error) {
 // the poll; the route tables are large, rarely move, and go to the slow lane.
 func TestRoutingSplitsTheRouteTables(t *testing.T) {
 	r := &routeSplitReader{byMenu: map[string]int{}}
-	c := NewRouting(r, func(string, string, any) {}, 10000)
+	c := NewRouting(r, hub.Relay{}, 10000)
 
 	const ticks = 9
 	for i := 0; i < ticks; i++ {
@@ -211,7 +212,7 @@ func TestRoutingSplitsTheRouteTables(t *testing.T) {
 // stale one.
 func TestRoutingFirstTickReadsTheRoutes(t *testing.T) {
 	r := &routeSplitReader{byMenu: map[string]int{}}
-	c := NewRouting(r, func(string, string, any) {}, 10000)
+	c := NewRouting(r, hub.Relay{}, 10000)
 	c.Tick()
 	if got := r.byMenu["/ip/route/print"]; got != 1 {
 		t.Errorf("first tick read the route table %d times, want 1", got)
@@ -226,7 +227,7 @@ func TestRoutingFirstTickReadsTheRoutes(t *testing.T) {
 // their own edit take half a minute to appear.
 func TestRoutingWriteDoesNotWaitForTheSlowLane(t *testing.T) {
 	r := &routeSplitReader{byMenu: map[string]int{}}
-	c := NewRouting(r, func(string, string, any) {}, 10000)
+	c := NewRouting(r, hub.Relay{}, 10000)
 	c.Tick()
 	before := r.byMenu["/ip/route/print"]
 	c.RefreshNow()
@@ -587,7 +588,7 @@ func TestResubscribeBindsTheCallbackToTheNewMenu(t *testing.T) {
 // routers and the per-minute figures could be compared with the pool's.
 func TestVpnSlowMenusAreOnTheSlowLane(t *testing.T) {
 	// A fast poll must not drag the slow menus onto the fast lane.
-	fast := NewVPN(nil, func(string, string, any) {}, 5000)
+	fast := NewVPN(nil, hub.Relay{}, 5000)
 	if got := fast.sched.cadence(); got < vpnSlowTarget {
 		t.Errorf("with a 5s poll the subscription asks for %v; the three non-WireGuard "+
 			"menus belong on the %v lane. This is the shape that tripled vpn's cost in "+
@@ -597,7 +598,7 @@ func TestVpnSlowMenusAreOnTheSlowLane(t *testing.T) {
 	// clamps its own poll to thirty seconds -- the same value. A floor was
 	// written here first to honour "the operator wants less", and the branch was
 	// unreachable; the test says so rather than pretending otherwise.
-	slow := NewVPN(nil, func(string, string, any) {}, 60000)
+	slow := NewVPN(nil, hub.Relay{}, 60000)
 	if got := slow.sched.cadence(); got != vpnSlowTarget {
 		t.Errorf("a 60s poll produced %v, want %v: clampPoll caps this collector at the "+
 			"slow target, so there is no slower case to honour", got, vpnSlowTarget)

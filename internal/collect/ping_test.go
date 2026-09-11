@@ -3,6 +3,7 @@ package collect
 import (
 	"encoding/json"
 	"math"
+	"mikrodash/internal/hub"
 	"os"
 	"path/filepath"
 	"sync"
@@ -97,7 +98,7 @@ func TestPingSequencesMatchTheLiveCollector(t *testing.T) {
 	c := loadPingCorpus(t)
 	for _, cs := range c.Cases {
 		t.Run(cs.Name, func(t *testing.T) {
-			p := NewPing(nil, func(string, string, any) {}, 5000, "198.51.100.1")
+			p := NewPing(nil, hub.Relay{}, 5000, "198.51.100.1")
 			for i, pkt := range cs.Packets {
 				row := routeros.Reply{}
 				for k, v := range pkt {
@@ -210,7 +211,7 @@ func TestPingSummaryPacketsAreSkipped(t *testing.T) {
 	}
 	// And the consequence, driven through the collector: a summary must not
 	// move the loss figure.
-	p := NewPing(nil, func(string, string, any) {}, 5000, "198.51.100.1")
+	p := NewPing(nil, hub.Relay{}, 5000, "198.51.100.1")
 	p.ProcessRow(routeros.Reply{"time": "10ms"}, 1)
 	before := *p.Last().Loss
 	if pingIsResult(routeros.Reply{"sent": "5"}) {
@@ -260,7 +261,7 @@ func TestPingSummaryIsSkippedByTheSTREAM(t *testing.T) {
 		{"time": "10ms"},
 	}}
 	var emits int
-	p := NewPing(f, func(string, string, any) { emits++ }, 5000, "198.51.100.1")
+	p := NewPing(f, hub.NewRelay(func(_ string, _ hub.Named, _ any) { emits++ }), 5000, "198.51.100.1")
 	p.Start()
 
 	h := p.History()
@@ -283,7 +284,7 @@ func TestPingPermissionDeniedLatches(t *testing.T) {
 		t.Run(msg, func(t *testing.T) {
 			f := &fakePingStream{conn: true, err: errString(msg)}
 			var events []string
-			p := NewPing(f, func(_, ev string, _ any) { events = append(events, ev) }, 5000, "1.1.1.1")
+			p := NewPing(f, hub.NewRelay(func(_ string, named hub.Named, _ any) { ev := named.Name(); events = append(events, ev) }), 5000, "1.1.1.1")
 			p.Start()
 
 			if !p.Denied() {
@@ -331,7 +332,7 @@ func TestPingPermissionDeniedLatches(t *testing.T) {
 // A transient error must NOT latch: the next reconnect or resume should try again.
 func TestPingTransientErrorDoesNotLatch(t *testing.T) {
 	f := &fakePingStream{conn: true, err: errString("connection reset by peer")}
-	p := NewPing(f, func(string, string, any) {}, 5000, "1.1.1.1")
+	p := NewPing(f, hub.Relay{}, 5000, "1.1.1.1")
 	p.Start()
 	if p.Denied() {
 		t.Fatal("a transient error latched as a permission refusal")
@@ -421,7 +422,7 @@ func TestAFastPingStreamsAndASlowOnePolls(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := &pollDoer{}
-			p := NewPing(d, func(string, string, any) {}, tc.pollMs, "1.1.1.1")
+			p := NewPing(d, hub.Relay{}, tc.pollMs, "1.1.1.1")
 			if got := p.pollsRatherThanStreams(); got != tc.wantPollPath {
 				t.Fatalf("at %dms pollsRatherThanStreams = %v, want %v — the line is "+
 					"five seconds, which is what RouterOS will honour",
@@ -455,7 +456,7 @@ func TestTheSlowPathTakesReadingsAndSkipsTheSummary(t *testing.T) {
 		{"sent": "1", "received": "1", "packet-loss": "0"}, // the summary
 	}}
 	var emitted int
-	p := NewPing(d, func(string, string, any) { emitted++ }, 30000, "1.1.1.1")
+	p := NewPing(d, hub.NewRelay(func(_ string, _ hub.Named, _ any) { emitted++ }), 30000, "1.1.1.1")
 
 	p.pollOnce()
 
@@ -473,7 +474,7 @@ func TestTheSlowPathTakesReadingsAndSkipsTheSummary(t *testing.T) {
 // one running after Stop keeps pinging a router nobody is watching.
 func TestAPollingPingStopsCleanly(t *testing.T) {
 	d := &pollDoer{}
-	p := NewPing(d, func(string, string, any) {}, 30000, "1.1.1.1")
+	p := NewPing(d, hub.Relay{}, 30000, "1.1.1.1")
 	p.Start()
 	p.Stop()
 	p.mu.Lock()
@@ -635,7 +636,7 @@ func TestFoldPingLossIsOverTheWindowNotAllTime(t *testing.T) {
 func TestPingSuspendStopsWhicheverHalfIsRunning(t *testing.T) {
 	t.Run("a fast ping streams, and Suspend gives the channel up", func(t *testing.T) {
 		d := &pollDoer{rows: []routeros.Reply{{"time": "10ms"}}}
-		p := NewPing(d, func(string, string, any) {}, 5000, "198.51.100.1")
+		p := NewPing(d, hub.Relay{}, 5000, "198.51.100.1")
 		p.Start()
 		defer p.Stop()
 
@@ -655,7 +656,7 @@ func TestPingSuspendStopsWhicheverHalfIsRunning(t *testing.T) {
 
 	t.Run("a slow ping polls, and Suspend stops the loop", func(t *testing.T) {
 		d := &pollDoer{rows: []routeros.Reply{{"time": "10ms"}}}
-		p := NewPing(d, func(string, string, any) {}, 30000, "198.51.100.1")
+		p := NewPing(d, hub.Relay{}, 30000, "198.51.100.1")
 		p.Start()
 		defer p.Stop()
 

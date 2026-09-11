@@ -585,7 +585,7 @@ func (q *Queues) apply(simpleRows []routeros.Reply, err error) {
 	q.mu.Unlock()
 
 	if changed {
-		q.emit(queuesRooms.Join(), "queues:update", payload)
+		EvQueuesUpdate.Emit(q.emit, queuesRooms.Join(), *payload)
 	}
 }
 

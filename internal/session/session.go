@@ -673,7 +673,8 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// union — interfaceStatus sends its full payload to three rooms and a viewer
 	// can be in two of them. socket.io's `.to(a).to(b)` behaves the same way,
 	// and looping Broadcast would send that viewer the frame twice.
-	emit := func(sub, event string, payload any) {
+	emit := hub.NewRelay(func(sub string, e hub.Named, payload any) {
+		event := e.Name()
 		// ── THE ALERT EVALUATOR SEES EVERY PAYLOAD ──────────────────────────
 		//
 		// One interception point rather than a call in each collector, which is
@@ -720,7 +721,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		m.history.Record(s.RouterID, event, payload)
 
 		if sub == "" {
-			m.h.Broadcast("router-"+s.RouterID, event, payload)
+			m.h.Forward([]string{"router-" + s.RouterID}, e, payload)
 			return
 		}
 		if strings.Contains(sub, ",") {
@@ -729,11 +730,11 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 			for _, one := range subs {
 				rooms = append(rooms, room+strings.TrimSpace(one))
 			}
-			m.h.BroadcastRooms(rooms, event, payload)
+			m.h.Forward(rooms, e, payload)
 			return
 		}
-		m.h.Broadcast(room+sub, event, payload)
-	}
+		m.h.Forward([]string{room + sub}, e, payload)
+	})
 	s.dns = collect.NewDNS(reader{s}, emit, s.eff.Poll["dns"])
 	// Built FIRST, because three other collectors take it as their RateSource.
 	// It is the only one they depend on, and it depends on none of them.
@@ -2202,7 +2203,7 @@ func (s *Session) announce() {
 		"connected": s.Connected(),
 		"reason":    s.LastError(),
 	}
-	s.h.Broadcast("router-"+s.RouterID, "router:status", frame)
+	EvRouterStatus.Broadcast(s.h, "router-"+s.RouterID, frame)
 	// ── AND THE FLEET-WIDE ROOM, WHICH IS NOT THE SAME AUDIENCE ──────────
 	//
 	// The Settings and Devices tables show EVERY router, not only the one whose
@@ -2215,7 +2216,7 @@ func (s *Session) announce() {
 	// A browser in this router's room receives both, which the pool did too:
 	// `main.ts` records the state into `routerStatus` by id, so a repeat is a
 	// second write of the same value rather than a visible event.
-	s.h.BroadcastAll("router:status", frame)
+	EvRouterStatus.BroadcastAll(s.h, frame)
 }
 
 // InWriteQueue serialises writes to one router.
@@ -2294,3 +2295,8 @@ func rosDebugOn(cfg store.Settings) bool {
 	v, _ := cfg["rosDebug"].(bool)
 	return v
 }
+
+// EvRouterStatus is a router's connection state, sent to its own room and to
+// every client for the device picker. A map rather than a struct, so its
+// TypeScript type is hand-written in web/src/events-hand.ts.
+var EvRouterStatus = hub.Declare[map[string]any]("router:status")

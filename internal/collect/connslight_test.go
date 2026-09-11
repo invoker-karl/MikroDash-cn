@@ -22,6 +22,7 @@ package collect
 
 import (
 	"encoding/json"
+	"mikrodash/internal/hub"
 	"testing"
 
 	"mikrodash/internal/routeros"
@@ -74,7 +75,7 @@ func TestTheGlobalEmitOmitsTheHeavyKeysRatherThanNullingThem(t *testing.T) {
 	// THE GLOBAL EMIT IS TAKEN FROM Tick, NOT BUILT HERE.
 	//
 	// The first version of this test built the light payload itself and wrapped
-	// it in connsLight — which asserts the wrapper works and says nothing about
+	// it in ConnsLight — which asserts the wrapper works and says nothing about
 	// whether the collector uses it. Reverting the emit to `&light`, the exact
 	// defect this file exists for, SURVIVED. A test that constructs the thing it
 	// is checking is a seam that bypasses the path it stands in for.
@@ -119,12 +120,13 @@ func tickEmit(t *testing.T) (emitted any, replay *ConnsPayload) {
 	}}
 	var got any
 	seen := 0
-	emit := func(room, event string, payload any) {
+	emit := hub.NewRelay(func(room string, ev hub.Named, payload any) {
+		event := ev.Name()
 		if event == "conn:update" {
 			got = payload
 			seen++
 		}
-	}
+	})
 	c := NewConnections(ros, emit, nil, nil, 3000)
 	c.Tick()
 	if seen != 1 {
@@ -142,7 +144,7 @@ func TestTheWrapperCarriesAFieldNobodyListed(t *testing.T) {
 	// `pollMs` is declared AFTER the four heavy indexes, so a hand-written
 	// literal that stopped at them would drop it.
 	p := &ConnsPayload{TS: 1, PollMs: 30000, Processed: 7}
-	keys := keysOf(t, connsLight{p})
+	keys := keysOf(t, ConnsLight{p})
 	for _, k := range []string{"pollMs", "processed", "total"} {
 		if !keys[k] {
 			t.Errorf("the light payload lost %s", k)

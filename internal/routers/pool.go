@@ -98,6 +98,7 @@ package routers
 
 import (
 	"log"
+	"mikrodash/internal/hub"
 	"sort"
 	"strconv"
 	"sync"
@@ -502,7 +503,7 @@ func (p *Pool) build(cfg RouterConfig) *poolSession {
 	}
 	r := reader{s}
 	// EMITS GO NOWHERE — see the header. `Last()` is the only reader.
-	nowhere := func(string, string, any) {}
+	nowhere := hub.Relay{}
 	// #105: the router's effective intervals and enabled set.
 	eff := collection.Resolve(p.settings, cfg.Collection)
 	s.eff = eff
@@ -538,7 +539,7 @@ func (p *Pool) build(cfg RouterConfig) *poolSession {
 		s.historyOn = cfg.ReportingEnabled
 		id := cfg.ID
 		rec := p.record
-		emit := func(_, event string, payload any) { rec(id, event, payload) }
+		emit := hub.NewRelay(func(_ string, e hub.Named, payload any) { rec(id, e.Name(), payload) })
 		s.traffic = collect.NewTraffic(r, emit, cfg.DefaultIf, 5)
 		s.ping = collect.NewPing(r, emit, eff.Poll["ping"], cfg.PingTarget)
 	}

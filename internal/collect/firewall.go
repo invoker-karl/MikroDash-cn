@@ -417,7 +417,7 @@ func (f *Firewall) buildAndEmit() {
 	f.mu.Unlock()
 
 	if changed {
-		f.emit(firewallRooms.Join(), "firewall:update", payload)
+		EvFirewallUpdate.Emit(f.emit, firewallRooms.Join(), *payload)
 	}
 }
 

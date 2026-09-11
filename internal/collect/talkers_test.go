@@ -15,6 +15,7 @@ package collect
 // guards against.
 
 import (
+	"mikrodash/internal/hub"
 	"testing"
 
 	"mikrodash/internal/routeros"
@@ -23,11 +24,13 @@ import (
 func talkersFor(t *testing.T, rows []routeros.Reply, topN int) *TalkersPayload {
 	t.Helper()
 	var got *TalkersPayload
-	c := NewTalkers(nil, func(room, event string, payload any) {
-		if p, ok := payload.(*TalkersPayload); ok {
-			got = p
+	c := NewTalkers(nil, hub.NewRelay(func(room string, _ hub.Named, payload any) {
+		// A VALUE, not a pointer: an event carries exactly its declared type
+		// (internal/hub/event.go), and talkers:update declares TalkersPayload.
+		if p, ok := payload.(TalkersPayload); ok {
+			got = &p
 		}
-	}, 30000, topN)
+	}), 30000, topN)
 	c.commit(rows)
 	if got == nil {
 		t.Fatal("nothing was emitted")
@@ -184,7 +187,7 @@ func TestNoDevicesIsStillAvailable(t *testing.T) {
 // TestTheFingerprintIgnoresTheName — a rename alone does not repaint the card.
 func TestTheFingerprintIgnoresTheName(t *testing.T) {
 	emits := 0
-	c := NewTalkers(nil, func(room, event string, payload any) { emits++ }, 30000, 5)
+	c := NewTalkers(nil, hub.NewRelay(func(room string, _ hub.Named, payload any) { emits++ }), 30000, 5)
 	c.commit([]routeros.Reply{row("before", "02:00:00:00:00:01", "1000000", "0")})
 	c.commit([]routeros.Reply{row("after", "02:00:00:00:00:01", "1000000", "0")})
 	if emits != 1 {

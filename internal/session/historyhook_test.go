@@ -27,7 +27,7 @@ import (
 
 func TestTheHistoryRecorderSitsOnTheOneEmitSeam(t *testing.T) {
 	src := sessionSource(t)
-	emit := blockBetween(t, src, "emit := func(sub, event string, payload any) {", "\n\t}")
+	emit := blockBetween(t, src, "emit := hub.NewRelay(func(sub string, e hub.Named, payload any) {", "\n\t}")
 	if !strings.Contains(emit, "m.history.Record(") {
 		t.Error("the emit closure does not call m.history.Record — a page-scoped " +
 			"event would then stop being recorded, silently, which is the exact " +

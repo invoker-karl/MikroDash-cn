@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"mikrodash/internal/hub"
 	"testing"
 
 	"mikrodash/internal/routeros"
@@ -209,7 +210,7 @@ func TestWirelessClientGetsItsAddressFromARP(t *testing.T) {
 			{"name": "wifi1", "configuration.ssid": "Home", "disabled": "false", "running": "true"},
 		},
 	}}
-	c := NewWireless(ros, func(string, string, any) {}, nil, 30000).
+	c := NewWireless(ros, hub.Relay{}, nil, 30000).
 		WithARP(stubARP{byMAC: map[string]string{"AA:BB:CC:DD:EE:FF": "10.0.0.69"}})
 	c.Tick()
 
@@ -232,7 +233,7 @@ func TestWirelessSurvivesAMissingARP(t *testing.T) {
 			{"mac-address": "AA:BB:CC:DD:EE:FF", "signal": "-52", "interface": "wifi1"},
 		},
 	}}
-	c := NewWireless(ros, func(string, string, any) {}, nil, 30000)
+	c := NewWireless(ros, hub.Relay{}, nil, 30000)
 	c.Tick()
 	if got := c.Last(); got == nil || len(got.Clients) != 1 || got.Clients[0].IP != "" {
 		t.Errorf("with no ARP: %+v", got)
@@ -269,7 +270,7 @@ func TestTopologyFillsTheARPIPSeam(t *testing.T) {
 		// configuration on this segment, which is the case the fallback is for.
 		{"mac-address": "AA:BB:CC:DD:EE:FF", "identity": "cAP", "interface": "Home"},
 	}}
-	c := NewTopology(r, func(string, string, any) {}, nil, "r1", "lab", 30000).
+	c := NewTopology(r, hub.Relay{}, nil, "r1", "lab", 30000).
 		WithARP(stubARP{byMAC: map[string]string{"AA:BB:CC:DD:EE:FF": "10.0.0.4"}})
 	c.Tick()
 

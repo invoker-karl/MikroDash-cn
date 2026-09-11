@@ -2,6 +2,7 @@ package collect
 
 import (
 	"encoding/json"
+	"mikrodash/internal/hub"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,7 +92,7 @@ func TestTrafficFlagDefaults(t *testing.T) {
 // The subscription set is REFCOUNTED: two viewers on one interface must not
 // have the first to leave stop the stream for the second.
 func TestTrafficWatchRefcount(t *testing.T) {
-	tr := NewTraffic(fakeReader{}, func(string, string, any) {}, "WAN1", 5)
+	tr := NewTraffic(fakeReader{}, hub.Relay{}, "WAN1", 5)
 	tr.SetAvailable([]string{"WAN1", "ether2"})
 
 	tr.Watch("ether2")
@@ -124,7 +125,7 @@ func TestTrafficWatchRefcount(t *testing.T) {
 // A name a browser sends reaches a router command, so it is checked against the
 // interfaces that actually exist rather than merely escaped.
 func TestTrafficNormalizeIfName(t *testing.T) {
-	tr := NewTraffic(fakeReader{}, func(string, string, any) {}, "WAN1", 5)
+	tr := NewTraffic(fakeReader{}, hub.Relay{}, "WAN1", 5)
 
 	// BEFORE the interface list arrives nothing is accepted. The alternative is
 	// trusting the browser for one poll interval.
@@ -145,7 +146,7 @@ func TestTrafficNormalizeIfName(t *testing.T) {
 
 // History is kept whether anyone is watching or not, and bounded.
 func TestTrafficHistoryRing(t *testing.T) {
-	tr := NewTraffic(fakeReader{}, func(string, string, any) {}, "WAN1", 1) // 60 points
+	tr := NewTraffic(fakeReader{}, hub.Relay{}, "WAN1", 1) // 60 points
 	for i := 0; i < 70; i++ {
 		tr.onPacket(routeros.Reply{"name": "WAN1", "rx-bits-per-second": "1000000",
 			"tx-bits-per-second": "2000000"})
@@ -171,7 +172,7 @@ func TestTrafficHistoryRing(t *testing.T) {
 // a Session makes impossible: it is built per router ID, so a different router
 // is a different Session and a different collector.
 func TestReconnectKeepsTheTrafficHistory(t *testing.T) {
-	tr := NewTraffic(fakeReader{}, func(string, string, any) {}, "WAN1", 1)
+	tr := NewTraffic(fakeReader{}, hub.Relay{}, "WAN1", 1)
 	for i := 0; i < 10; i++ {
 		tr.onPacket(routeros.Reply{"name": "WAN1", "rx-bits-per-second": "1000000",
 			"tx-bits-per-second": "2000000"})
@@ -211,7 +212,7 @@ func TestReconnectKeepsTheTrafficHistory(t *testing.T) {
 // not this month's client destructures it.
 func TestTheHistoryPayloadCarriesItsWindow(t *testing.T) {
 	for _, minutes := range []int{5, 30, 120} {
-		tr := NewTraffic(fakeReader{}, func(string, string, any) {}, "ether1", minutes)
+		tr := NewTraffic(fakeReader{}, hub.Relay{}, "ether1", minutes)
 		got := tr.Watch("ether1")
 		if got.WindowMinutes != minutes {
 			t.Errorf("a %d-minute buffer reported windowMinutes=%d", minutes, got.WindowMinutes)
@@ -223,7 +224,7 @@ func TestTheHistoryPayloadCarriesItsWindow(t *testing.T) {
 	// AND IT IS IN THE JSON, under the live spelling. A Go field with no tag, or
 	// the wrong one, passes every check above and still reaches the browser as
 	// `WindowMinutes` — which is exactly how `/api/roles` shipped `Page`/`Access`.
-	tr := NewTraffic(fakeReader{}, func(string, string, any) {}, "ether1", 30)
+	tr := NewTraffic(fakeReader{}, hub.Relay{}, "ether1", 30)
 	b, err := json.Marshal(tr.Watch("ether1"))
 	if err != nil {
 		t.Fatal(err)

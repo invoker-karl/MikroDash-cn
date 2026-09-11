@@ -20,6 +20,7 @@ package session
 
 import (
 	"log"
+	"mikrodash/internal/hub"
 	"time"
 
 	"mikrodash/internal/collection"
@@ -183,7 +184,7 @@ func (s *Session) applyDormancy(plan dormancy.Plan, targets map[string]collector
 		}
 	}
 	if plan.Emit {
-		s.h.Broadcast("router-"+s.RouterID, "collection:status", map[string]any{
+		EvCollectionStatus.Broadcast(s.h, "router-"+s.RouterID, map[string]any{
 			"routerId": s.RouterID,
 			// NEVER NIL: the live payload is always an array, and `dormant: null`
 			// would make `Array.isArray(st.dormant)` false in
@@ -281,3 +282,7 @@ func nonNil(v []string) []string {
 	}
 	return v
 }
+
+// EvCollectionStatus reports which collectors are dormant. Sent here when
+// dormancy changes and by internal/server when a page opens; declared once.
+var EvCollectionStatus = hub.Declare[map[string]any]("collection:status")

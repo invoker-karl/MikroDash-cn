@@ -468,7 +468,7 @@ func (r *RosUsers) applyLocked(userRows []routeros.Reply) {
 		return
 	}
 	r.lastFP = fp.String()
-	r.emit(rosUsersRooms.Join(), "rosusers:update", payload)
+	EvRosusersUpdate.Emit(r.emit, rosUsersRooms.Join(), *payload)
 }
 
 func (r *RosUsers) Last() *RosUsersPayload {

@@ -947,7 +947,8 @@ func TestTheConnectEmitNamesTheRouterBeingJoined(t *testing.T) {
 	}
 	join := strings.Index(body, `cn.srv.hub.Join(cn.c, "router-"+id)`)
 	emit := strings.Index(body, "cn.sendOpenAlerts(id)")
-	switched := strings.Index(body, `"router:switched"`)
+	// The send names its DECLARED event, not a string (internal/hub/event.go).
+	switched := strings.Index(body, "EvRouterSwitched.Send(")
 	if join < 0 {
 		t.Fatal("selectRouter no longer joins router-<id>")
 	}

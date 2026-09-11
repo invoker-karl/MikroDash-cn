@@ -1,6 +1,7 @@
 package collect
 
 import (
+	"mikrodash/internal/hub"
 	"testing"
 
 	"mikrodash/internal/routeros"
@@ -116,7 +117,7 @@ func TestTickDropsInterfaceMetadataRows(t *testing.T) {
 			{"name": "wifi1", "configuration.ssid": "Home", "disabled": "false", "running": "true"},
 		},
 	}}
-	c := NewWireless(ros, func(string, string, any) {}, nil, 30000)
+	c := NewWireless(ros, hub.Relay{}, nil, 30000)
 	c.Tick()
 	got := c.Last()
 	if got == nil {

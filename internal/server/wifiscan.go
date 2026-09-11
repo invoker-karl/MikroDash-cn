@@ -27,7 +27,7 @@ func (cn *conn) scanErr(code string, extra map[string]any) {
 	for k, v := range extra {
 		body[k] = v
 	}
-	cn.srv.hub.Send(cn.c, "wifiscan:error", body)
+	EvWifiscanError.Send(cn.srv.hub, cn.c, body)
 }
 
 // mayScan is BOTH gates, deliberately.
@@ -81,7 +81,7 @@ func (cn *conn) wifiscanInterfaces() {
 		out = append(out, map[string]any{"name": i.Name, "running": i.Running, "clients": i.Clients})
 	}
 	_, scanning := cn.srv.scans.Running(cn.routerID)
-	cn.srv.hub.Send(cn.c, "wifiscan:interfaces", map[string]any{
+	EvWifiscanInterfaces.Send(cn.srv.hub, cn.c, map[string]any{
 		"permitted":  cn.mayScan(),
 		"interfaces": out,
 		"scanning":   scanning,
@@ -151,7 +151,7 @@ func (cn *conn) wifiscanStart(raw json.RawMessage) {
 	// the registry is fleet-wide — a scan must report to the dialog that started
 	// it, not to whichever connection asked most recently.
 	scan, v := cn.srv.scans.Begin(admit, func(d wifiscan.Done) {
-		cn.srv.hub.Send(cn.c, "wifiscan:done", map[string]any{
+		EvWifiscanDone.Send(cn.srv.hub, cn.c, map[string]any{
 			"scanId": d.ScanID, "reason": d.Reason, "rows": d.Rows,
 			"sampleCount": d.SampleCount, "truncated": d.Truncated,
 		})
@@ -171,7 +171,7 @@ func (cn *conn) wifiscanStart(raw json.RawMessage) {
 		return
 	}
 
-	cn.srv.hub.Send(cn.c, "wifiscan:state", map[string]any{
+	EvWifiscanState.Send(cn.srv.hub, cn.c, map[string]any{
 		"scanning": true, "scanId": scan.ID, "iface": scan.Iface,
 		"durationSec": scan.DurationSec, "startedAt": scan.StartedAt,
 		"endsAt": scan.EndsAt, "currentChannelMhz": currentChannel, "rows": []any{},
@@ -276,13 +276,13 @@ type scanEmitter struct {
 }
 
 func (e scanEmitter) Rows(scanID string, rows []wifiscan.Row, truncated bool) {
-	e.srv.hub.Send(e.cn.c, "wifiscan:rows", map[string]any{
+	EvWifiscanRows.Send(e.srv.hub, e.cn.c, map[string]any{
 		"scanId": scanID, "rows": rows, "truncated": truncated,
 	})
 }
 
 func (e scanEmitter) Error(scanID, code, message string) {
-	e.srv.hub.Send(e.cn.c, "wifiscan:error", map[string]any{
+	EvWifiscanError.Send(e.srv.hub, e.cn.c, map[string]any{
 		"scanId": scanID, "code": code, "message": message,
 	})
 }
