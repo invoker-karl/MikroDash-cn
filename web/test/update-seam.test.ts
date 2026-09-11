@@ -74,6 +74,25 @@ const COVERS = ['rosUpdateRow', 'updModal', 'upd_from', 'upd_to', 'upd_channel',
   'upd_error', 'upd_go'];
 if (process.argv.includes('--ids')) { console.log(JSON.stringify(COVERS)); process.exit(0); }
 
+/**
+ * A clock the cases move by hand, so "stayed up for three seconds" is a
+ * statement about the frames rather than about how fast this machine is.
+ */
+function fakeClock() {
+  let now = 0, seq = 0;
+  const due = new Map();
+  return {
+    set: (fn, ms) => { const id = ++seq; due.set(id, { at: now + ms, fn }); return id; },
+    clear: (id) => { due.delete(id); },
+    advance(ms) {
+      now += ms;
+      for (const [id, t] of [...due].sort((a, b) => a[1].at - b[1].at)) {
+        if (t.at <= now && due.has(id)) { due.delete(id); t.fn(); }
+      }
+    },
+  };
+}
+
 function run(payload, o) {
   const opts = o || {};
   const doc = makeDoc(IDS, {});
@@ -84,6 +103,10 @@ function run(payload, o) {
   globalThis.window = {};
   const prevRaf = globalThis.requestAnimationFrame;
   globalThis.requestAnimationFrame = ((fn) => { fn(); return 0; });
+  const clock = fakeClock();
+  const prevTimers = { set: globalThis.setTimeout, clear: globalThis.clearTimeout };
+  globalThis.setTimeout = clock.set;
+  globalThis.clearTimeout = clock.clear;
   try {
     delete require.cache[require.resolve(OUT)];
     const mod = require(OUT);
@@ -130,9 +153,11 @@ function run(payload, o) {
     }
     // ── WHAT THE SOCKET DELIVERS AFTER THE DIALOG IS OPEN, in order ─────
     //
-    // `reopen` presses Update again, which is a fresh dialog.
+    // `reopen` presses Update again, which is a fresh dialog; `wait` moves the
+    // clock on by that many milliseconds.
     for (const [ev, p] of opts.frames || []) {
       if (ev === 'reopen') doc.dispatch('click', btn);
+      else if (ev === 'wait') clock.advance(p);
       else if (handlers[ev]) handlers[ev](p);
     }
   } finally {
@@ -140,6 +165,8 @@ function run(payload, o) {
     if (prev.win === undefined) delete globalThis.window; else globalThis.window = prev.win;
     if (prevRaf === undefined) delete globalThis.requestAnimationFrame;
     else globalThis.requestAnimationFrame = prevRaf;
+    globalThis.setTimeout = prevTimers.set;
+    globalThis.clearTimeout = prevTimers.clear;
   }
   const t = (id) => (doc.nodes[id] ? doc.nodes[id].textContent : null);
   return {
@@ -282,50 +309,75 @@ const check = (name, got, want) => {
 //
 // Reported by the operator: the router rebooted, MikroDash reconnected on its
 // own, and the dialog sat on "Rebooting…" until it was closed by hand. It closes
-// on the upgraded router's first `connected: true` AFTER that router went down.
+// once the upgraded router has gone down and then STAYED connected for
+// BACK_FOR_MS (3s).
 const OK = { action: 'upgrade', routerId: 'r1', routerName: 'br-01', latest: '7.25' };
 const st = (routerId, connected) => ['router:status', { routerId, connected }];
+const wait = (ms) => ['wait', ms];
 {
-  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', false), st('r1', false), st('r1', true)] });
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', false), st('r1', false), st('r1', true), wait(3000)] });
   check('the router went down and came back', r, { open: false });
 }
 {
-  // BELIEVABILITY for the case above: the same frames without the return leave
+  // BACK, BUT NOT FOR LONG ENOUGH YET.
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', false), st('r1', true), wait(2999)] });
+  check('back for less than three seconds', r, { open: true });
+}
+{
+  // THE FLAP THE OPERATOR SAW ON A hAP AC2: the connection dropped as the
+  // install began, came back for a second or two while the router was still up,
+  // and then went down for the real reboot. That first return must not close it.
+  const flap = [['packages:ok', OK], st('r1', false), st('r1', true), wait(1500), st('r1', false)];
+  check('a brief return before the reboot', run(P({}), { frames: [...flap, wait(5000)] }), { open: true });
+  // ...and the timer the brief return started is CANCELLED, not merely outlived:
+  // the real return then needs its own full three seconds.
+  check('the real return, not yet three seconds',
+    run(P({}), { frames: [...flap, st('r1', true), wait(2999)] }), { open: true });
+  check('the real return, three seconds on',
+    run(P({}), { frames: [...flap, st('r1', true), wait(3000)] }), { open: false });
+}
+{
+  // BELIEVABILITY for the cases above: the same frames without the return leave
   // it open, so it is the return that closes it and not the `packages:ok`.
-  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', false)] });
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', false), wait(5000)] });
   check('down and not back yet', r, { open: true });
 }
 {
   // STILL UP IS NOT BACK. The router downloads the packages before it reboots
   // and stays connected while it does; a status frame in that window must not
   // close a dialog on a reboot that has not happened.
-  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', true)] });
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', true), wait(5000)] });
   check('connected before it went down', r, { open: true });
 }
 {
   // ANOTHER ROUTER'S RETURN IS NOT THIS ONE'S: `router:status` is fleet-wide.
-  const r = run(P({}), { frames: [['packages:ok', OK], st('r2', false), st('r2', true)] });
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r2', false), st('r2', true), wait(5000)] });
   check('a different router came back', r, { open: true });
 }
 {
   // THE CONNECTION DROPPED UNDER THE INSTALL. The server then replies
   // `rebooting: true`; the drop has already happened — and its frame may have
-  // arrived before this reply — so the next `connected: true` is the return.
+  // arrived before this reply — so the next return starts the window.
   const dropped = { action: 'upgrade', routerId: 'r1', routerName: 'br-01', rebooting: true };
-  const r = run(P({}), { frames: [['packages:ok', dropped], st('r1', true)] });
+  const r = run(P({}), { frames: [['packages:ok', dropped], st('r1', true), wait(3000)] });
   check('the connection dropped under the install', r, { open: false });
 }
 {
   // NOTHING ISSUED, NOTHING TO WAIT FOR. An idle dialog stays open whatever a
   // router does.
-  const r = run(P({}), { frames: [st('r1', false), st('r1', true)] });
+  const r = run(P({}), { frames: [st('r1', false), st('r1', true), wait(5000)] });
   check('no upgrade was issued', r, { open: true });
 }
 {
   // REOPENED DURING THE REBOOT is a fresh, idle dialog, and the old upgrade's
-  // return does not close it out from under the operator.
-  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', false), ['reopen'], st('r1', true)] });
-  check('reopened during the reboot', r, { open: true });
+  // return does not close it out from under the operator — whether the reopen
+  // comes before the return or inside its three seconds.
+  check('reopened during the reboot', run(P({}), {
+    frames: [['packages:ok', OK], st('r1', false), ['reopen'], st('r1', true), wait(5000)],
+  }), { open: true });
+  check('reopened inside the three seconds', run(P({}), {
+    frames: [['packages:ok', OK], st('r1', false), st('r1', true), wait(1000), ['reopen'], wait(5000)],
+  }), { open: true });
 }
 
 fs.rmSync(OUT, { force: true });

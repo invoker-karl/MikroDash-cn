@@ -136,6 +136,15 @@ export function notesAreForThisDialog(showing: string, replyVersion: unknown): b
   return replyVersion === showing;
 }
 
+/**
+ * How long the upgraded router must STAY connected before the dialog calls it
+ * back. Measured on a hAP AC2: the connection dropped as the install began,
+ * came back for a second or two while the router was still up, and only then
+ * went down for the real reboot. Closing on that first return closed the dialog
+ * before the reboot had happened.
+ */
+export const BACK_FOR_MS = 3000;
+
 export function initUpgrade(socket: Socket): void {
   let caps: HandEvents['packages:caps'] = { permitted: false, routerName: '' };
   let upd: UpdInfo = { installed: '', latest: '', channel: '' };
@@ -180,9 +189,14 @@ export function initUpgrade(socket: Socket): void {
   // The version the open dialog is about, and the test every reply must pass.
   let notesFor = '';
 
-  // The router the accepted upgrade went to, and whether it has been seen going
-  // down since. Null when no upgrade is in flight for this dialog.
-  let awaiting: { routerId: string; wentDown: boolean } | null = null;
+  // The router the accepted upgrade went to, whether it has been seen going
+  // down since, and the timer that closes the dialog once it has STAYED up.
+  // Null when no upgrade is in flight for this dialog.
+  let awaiting: { routerId: string; wentDown: boolean; timer: ReturnType<typeof setTimeout> | null } | null = null;
+  const stopWaiting = (): void => {
+    if (awaiting && awaiting.timer) clearTimeout(awaiting.timer);
+    awaiting = null;
+  };
 
   const setNotes = (text: string, muted: boolean): void => {
     const box = el('upd_notes');
@@ -229,7 +243,7 @@ export function initUpgrade(socket: Socket): void {
       if (err) err.style.display = 'none';
       // A FRESH DIALOG waits for nothing: an upgrade still rebooting from before
       // must not close this one when that router returns.
-      awaiting = null;
+      stopWaiting();
       apply('idle');
       el('updModal')?.classList.add('open');
       return;
@@ -268,7 +282,8 @@ export function initUpgrade(socket: Socket): void {
     //
     // `rebooting: true` is the server saying the connection dropped under the
     // install, so the router is already down.
-    awaiting = d.routerId ? { routerId: d.routerId, wentDown: !!d.rebooting } : null;
+    stopWaiting();
+    awaiting = d.routerId ? { routerId: d.routerId, wentDown: !!d.rebooting, timer: null } : null;
     apply('rebooting');
   });
 
@@ -277,18 +292,30 @@ export function initUpgrade(socket: Socket): void {
   // Reported by the operator: the router rebooted, MikroDash reconnected on its
   // own, and the dialog sat on "Rebooting…" until it was closed by hand.
   //
-  // It closes on the upgraded router's first `connected: true` AFTER that
-  // router has been seen down — not on the first `connected: true`, because the
-  // router downloads the packages before it reboots and stays connected while
-  // it does. By id, because `router:status` is sent fleet-wide.
+  // It closes once the upgraded router has been seen down AND has then stayed
+  // connected for BACK_FOR_MS:
+  //
+  //   - Not on a `connected: true` before any drop: the router downloads the
+  //     packages before it reboots and stays connected while it does.
+  //   - Not on the first return either: the connection can drop as the install
+  //     begins and come back for a moment before the real reboot (see
+  //     BACK_FOR_MS). A drop inside the window cancels it and the wait goes on.
+  //
+  // By id, because `router:status` is sent fleet-wide.
   socket.on('router:status', (d) => {
-    if (!awaiting || !d || d.routerId !== awaiting.routerId) return;
+    const w = awaiting;
+    if (!w || !d || d.routerId !== w.routerId) return;
     if (!d.connected) {
-      awaiting.wentDown = true;
+      w.wentDown = true;
+      if (w.timer) { clearTimeout(w.timer); w.timer = null; }
       return;
     }
-    if (!awaiting.wentDown) return;
-    awaiting = null;
-    el('updModal')?.classList.remove('open');
+    if (!w.wentDown || w.timer) return;
+    w.timer = setTimeout(() => {
+      // Only if nothing has replaced or stopped this wait since.
+      if (awaiting !== w) return;
+      awaiting = null;
+      el('updModal')?.classList.remove('open');
+    }, BACK_FOR_MS);
   });
 }
