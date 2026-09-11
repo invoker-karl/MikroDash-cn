@@ -139,9 +139,10 @@ func TestCollectorEdgesAreDeclared(t *testing.T) {
 
 // collectorEdges reads which collectors are handed to which at construction.
 //
-// A collector field is one assigned from a `collect.New*` call, so the set is
-// derived from the file rather than listed -- a new collector joins it by being
-// constructed, which is the only way one can exist.
+// A collector field is one assigned from a `collect.New*` call, or from the
+// session's own constructor for one (`s.newSystem`, which installs the identity
+// hook), so the set is derived from the file rather than listed -- a new
+// collector joins it by being constructed, which is the only way one can exist.
 //
 // THE STATEMENT'S EXTENT IS SCANNED, NOT GUESSED. A first attempt took
 // "everything up to the next assignment", which is wrong for the LAST collector
@@ -159,7 +160,7 @@ func TestCollectorEdgesAreDeclared(t *testing.T) {
 func collectorEdges(t *testing.T, src string) map[string]map[string]bool {
 	t.Helper()
 
-	ctor := regexp.MustCompile(`(?m)^\ts\.(\w+) = collect\.New\w+\(`)
+	ctor := regexp.MustCompile(`(?m)^\ts\.(\w+) = (?:collect\.New|s\.new)\w+\(`)
 	locs := ctor.FindAllStringSubmatchIndex(src, -1)
 	if len(locs) < 15 {
 		t.Fatalf("only %d collector constructions found in session.go; there are more than "+

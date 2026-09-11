@@ -106,6 +106,9 @@ type Session struct {
 	// built. Nil-safe: every method on it guards its own receiver, so an install
 	// with no history database simply records nothing.
 	history *historywire.Wire
+	// identity is the Manager's identity writer, bound to this router; nil when
+	// none is attached. Every System collector built by newSystem carries it.
+	identity collect.IdentityFunc
 	// connThreshMs is this router's outage debounce, from its own record. Zero
 	// is a real setting — record every close at once — so it is resolved through
 	// `historywire.ThresholdMs` at build time rather than defaulted here.
@@ -535,6 +538,10 @@ type Manager struct {
 	// by minute. The chart would not look broken; it would look plausible and be
 	// wrong, which is worse.
 	history *historywire.Wire
+
+	// onIdentity writes what a router reports about ITSELF onto its record.
+	// Nil until the server attaches it, and nil is inert. See SetOnIdentity.
+	onIdentity func(routerID string, id collect.Identity)
 }
 
 func NewManager(st *store.Store, h *hub.Hub) *Manager {
@@ -560,6 +567,46 @@ func (m *Manager) SetAlertSink(fn func(routerID, routerLabel string, fired []ale
 // SetHistoryWire installs the history recorder. Nil, or a wire built with
 // `enabled` false, records nothing.
 func (m *Manager) SetHistoryWire(w *historywire.Wire) { m.history = w }
+
+// SetOnIdentity attaches the writer for what a router reports about ITSELF:
+// model, serial, and the RouterOS version, which changes on every upgrade.
+//
+// ── THE SESSION REPORTS IT, BECAUSE NOTHING ELSE RUNS FOR A HELD ROUTER ─────
+//
+// The Devices pool used to be the only reporter, and the pool EXCLUDES every
+// router with a live session (`syncPool`). Since phase 4.3 held sessions keep
+// every enabled router live, so the pool ran no System collector for any of
+// them and the stored version froze: Settings → Devices showed one router on
+// `7.24` two upgrades later. A session runs a System collector wherever its
+// router is watched or held, and primes one for a warm hold, so it is the one
+// place that reaches every router.
+//
+// CALL IT BEFORE THE FIRST SESSION IS BUILT. A session takes the writer when it
+// is built (`identityFor`, in Acquire), and a held session is built by the
+// server's first fleet sync — a writer attached after that reaches none of them.
+func (m *Manager) SetOnIdentity(fn func(routerID string, id collect.Identity)) { m.onIdentity = fn }
+
+// identityFor binds the identity writer to one router, or returns nil.
+func (m *Manager) identityFor(routerID string) collect.IdentityFunc {
+	fn := m.onIdentity
+	if fn == nil {
+		return nil
+	}
+	return func(id collect.Identity) { fn(routerID, id) }
+}
+
+// newSystem builds a System collector that reports this router's identity.
+//
+// EVERY System collector a session builds comes through here — the running one
+// and the prime's throwaway — so none can be built without the hook. The prime
+// matters on its own: a WARM session runs no collectors, and its one prime tick
+// is the only reading it takes. TestEverySessionSystemCollectorIsBuiltWithTheIdentityHook
+// holds the rule.
+func (s *Session) newSystem(r collect.Reader, emit collect.Emit) *collect.System {
+	c := collect.NewSystem(r, emit, s.eff.Poll["system"])
+	c.SetOnIdentity(s.identity)
+	return c
+}
 
 // geoLookup is the country join both connections and bandwidth use.
 //
@@ -646,6 +693,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 		alertsEnabled: rec.AlertsEnabled,
 		h:             m.h,
 		history:       m.history,
+		identity:      m.identityFor(rec.ID),
 		connThreshMs:  historywire.ThresholdMs(connDownSecOf(rec)),
 		refs:          1,
 		holds:         map[string]bool{},
@@ -862,7 +910,7 @@ func (m *Manager) Acquire(routerID string) (*Session, error) {
 	// dashboard's gauges, and the dashboard is on screen whenever anyone is
 	// looking at the router at all. The idle gate in Manager.Release still stops
 	// it when the last viewer leaves.
-	s.system = collect.NewSystem(reader{s}, emit, s.eff.Poll["system"])
+	s.system = s.newSystem(reader{s}, emit)
 	// The only STREAMING collector: /log/listen pushes an entry as the router
 	// writes it. No poll interval, because there is nothing to poll.
 	s.logs = collect.NewLogs(reader{s}, emit)

@@ -415,6 +415,15 @@ func New(st *store.Store, opts Options) (*Server, error) {
 	// something forces a rebuild. Wiring it two hundred lines further down, next
 	// to the session manager's copy, is exactly that bug.
 	srv.historyWire = srv.buildHistoryWire(opts.History)
+	// ── AND THE IDENTITY WRITER, FOR THE SAME REASON ──────────────────────
+	//
+	// What each router says it is — the model, serial and version Settings →
+	// Devices shows — is written back through this. A session takes it when it
+	// is BUILT, so it must be attached before the sync below builds the held
+	// ones: attached forty lines later, beside the alert sink, every held router
+	// took nil and no version was ever written. See session.Manager.SetOnIdentity;
+	// TestTheSessionManagersIdentityWriterIsAttached holds the ordering.
+	srv.sessions.SetOnIdentity(srv.persistRouterIdentity)
 	// SYNCED AT STARTUP. `New` connects to nothing; `Sync` does. The overview
 	// pool can wait for `devicesFocus` because its rows are only wanted while
 	// that page is open — this one exists so a router nobody is watching is

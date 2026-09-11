@@ -4,8 +4,8 @@ package store
 //
 // ── WHY THE PORT NEEDED THIS ────────────────────────────────────────────────
 //
-// The background pool learns model, serial and osVersion from a router's first
-// `/system/resource` read and persists them; the Devices page renders `model`
+// A router's System collector — its session's, or the Devices pool's — reports
+// model, serial and osVersion, and they are persisted here; the Devices page renders `model`
 // and `osVersion` straight out of the record. Without this the pool would take a
 // nil identity hook and a router added through this app would show an empty
 // model column forever — while one imported from a Node-managed /data would

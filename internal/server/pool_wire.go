@@ -114,6 +114,13 @@ func dialForPool(cfg routeros.Config) (routers.Conn, error) {
 // This runs on a background collector's goroutine. A failure to persist what a
 // router said about itself must not take down the session that is otherwise
 // collecting fine — the identity will be offered again on the next poll.
+//
+// ── TWO CALLERS: EVERY SESSION, AND THE DEVICES POOL ────────────────────────
+//
+// A session's System collector reports here (session.Manager.SetOnIdentity),
+// and so does the pool's for a router no session holds. The pool alone was not
+// enough: it excludes every router with a live session, held sessions keep the
+// whole fleet live, and so it reported for nobody.
 func (s *Server) persistRouterIdentity(routerID string, id collect.Identity) {
 	if routerID == "" || s.store == nil {
 		return

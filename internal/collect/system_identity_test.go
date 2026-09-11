@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"mikrodash/internal/routeros"
 )
@@ -172,6 +173,13 @@ func TestIdentityIsReportedEvenWhenTheGaugesAreStill(t *testing.T) {
 	emits := 0
 	sys := NewSystem(stub, hub.NewRelay(func(_ string, _ hub.Named, _ any) { emits++ }), 1000)
 	sys.staticRead = true // see identityStub's header
+	// AND THE UPDATE CHECK IS NOT DUE. Since `preRead` learned to run it, the
+	// first Tick starts one on its own goroutine, and its answer lands in the
+	// payload's update fields — which ARE in the fingerprint. Whether it landed
+	// between the second and third tick was a race, and this test failed about one
+	// run in thirteen on it. The stub does not model the update menu, so the
+	// check has nothing to say here anyway.
+	sys.updateAt = time.Now()
 	var got []Identity
 	sys.SetOnIdentity(func(id Identity) { got = append(got, id) })
 
