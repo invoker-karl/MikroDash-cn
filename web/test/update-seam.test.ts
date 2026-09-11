@@ -128,6 +128,13 @@ function run(payload, o) {
         }
       }
     }
+    // ── WHAT THE SOCKET DELIVERS AFTER THE DIALOG IS OPEN, in order ─────
+    //
+    // `reopen` presses Update again, which is a fresh dialog.
+    for (const [ev, p] of opts.frames || []) {
+      if (ev === 'reopen') doc.dispatch('click', btn);
+      else if (handlers[ev]) handlers[ev](p);
+    }
   } finally {
     if (prev.doc === undefined) delete globalThis.document; else globalThis.document = prev.doc;
     if (prev.win === undefined) delete globalThis.window; else globalThis.window = prev.win;
@@ -269,6 +276,56 @@ const check = (name, got, want) => {
   if (r.error) {
     problems.push('a refusal was painted into a CLOSED dialog: ' + JSON.stringify(r.error));
   }
+}
+
+// ── THE ROUTER COMES BACK, AND THE DIALOG CLOSES ────────────────────────────
+//
+// Reported by the operator: the router rebooted, MikroDash reconnected on its
+// own, and the dialog sat on "Rebooting…" until it was closed by hand. It closes
+// on the upgraded router's first `connected: true` AFTER that router went down.
+const OK = { action: 'upgrade', routerId: 'r1', routerName: 'br-01', latest: '7.25' };
+const st = (routerId, connected) => ['router:status', { routerId, connected }];
+{
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', false), st('r1', false), st('r1', true)] });
+  check('the router went down and came back', r, { open: false });
+}
+{
+  // BELIEVABILITY for the case above: the same frames without the return leave
+  // it open, so it is the return that closes it and not the `packages:ok`.
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', false)] });
+  check('down and not back yet', r, { open: true });
+}
+{
+  // STILL UP IS NOT BACK. The router downloads the packages before it reboots
+  // and stays connected while it does; a status frame in that window must not
+  // close a dialog on a reboot that has not happened.
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', true)] });
+  check('connected before it went down', r, { open: true });
+}
+{
+  // ANOTHER ROUTER'S RETURN IS NOT THIS ONE'S: `router:status` is fleet-wide.
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r2', false), st('r2', true)] });
+  check('a different router came back', r, { open: true });
+}
+{
+  // THE CONNECTION DROPPED UNDER THE INSTALL. The server then replies
+  // `rebooting: true`; the drop has already happened — and its frame may have
+  // arrived before this reply — so the next `connected: true` is the return.
+  const dropped = { action: 'upgrade', routerId: 'r1', routerName: 'br-01', rebooting: true };
+  const r = run(P({}), { frames: [['packages:ok', dropped], st('r1', true)] });
+  check('the connection dropped under the install', r, { open: false });
+}
+{
+  // NOTHING ISSUED, NOTHING TO WAIT FOR. An idle dialog stays open whatever a
+  // router does.
+  const r = run(P({}), { frames: [st('r1', false), st('r1', true)] });
+  check('no upgrade was issued', r, { open: true });
+}
+{
+  // REOPENED DURING THE REBOOT is a fresh, idle dialog, and the old upgrade's
+  // return does not close it out from under the operator.
+  const r = run(P({}), { frames: [['packages:ok', OK], st('r1', false), ['reopen'], st('r1', true)] });
+  check('reopened during the reboot', r, { open: true });
 }
 
 fs.rmSync(OUT, { force: true });

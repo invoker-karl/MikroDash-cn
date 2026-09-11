@@ -303,7 +303,8 @@ func (cn *conn) packagesUpgrade(raw json.RawMessage) {
 		if _, werr := cn.rsession.Exec(routeros.Cmd{Path: "/system/package/update/install"}); werr != nil {
 			return werr
 		}
-		EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "upgrade", "routerName": name, "latest": latest})
+		// `routerId` is the router the dialog waits to see come back.
+		EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "upgrade", "routerName": name, "routerId": cn.routerID, "latest": latest})
 		return nil
 	})
 	if err != nil {
@@ -311,7 +312,7 @@ func (cn *conn) packagesUpgrade(raw json.RawMessage) {
 		// router is rebooting as it answers. Reporting it as an error would tell
 		// the operator the upgrade failed when it is in fact under way.
 		if code := rosWriteFail(err); code == "failed" {
-			EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "upgrade", "routerName": name, "rebooting": true})
+			EvPackagesOk.Send(cn.srv.hub, cn.c, map[string]any{"action": "upgrade", "routerName": name, "routerId": cn.routerID, "rebooting": true})
 		} else {
 			cn.pkgErr(code, map[string]any{"message": safe.Message(err.Error())})
 		}

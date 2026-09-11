@@ -115,7 +115,7 @@ export function updView(state: 'idle' | 'issuing' | 'rebooting'): UpdView {
     cancelText: 'Close',
     confirmHidden: true,
     pendingText: 'The router is downloading the packages and restarting. It will be unreachable '
-      + 'for a minute or two, and MikroDash reconnects on its own.',
+      + 'for a minute or two, and MikroDash reconnects on its own. This closes when it is back.',
     pendingHidden: false,
   };
 }
@@ -180,6 +180,10 @@ export function initUpgrade(socket: Socket): void {
   // The version the open dialog is about, and the test every reply must pass.
   let notesFor = '';
 
+  // The router the accepted upgrade went to, and whether it has been seen going
+  // down since. Null when no upgrade is in flight for this dialog.
+  let awaiting: { routerId: string; wentDown: boolean } | null = null;
+
   const setNotes = (text: string, muted: boolean): void => {
     const box = el('upd_notes');
     if (!box) return;
@@ -223,6 +227,9 @@ export function initUpgrade(socket: Socket): void {
       if (confirm) { confirm.value = ''; confirm.placeholder = caps.routerName || ''; }
       const err = el('upd_error');
       if (err) err.style.display = 'none';
+      // A FRESH DIALOG waits for nothing: an upgrade still rebooting from before
+      // must not close this one when that router returns.
+      awaiting = null;
       apply('idle');
       el('updModal')?.classList.add('open');
       return;
@@ -255,9 +262,33 @@ export function initUpgrade(socket: Socket): void {
 
   socket.on('packages:ok', (d) => {
     if (!d || d.action !== 'upgrade') return;
-    // DELIBERATELY NOT CLOSED. The command has been accepted and the router is
-    // about to disappear; closing on success would throw away the only moment
-    // we can say so. The operator closes it when they are ready.
+    // NOT CLOSED ON SUCCESS. The command has been accepted and the router is
+    // about to disappear; closing now would throw away the only moment we can
+    // say so. It closes when the router is back — see `router:status` below.
+    //
+    // `rebooting: true` is the server saying the connection dropped under the
+    // install, so the router is already down.
+    awaiting = d.routerId ? { routerId: d.routerId, wentDown: !!d.rebooting } : null;
     apply('rebooting');
+  });
+
+  // ── CLOSED WHEN THE ROUTER IS BACK ──────────────────────────────────────
+  //
+  // Reported by the operator: the router rebooted, MikroDash reconnected on its
+  // own, and the dialog sat on "Rebooting…" until it was closed by hand.
+  //
+  // It closes on the upgraded router's first `connected: true` AFTER that
+  // router has been seen down — not on the first `connected: true`, because the
+  // router downloads the packages before it reboots and stays connected while
+  // it does. By id, because `router:status` is sent fleet-wide.
+  socket.on('router:status', (d) => {
+    if (!awaiting || !d || d.routerId !== awaiting.routerId) return;
+    if (!d.connected) {
+      awaiting.wentDown = true;
+      return;
+    }
+    if (!awaiting.wentDown) return;
+    awaiting = null;
+    el('updModal')?.classList.remove('open');
   });
 }

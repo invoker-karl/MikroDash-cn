@@ -150,7 +150,9 @@ export interface HandEvents {
     installed?: string; latest?: string;
   };
   'packages:notes': { version: string; error: string } | { version: string; notes: string };
-  'packages:ok': { action: string; name?: string; routerName?: string; latest?: string; rebooting?: boolean };
+  // `routerId` is on the upgrade's replies only: the router it went to, which
+  // the dialog watches come back.
+  'packages:ok': { action: string; name?: string; routerName?: string; routerId?: string; latest?: string; rebooting?: boolean };
   'perms:changed': Nothing;
   // minRtt / maxRtt are added only once a ping has landed, and then may be
   // null — unlike PingPayload, where they are omitted when absent.
